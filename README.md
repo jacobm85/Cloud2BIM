@@ -1,16 +1,27 @@
-# Cloud2BIM 
+# Cloud2BIM
 ![Workflow](title.png)
 
-> **Note:** An advanced version of this software, **Cloud2BIM-AI**, is now available through **Constriq**, a ČVUT spin-off. It offers **higher robustness**, **lower computational time**, **more recognized elements**, and **continuous development**. Visit [constriq.tech](https://constriq.tech/) for more information.
+# Project Update & Advanced Version:
+> This repository contains the foundational open-source research version of the Cloud2BIM algorithm. An advanced, production-ready version of this software, **Cloud2BIM-AI**, is now available through **Constriq** (a Czech Technical University spin-off). 
+>
+> While the open-source script provides core functionality, **Cloud2BIM-AI** is actively developed for commercial and enterprise workflows, offering the following expanded capabilities:
+> * **Enhanced Element Recognition:** Advanced AI models capable of recognizing a wider variety of complex building elements with higher precision.
+> * **Increased Robustness:** Fully automated processing that eliminates the need for manual parameter tuning.
+> * **Optimized Performance:** Significantly reduced computational time for large-scale point cloud datasets.
+> * **Continuous Support & GUI:** A user-friendly interface with visual verification and ongoing technical development.
+>
+> For professional deployment and access to the advanced version, please visit: **[constriq.tech](https://constriq.tech/)**
 
-Cloud2BIM automates the Scan-to-BIM process by converting point clouds into 3D parametric entities.  It employs a segmentation algorithm that utilizes point cloud density analysis, augmented by image and morphological operations. This allows the software to precisely extract the geometry of building elements such as slabs, walls, windows, and doors. The output is generated in IFC format, ensuring compatibility with other OpenBIM tools. The primary motivation for this software is to streamline and enhance decision-making at the end of a building's lifecycle, leading to more efficient material use during demolition or deconstruction.
+---
 
-# Installation
+### Description
+Cloud2BIM automates the Scan-to-BIM process by converting point clouds into 3D parametric entities. It employs a segmentation algorithm that utilizes point cloud density analysis, augmented by image and morphological operations. This allows the software to precisely extract the geometry of building elements such as slabs, walls, windows, and doors.
+
+### Installation
 To install Cloud2BIM, follow these steps:
 git clone 
 
 https://github.com/VaclavNezerka/Cloud2BIM.git
-
 
 Install dependencies:
 
