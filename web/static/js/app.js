@@ -43,6 +43,36 @@ function goTo(n) {
 }
 window.goTo = goTo; // used by inline onclick in HTML
 
+// ── Reset state for new job ───────────────────────────────────────────────
+function resetJob() {
+  state.jobId = null;
+  state.jobStatus = null;
+  state.uploadId = null;
+  state.networkPath = null;
+
+  clearUploadError();
+  document.getElementById('upload-progress').classList.remove('visible');
+  document.getElementById('upload-fill').style.width = '0%';
+  document.getElementById('upload-name').textContent = '—';
+  document.getElementById('upload-label').textContent = '0 B';
+  document.getElementById('drop-zone').querySelector('strong').textContent = 'Dra och släpp din fil här';
+  document.getElementById('drop-zone').querySelector('p').textContent =
+    'eller klicka för att bläddra — stöd för .xyz, .e57, .las, .laz';
+  document.getElementById('btn-next-1').disabled = true;
+
+  document.getElementById('log-console').innerHTML =
+    '<div class="log-line" style="color:var(--text-dim)">Loggar visas här när processen startar…</div>';
+  document.getElementById('btn-run').disabled = false;
+  document.getElementById('btn-back-3').disabled = false;
+  setBadge('pending');
+
+  document.getElementById('btn-download').style.display = 'none';
+  const viewBtn = document.getElementById('btn-open-viewer');
+  if (viewBtn) viewBtn.style.display = 'none';
+  document.getElementById('result-stats').innerHTML = '';
+}
+window.newFile = function() { resetJob(); goTo(1); };
+
 // Stepper nav — allow going back to completed steps
 $$('.step').forEach(el => {
   el.addEventListener('click', () => {

@@ -209,11 +209,13 @@ def _convert_las_to_xyz(las_path: str, xyz_path: str, log_fn=None):
     if log_fn:
         log_fn(f"[INFO] {total:,} punkter lästa. Skriver XYZ …")
 
-    # Write in chunks so we can report progress
+    # Write in the tab-separated format with header that the pipeline expects
+    # (same format as e57_data_to_xyz: header "//X\tY\tZ", then tab-separated rows)
     chunk = 500_000
     with open(xyz_path, "w") as fh:
+        fh.write("//X\tY\tZ\n")
         for i in range(0, total, chunk):
-            np.savetxt(fh, pts[i : i + chunk], fmt="%.3f", delimiter=" ")
+            np.savetxt(fh, pts[i : i + chunk], fmt="%.3f", delimiter="\t", comments="")
             done = min(i + chunk, total)
             pct = int(done / total * 100)
             if log_fn:

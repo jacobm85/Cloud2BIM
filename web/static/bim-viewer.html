@@ -130,7 +130,11 @@ try {
 
 setStatus('Bygger 3D-scen…');
 
-const bbox = new THREE.Box3();
+// IFC uses Z-up; Three.js uses Y-up — rotate root group -90° around X
+const root = new THREE.Group();
+root.rotation.x = -Math.PI / 2;
+scene.add(root);
+
 let totalFaces = 0;
 
 data.objects.forEach(obj => {
@@ -155,12 +159,12 @@ data.objects.forEach(obj => {
   const mesh = new THREE.Mesh(geom, mat);
   mesh.castShadow = !isWindow;
   mesh.receiveShadow = true;
-  scene.add(mesh);
-  bbox.expandByObject(mesh);
+  root.add(mesh);
   totalFaces += obj.f.length / 3;
 });
 
-// Fit camera to model
+// Fit camera to model (compute bbox in world space after rotation)
+const bbox = new THREE.Box3().setFromObject(root);
 if (!bbox.isEmpty()) {
   const center = bbox.getCenter(new THREE.Vector3());
   const size   = bbox.getSize(new THREE.Vector3());
