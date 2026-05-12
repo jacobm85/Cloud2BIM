@@ -27,6 +27,7 @@ services:
       PYTHONUNBUFFERED: "1"
       # Prevents Open3D from trying to initialise a GPU/display in headless mode
       OPEN3D_CPU_RENDERING: "true"
+      MPLBACKEND: "Agg"
 
       # ── Network drives exposed in the web file browser ────────────────────
       # JSON array of {name, path} objects.

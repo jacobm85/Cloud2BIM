@@ -1,3 +1,7 @@
+import matplotlib
+matplotlib.use('Agg')                        # headless — no display needed
+matplotlib.rcParams['text.usetex'] = False   # no LaTeX required
+
 from aux_functions import *
 from generate_ifc import IFCmodel
 from space_generator import *
