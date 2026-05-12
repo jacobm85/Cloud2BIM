@@ -35,9 +35,6 @@
   </div>
 </div>
 
-<!-- web-ifc@0.0.44 UMD — sets window.WebIFC when script loads -->
-<script src="/static/bimviewer/libs/web-ifc/web-ifc-api.js"></script>
-
 <script type="module">
 const params = new URLSearchParams(location.search);
 const jobId  = params.get('job');
@@ -56,29 +53,26 @@ function showError(msg) {
 
 if (!jobId) { showError('Inget jobb-ID (?job=…)'); }
 
-// ── Wait for window.WebIFC set by the <script> tag above ─────────────────
+// ── Load web-ifc via dynamic import (it's an ES module) ──────────────────
 setStatus('Laddar web-ifc…');
-const WebIFC = await new Promise((resolve, reject) => {
-  let n = 0;
-  (function check() {
-    // web-ifc@0.0.44 sets window.WebIFC; accept as soon as the key exists
-    if (typeof window.WebIFC !== 'undefined') {
-      console.log('[viewer] window.WebIFC keys:', Object.keys(window.WebIFC).slice(0, 8));
-      return resolve(window.WebIFC);
-    }
-    if (++n > 80) {
-      // Debug: show what W* globals are defined
-      const wGlobals = Object.keys(window).filter(k => /^[A-Z]/.test(k)).slice(0, 20);
-      console.warn('[viewer] global keys (uppercase):', wGlobals);
-      return reject(new Error(
-        'window.WebIFC ej definierat efter 8 s. ' +
-        'Kontrollera att /static/bimviewer/libs/web-ifc/web-ifc-api.js laddas korrekt.'
-      ));
-    }
-    setTimeout(check, 100);
-  })();
-}).catch(e => { showError(e.message); return null; });
-if (!WebIFC) throw new Error('no WebIFC');
+let WebIFC;
+try {
+  const mod = await import('/static/bimviewer/libs/web-ifc/web-ifc-api.js');
+  console.log('[viewer] web-ifc total keys:', Object.keys(mod).length);
+  console.log('[viewer] web-ifc first 12 keys:', Object.keys(mod).slice(0, 12));
+  console.log('[viewer] has IfcAPI:', 'IfcAPI' in mod, typeof mod.IfcAPI);
+  console.log('[viewer] default type:', typeof mod.default);
+  console.log('[viewer] default.IfcAPI:', typeof mod.default?.IfcAPI);
+
+  // Resolve WebIFC object that has .IfcAPI on it
+  if (mod.IfcAPI)             WebIFC = mod;             // named export
+  else if (mod.default?.IfcAPI) WebIFC = mod.default;  // nested in default
+  else if (typeof mod.default === 'function') WebIFC = { IfcAPI: mod.default };
+  else { showError('IfcAPI inte hittad i web-ifc-api.js. Keys: ' + Object.keys(mod).slice(0, 8).join(', ')); throw new Error('no IfcAPI'); }
+} catch(e) {
+  if (!errEl.style.display || errEl.style.display === 'none') showError('web-ifc import: ' + e.message);
+  throw e;
+}
 
 // ── Load xeokit-sdk ───────────────────────────────────────────────────────
 setStatus('Laddar xeokit…');
