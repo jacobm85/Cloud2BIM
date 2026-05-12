@@ -40,7 +40,10 @@ export async function loadViewer(jobId) {
   // ── Load web-ifc as ES module ────────────────────────────────────────────
   let WebIFC;
   try {
-    WebIFC = await import(WEBIFC_API);
+    const mod = await import(WEBIFC_API);
+    // CJS modules imported dynamically expose exports under .default
+    WebIFC = mod.default || mod;
+    console.log('[viewer] WebIFC keys:', Object.keys(WebIFC).slice(0, 8));
   } catch (e) {
     console.error('web-ifc load failed:', e);
     showError('web-ifc: ' + (e.message || e));
