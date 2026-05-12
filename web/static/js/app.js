@@ -72,51 +72,100 @@ fileInput.addEventListener('change', () => {
   if (fileInput.files[0]) startUpload(fileInput.files[0]);
 });
 
+function showUploadError(msg) {
+  const el = $('#upload-error');
+  el.textContent = msg;
+  el.style.display = '';
+}
+function clearUploadError() {
+  const el = $('#upload-error');
+  el.textContent = '';
+  el.style.display = 'none';
+}
+
 async function startUpload(file) {
-  const initRes = await fetch('/api/upload/init', {
-    method: 'POST',
-    body: new URLSearchParams({ filename: file.name, total_size: file.size }),
-  });
-  const { upload_id } = await initRes.json();
-  state.uploadId = upload_id;
+  clearUploadError();
 
   const progressWrap = $('#upload-progress');
   progressWrap.classList.add('visible');
   const fill = $('#upload-fill');
   const label = $('#upload-label');
-  const nameEl = $('#upload-name');
-  nameEl.textContent = file.name;
+  $('#upload-name').textContent = file.name;
+  fill.style.width = '0%';
+  label.textContent = '0 B / ' + fmt_bytes(file.size);
 
-  let offset = 0;
-  while (offset < file.size) {
-    const chunk = file.slice(offset, offset + CHUNK_SIZE);
-    const fd = new FormData();
-    fd.append('offset', offset);
-    fd.append('chunk', chunk, file.name);
-
-    await fetch(`/api/upload/${upload_id}/chunk`, { method: 'POST', body: fd });
-    offset += CHUNK_SIZE;
-    const pct = Math.min(100, Math.round((offset / file.size) * 100));
-    fill.style.width = pct + '%';
-    label.textContent = `${fmt_bytes(Math.min(offset, file.size))} / ${fmt_bytes(file.size)}`;
+  // ── Init upload session ────────────────────────────────────────────────
+  let upload_id;
+  try {
+    const initRes = await fetch('/api/upload/init', {
+      method: 'POST',
+      body: new URLSearchParams({ filename: file.name, total_size: file.size }),
+    });
+    if (!initRes.ok) {
+      const text = await initRes.text();
+      throw new Error(`HTTP ${initRes.status}: ${text}`);
+    }
+    const data = await initRes.json();
+    if (!data.upload_id) throw new Error('Servern returnerade inget upload_id');
+    upload_id = data.upload_id;
+  } catch (err) {
+    console.error('[upload init]', err);
+    showUploadError('Kunde inte starta uppladdning: ' + err.message);
+    progressWrap.classList.remove('visible');
+    return;
   }
 
-  fill.style.width = '100%';
-  label.textContent = 'Upload complete';
-  dropZone.querySelector('strong').textContent = file.name;
-  dropZone.querySelector('p').textContent = fmt_bytes(file.size) + ' — ready';
+  state.uploadId = upload_id;
 
-  // Auto-detect e57
+  // ── Send chunks ────────────────────────────────────────────────────────
+  let offset = 0;
+  try {
+    while (offset < file.size) {
+      const chunk = file.slice(offset, offset + CHUNK_SIZE);
+      const fd = new FormData();
+      fd.append('offset', offset);
+      fd.append('chunk', chunk, file.name);
+
+      const chunkRes = await fetch(`/api/upload/${upload_id}/chunk`, { method: 'POST', body: fd });
+      if (!chunkRes.ok) {
+        const text = await chunkRes.text();
+        throw new Error(`Chunk vid offset ${offset} misslyckades — HTTP ${chunkRes.status}: ${text}`);
+      }
+      offset += CHUNK_SIZE;
+      const pct = Math.min(100, Math.round((offset / file.size) * 100));
+      fill.style.width = pct + '%';
+      label.textContent = `${fmt_bytes(Math.min(offset, file.size))} / ${fmt_bytes(file.size)}`;
+    }
+  } catch (err) {
+    console.error('[upload chunk]', err);
+    showUploadError('Uppladdning avbruten: ' + err.message);
+    state.uploadId = null;
+    return;
+  }
+
+  // ── Done ───────────────────────────────────────────────────────────────
+  fill.style.width = '100%';
+  label.textContent = 'Uppladdning klar ✓';
+  dropZone.querySelector('strong').textContent = file.name;
+  dropZone.querySelector('p').textContent = fmt_bytes(file.size) + ' — klar';
+
   if (file.name.toLowerCase().endsWith('.e57')) {
     $('#e57-input').checked = true;
   }
 
   $('#btn-next-1').disabled = false;
+  console.log('[upload] klar, upload_id =', upload_id);
 }
 
 $('#btn-next-1').addEventListener('click', () => {
-  if (state.sourceType === 'upload' && !state.uploadId) return;
-  if (state.sourceType === 'network' && !state.networkPath) return;
+  if (state.sourceType === 'upload' && !state.uploadId) {
+    showUploadError('Filen är inte uppladdad än. Vänta tills uppladdningen är klar.');
+    return;
+  }
+  if (state.sourceType === 'network' && !state.networkPath) {
+    showUploadError('Välj en fil från nätverksdisken.');
+    return;
+  }
   goTo(2);
 });
 
