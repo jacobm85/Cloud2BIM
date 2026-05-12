@@ -48,7 +48,14 @@ export async function loadViewer(jobId) {
   new DirLight(viewer.scene,     { dir: [-0.5, -0.8, -0.4], color: [1, 1, 0.95], intensity: 0.7, space: "world" });
   new DirLight(viewer.scene,     { dir: [0.5, 0.2, 0.8],    color: [0.8, 0.9, 1], intensity: 0.3, space: "world" });
 
+  // web-ifc-api.js is loaded as a plain <script> tag — access via window.WebIFC
+  const WebIFC = window.WebIFC;
+  if (!WebIFC) {
+    throw new Error("window.WebIFC ej tillgänglig — web-ifc-api.js laddades inte");
+  }
+
   const ifcLoader = new WebIFCLoaderPlugin(viewer, {
+    WebIFC,
     wasmPath: WEBIFC_WASM_PATH,
   });
 

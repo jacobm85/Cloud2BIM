@@ -27,9 +27,9 @@ RUN mkdir -p web/uploads web/jobs images/pdf images/wall_outputs_images
 RUN mkdir -p web/static/vendor && \
     curl -fsSL "https://cdn.jsdelivr.net/npm/@xeokit/xeokit-sdk/dist/xeokit-sdk.es.js" \
          -o web/static/vendor/xeokit-sdk.es.js && \
-    curl -fsSL "https://cdn.jsdelivr.net/npm/web-ifc@0.0.51/web-ifc-api.js" \
+    curl -fsSL "https://cdn.jsdelivr.net/npm/web-ifc@0.0.57/web-ifc-api.js" \
          -o web/static/vendor/web-ifc-api.js && \
-    curl -fsSL "https://cdn.jsdelivr.net/npm/web-ifc@0.0.51/web-ifc.wasm" \
+    curl -fsSL "https://cdn.jsdelivr.net/npm/web-ifc@0.0.57/web-ifc.wasm" \
          -o web/static/vendor/web-ifc.wasm
 
 EXPOSE 8000
