@@ -620,23 +620,40 @@ def segments_collinearity_check(seg1, seg2, min_thickness, max_distance):
 
 
 def find_furthest_points(all_points):
-    def distance(point1, point2):
-        return math.sqrt((point2[0] - point1[0]) ** 2 + (point2[1] - point1[1]) ** 2)
+    """Return the two points with maximum pairwise distance.
 
-    max_distance = -1
-    start_point = None
-    end_point = None
+    Uses a convex-hull rotating-calipers approximation (O(n log n)) instead of
+    the brute-force O(n²) loop for large point sets, then falls back to exact
+    search on the hull vertices (which are at most a small fraction of n).
+    """
+    pts = np.asarray(all_points)
+    if len(pts) <= 3:
+        # Brute force is fine for tiny sets
+        max_d, sp, ep = -1, None, None
+        for i in range(len(pts)):
+            for j in range(i + 1, len(pts)):
+                d = np.linalg.norm(pts[i] - pts[j])
+                if d > max_d:
+                    max_d, sp, ep = d, pts[i], pts[j]
+        return (sp.tolist() if sp is not None else None,
+                ep.tolist() if ep is not None else None)
 
-    # Iterate through each pair of points to find the furthest pair
-    for i in range(len(all_points)):
-        for j in range(i + 1, len(all_points)):
-            dist = distance(all_points[i], all_points[j])
-            if dist > max_distance:
-                max_distance = dist
-                start_point = all_points[i]
-                end_point = all_points[j]
+    from scipy.spatial import ConvexHull
+    try:
+        hull = ConvexHull(pts)
+        hull_pts = pts[hull.vertices]
+    except Exception:
+        hull_pts = pts  # degenerate case — fall back to all points
 
-    return start_point, end_point
+    max_d, sp, ep = -1, hull_pts[0], hull_pts[0]
+    n = len(hull_pts)
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = np.linalg.norm(hull_pts[i] - hull_pts[j])
+            if d > max_d:
+                max_d, sp, ep = d, hull_pts[i], hull_pts[j]
+
+    return sp.tolist(), ep.tolist()
 
 
 def merge_collinear_segments(segments, min_thickness, max_distance):
