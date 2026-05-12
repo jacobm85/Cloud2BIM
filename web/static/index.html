@@ -78,7 +78,7 @@
     </div>
 
     <div class="btn-row">
-      <button class="btn btn-primary" id="btn-next-1" disabled>
+      <button type="button" class="btn btn-primary" id="btn-next-1" disabled onclick="window.onNext1()">
         Nästa: Inställningar →
       </button>
     </div>
@@ -228,8 +228,8 @@
     </div>
 
     <div class="btn-row">
-      <button class="btn btn-outline" id="btn-back-2">← Tillbaka</button>
-      <button class="btn btn-primary" id="btn-next-2">Nästa: Kör pipeline →</button>
+      <button type="button" class="btn btn-outline" id="btn-back-2" onclick="window.goTo(1)">← Tillbaka</button>
+      <button type="button" class="btn btn-primary" id="btn-next-2" onclick="window.goTo(3)">Nästa: Kör pipeline →</button>
     </div>
   </div>
 
@@ -251,7 +251,7 @@
     </div>
 
     <div class="btn-row">
-      <button class="btn btn-outline" id="btn-back-3">← Tillbaka</button>
+      <button type="button" class="btn btn-outline" id="btn-back-3" onclick="window.goTo(2)">← Tillbaka</button>
       <button class="btn btn-primary btn-lg" id="btn-run">
         ▶&nbsp; Starta Cloud2BIM
       </button>
