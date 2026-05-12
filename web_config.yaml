@@ -1,0 +1,17 @@
+# Cloud2BIM Web Interface Configuration
+# Adjust these paths to match your environment.
+
+# Where uploaded files are stored temporarily
+upload_dir: web/uploads
+
+# Where job outputs (IFC files, logs) are stored
+jobs_dir: web/jobs
+
+# Network drives accessible from the server.
+# Add one entry per accessible location.
+# The browser will only allow navigation within these paths.
+network_drives:
+  # - name: "Projektfiler"
+  #   path: "\\\\server\\share\\pointclouds"
+  # - name: "Lokala testfiler"
+  #   path: "C:\\Users\\jacob_000\\PycharmProjects\\Cloud2BIM\\input_xyz"

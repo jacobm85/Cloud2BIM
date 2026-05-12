@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cloud2BIM — Scan to BIM</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<header>
+  <div class="logo">Cloud<span>2</span>BIM</div>
+  <div class="tagline">Automatisk Scan-to-BIM pipeline</div>
+</header>
+
+<main>
+
+  <!-- Stepper -->
+  <nav class="stepper">
+    <div class="step active" data-step="1">
+      <div class="num">1</div>
+      <span>Välj fil</span>
+    </div>
+    <div class="step" data-step="2">
+      <div class="num">2</div>
+      <span>Inställningar</span>
+    </div>
+    <div class="step" data-step="3">
+      <div class="num">3</div>
+      <span>Kör</span>
+    </div>
+    <div class="step" data-step="4">
+      <div class="num">4</div>
+      <span>Resultat</span>
+    </div>
+  </nav>
+
+  <!-- ── Step 1: Select file ────────────────────────────────────────────── -->
+  <div class="step-panel" id="step-1">
+    <div class="card">
+      <div class="card-title"><span class="icon">📂</span> Välj punktmolnsfil</div>
+
+      <!-- Tabs -->
+      <div class="upload-tabs">
+        <div class="upload-tab active" data-tab="upload">⬆ Ladda upp fil</div>
+        <div class="upload-tab" data-tab="network">🗂 Nätverksdisk</div>
+      </div>
+
+      <!-- Upload panel -->
+      <div id="upload-panel">
+        <div id="drop-zone" class="drop-zone">
+          <div class="drop-icon">📡</div>
+          <strong>Dra och släpp din fil här</strong>
+          <p>eller klicka för att bläddra — stöd för .xyz, .e57, .las, .laz</p>
+          <p style="margin-top:8px;font-size:11px;color:var(--text-dim)">Stora filer laddas upp i 10 MB-bitar</p>
+        </div>
+        <input type="file" id="file-input" accept=".xyz,.e57,.las,.laz">
+
+        <div class="progress-wrap" id="upload-progress">
+          <div class="progress-label">
+            <span id="upload-name">—</span>
+            <span id="upload-label">0 B</span>
+          </div>
+          <div class="progress-bar"><div class="progress-bar-fill" id="upload-fill"></div></div>
+        </div>
+      </div>
+
+      <!-- Network panel -->
+      <div id="network-panel" style="display:none">
+        <div class="alert alert-info">
+          ℹ️ Konfigurerade nätverksdiskar visas nedan. Välj en fil för att fortsätta.
+        </div>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-next-1" disabled>
+        Nästa: Inställningar →
+      </button>
+    </div>
+  </div>
+
+  <!-- ── Step 2: Configuration ──────────────────────────────────────────── -->
+  <div class="step-panel" id="step-2" style="display:none">
+    <div class="card">
+      <div class="card-title"><span class="icon">⚙️</span> Grundinställningar</div>
+
+      <div class="section-label">Filformat</div>
+      <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px">
+        <label class="toggle-group">
+          <span class="toggle"><input type="checkbox" id="e57-input"><span class="toggle-slider"></span></span>
+          E57-format (annars XYZ)
+        </label>
+        <label class="toggle-group">
+          <span class="toggle"><input type="checkbox" id="exterior-scan"><span class="toggle-slider"></span></span>
+          Exteriör skanning
+        </label>
+      </div>
+
+      <div class="section-label">Punktmoln</div>
+      <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px">
+        <label class="toggle-group">
+          <span class="toggle"><input type="checkbox" id="dilute"><span class="toggle-slider"></span></span>
+          Gleslägg punktmoln
+        </label>
+      </div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label for="pc-resolution">Punktmolnsupplösning (m)</label>
+          <input type="number" id="pc-resolution" value="0.002" step="0.001" min="0.001">
+        </div>
+        <div class="form-group">
+          <label for="dilution-factor">Glesläggningsfaktor (var n:te punkt)</label>
+          <input type="number" id="dilution-factor" value="10" min="2">
+        </div>
+        <div class="form-group">
+          <label for="grid-coefficient">Gridkoefficient</label>
+          <input type="number" id="grid-coefficient" value="5" min="1">
+        </div>
+        <div class="form-group">
+          <label for="material">Material</label>
+          <select id="material">
+            <option value="Concrete">Betong</option>
+            <option value="Brick">Tegel</option>
+            <option value="Wood">Trä</option>
+            <option value="Steel">Stål</option>
+            <option value="Unknown">Okänt</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Advanced: Wall & slab params -->
+      <div class="collapsible-header" id="adv-toggle">
+        Avancerade parametrar (väggar & bjälklag)
+        <span class="collapsible-arrow">▾</span>
+      </div>
+      <div class="collapsible-body" id="adv-body">
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="bfs-thickness">Golvbjälklag tjocklek (m)</label>
+            <input type="number" id="bfs-thickness" value="0.3" step="0.05" min="0.05">
+          </div>
+          <div class="form-group">
+            <label for="tfs-thickness">Takbjälklag tjocklek (m)</label>
+            <input type="number" id="tfs-thickness" value="0.4" step="0.05" min="0.05">
+          </div>
+          <div class="form-group">
+            <label for="min-wall-length">Min vägglängd (m)</label>
+            <input type="number" id="min-wall-length" value="0.10" step="0.05" min="0.05">
+          </div>
+          <div class="form-group">
+            <label for="min-wall-thickness">Min väggtjocklek (m)</label>
+            <input type="number" id="min-wall-thickness" value="0.05" step="0.01">
+          </div>
+          <div class="form-group">
+            <label for="max-wall-thickness">Max väggtjocklek (m)</label>
+            <input type="number" id="max-wall-thickness" value="0.75" step="0.05">
+          </div>
+          <div class="form-group">
+            <label for="ext-wall-thickness">Ytterväggar tjocklek (m)</label>
+            <input type="number" id="ext-wall-thickness" value="0.3" step="0.05">
+          </div>
+        </div>
+      </div>
+
+      <!-- IFC Metadata -->
+      <div class="collapsible-header" id="ifc-toggle">
+        IFC-metadata (projekt &amp; byggnad)
+        <span class="collapsible-arrow">▾</span>
+      </div>
+      <div class="collapsible-body" id="ifc-body">
+        <div class="section-label" style="margin-top:0">Projekt</div>
+        <div class="form-grid" style="margin-bottom:16px">
+          <div class="form-group">
+            <label>Projektnamn</label>
+            <input type="text" id="ifc-project-name" value="Cloud2BIM Project">
+          </div>
+          <div class="form-group">
+            <label>Långt projektnamn</label>
+            <input type="text" id="ifc-project-long-name" value="Scan to BIM">
+          </div>
+          <div class="form-group">
+            <label>Version</label>
+            <input type="text" id="ifc-project-version" value="1.0">
+          </div>
+        </div>
+
+        <div class="section-label">Författare</div>
+        <div class="form-grid" style="margin-bottom:16px">
+          <div class="form-group">
+            <label>Förnamn</label>
+            <input type="text" id="ifc-author-name">
+          </div>
+          <div class="form-group">
+            <label>Efternamn</label>
+            <input type="text" id="ifc-author-surname">
+          </div>
+          <div class="form-group">
+            <label>Organisation</label>
+            <input type="text" id="ifc-author-org">
+          </div>
+        </div>
+
+        <div class="section-label">Byggnad</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Byggnadsnamn</label>
+            <input type="text" id="ifc-building-name">
+          </div>
+          <div class="form-group">
+            <label>Byggnadstyp</label>
+            <input type="text" id="ifc-building-type" placeholder="t.ex. Office, Hotel…">
+          </div>
+          <div class="form-group">
+            <label>Fas</label>
+            <input type="text" id="ifc-building-phase" placeholder="t.ex. Reconstruction">
+          </div>
+          <div class="form-group">
+            <label>Höjd över havet (m)</label>
+            <input type="number" id="ifc-elevation" value="0.0" step="1">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-outline" id="btn-back-2">← Tillbaka</button>
+      <button class="btn btn-primary" id="btn-next-2">Nästa: Kör pipeline →</button>
+    </div>
+  </div>
+
+  <!-- ── Step 3: Run ────────────────────────────────────────────────────── -->
+  <div class="step-panel" id="step-3" style="display:none">
+    <div class="card">
+      <div class="card-title" style="justify-content:space-between">
+        <span><span class="icon">▶</span> Kör pipeline</span>
+        <span id="status-badge" class="status-badge pending">Väntar</span>
+      </div>
+
+      <div class="alert alert-info" style="margin-bottom:16px">
+        ℹ️ Processen kan ta flera minuter för stora filer. Stäng inte fönstret.
+      </div>
+
+      <div id="log-console" class="log-console">
+        <div class="log-line" style="color:var(--text-dim)">Loggar visas här när processen startar…</div>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-outline" id="btn-back-3">← Tillbaka</button>
+      <button class="btn btn-primary btn-lg" id="btn-run">
+        ▶&nbsp; Starta Cloud2BIM
+      </button>
+    </div>
+  </div>
+
+  <!-- ── Step 4: Results ────────────────────────────────────────────────── -->
+  <div class="step-panel" id="step-4" style="display:none">
+    <div class="card">
+      <div class="card-title"><span class="icon">✅</span> Resultat</div>
+
+      <div class="alert alert-success" style="margin-bottom:20px">
+        ✓ IFC-modellen är genererad och redo att laddas ned.
+      </div>
+
+      <div id="result-stats" class="result-summary">
+        <!-- populated by JS -->
+      </div>
+
+      <a id="btn-download" class="btn btn-success btn-lg" style="display:none;text-decoration:none" download>
+        ⬇&nbsp; Ladda ned IFC-fil
+      </a>
+    </div>
+
+    <!-- IFC Viewer -->
+    <div class="card" style="padding:0;overflow:hidden">
+      <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+        <div class="card-title" style="margin-bottom:0"><span class="icon">🏗</span> 3D-viewer</div>
+        <div style="font-size:11px;color:var(--text-dim)">Rotera: vänsterklick · Panorera: högerklick · Zooma: scroll</div>
+      </div>
+      <div id="viewer-container">
+        <canvas id="viewer-canvas"></canvas>
+        <div id="viewer-loading" class="viewer-loading">
+          <div class="spinner"></div>
+          <div>Laddar IFC-viewer…</div>
+        </div>
+        <div class="viewer-toolbar">
+          <button class="viewer-btn" id="btn-fit">⊙ Centrera</button>
+          <button class="viewer-btn" id="btn-section">✂ Sektionsplan</button>
+          <button class="viewer-btn" id="btn-reset-view">👁 Visa allt</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-outline" onclick="window.goTo(1)">+ Ny fil</button>
+    </div>
+  </div>
+
+</main>
+
+<script src="/static/js/app.js"></script>
+<script type="module">
+  import { loadViewer } from '/static/js/viewer.js';
+  window.loadViewer = loadViewer;
+</script>
+
+</body>
+</html>

@@ -1,0 +1,8 @@
+# Additional dependencies for the Cloud2BIM web interface
+# Install with:  pip install -r requirements-web.txt
+
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+aiofiles==24.1.0
+pydantic>=2.0

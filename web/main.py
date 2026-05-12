@@ -1,0 +1,323 @@
+"""
+Cloud2BIM Web Interface — FastAPI backend
+Run from project root:  uvicorn web.main:app --host 0.0.0.0 --port 8000
+"""
+
+import asyncio
+import json
+import os
+import threading
+import uuid
+from pathlib import Path
+from typing import AsyncGenerator, List, Optional
+
+import aiofiles
+import yaml
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+from web.job_manager import JobManager
+
+# ── Configuration ────────────────────────────────────────────────────────────
+
+_PROJECT_ROOT = Path(__file__).parent.parent
+_WEB_CONFIG_PATH = _PROJECT_ROOT / "web_config.yaml"
+
+if _WEB_CONFIG_PATH.exists():
+    with open(_WEB_CONFIG_PATH) as _f:
+        _web_cfg = yaml.safe_load(_f)
+else:
+    _web_cfg = {}
+
+UPLOAD_DIR = _PROJECT_ROOT / _web_cfg.get("upload_dir", "web/uploads")
+JOBS_DIR = _PROJECT_ROOT / _web_cfg.get("jobs_dir", "web/jobs")
+
+# NETWORK_DRIVES: env var (JSON) takes priority over web_config.yaml
+_env_drives = os.environ.get("NETWORK_DRIVES", "")
+if _env_drives:
+    try:
+        NETWORK_DRIVES: list = json.loads(_env_drives)
+    except json.JSONDecodeError:
+        NETWORK_DRIVES = []
+else:
+    NETWORK_DRIVES = _web_cfg.get("network_drives") or []
+
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── App ───────────────────────────────────────────────────────────────────────
+
+app = FastAPI(title="Cloud2BIM Web Interface", docs_url="/api/docs")
+job_manager = JobManager(JOBS_DIR)
+
+app.mount("/static", StaticFiles(directory=str(_PROJECT_ROOT / "web" / "static")), name="static")
+
+
+# ── Root ──────────────────────────────────────────────────────────────────────
+
+@app.get("/", include_in_schema=False)
+async def root():
+    return FileResponse(str(_PROJECT_ROOT / "web" / "static" / "index.html"))
+
+
+# ── Chunked upload ────────────────────────────────────────────────────────────
+
+@app.post("/api/upload/init")
+async def upload_init(filename: str = Form(...), total_size: int = Form(...)):
+    upload_id = str(uuid.uuid4())
+    upload_dir = UPLOAD_DIR / upload_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    meta = {"filename": filename, "total_size": total_size, "uploaded_bytes": 0, "status": "uploading"}
+    (upload_dir / "meta.json").write_text(json.dumps(meta))
+    return {"upload_id": upload_id}
+
+
+@app.post("/api/upload/{upload_id}/chunk")
+async def upload_chunk(
+    upload_id: str,
+    offset: int = Form(...),
+    chunk: UploadFile = File(...),
+):
+    meta_path = UPLOAD_DIR / upload_id / "meta.json"
+    if not meta_path.exists():
+        raise HTTPException(404, "Upload not found")
+
+    meta = json.loads(meta_path.read_text())
+    file_path = UPLOAD_DIR / upload_id / meta["filename"]
+    data = await chunk.read()
+
+    mode = "r+b" if file_path.exists() and offset > 0 else "wb"
+    async with aiofiles.open(file_path, mode) as fh:
+        if offset > 0:
+            await fh.seek(offset)
+        await fh.write(data)
+
+    meta["uploaded_bytes"] = offset + len(data)
+    if meta["uploaded_bytes"] >= meta["total_size"]:
+        meta["status"] = "complete"
+    meta_path.write_text(json.dumps(meta))
+
+    return {"uploaded_bytes": meta["uploaded_bytes"], "status": meta["status"]}
+
+
+@app.get("/api/upload/{upload_id}/status")
+async def upload_status(upload_id: str):
+    meta_path = UPLOAD_DIR / upload_id / "meta.json"
+    if not meta_path.exists():
+        raise HTTPException(404, "Upload not found")
+    return json.loads(meta_path.read_text())
+
+
+# ── Network drive browser ─────────────────────────────────────────────────────
+
+@app.get("/api/browse")
+async def browse(path: Optional[str] = None):
+    if path is None:
+        return {"drives": NETWORK_DRIVES, "items": []}
+
+    browse_path = Path(path)
+
+    # Security: only allow paths under configured drives
+    if NETWORK_DRIVES:
+        allowed = any(
+            str(browse_path).startswith(str(Path(d["path"])))
+            for d in NETWORK_DRIVES
+        )
+        if not allowed:
+            raise HTTPException(403, "Path not in allowed network drives")
+
+    if not browse_path.exists():
+        raise HTTPException(404, "Path not found")
+
+    SUPPORTED = {".xyz", ".e57", ".las", ".laz"}
+    items = []
+    try:
+        for entry in sorted(browse_path.iterdir()):
+            if entry.is_dir():
+                items.append({"name": entry.name, "type": "dir", "path": str(entry)})
+            elif entry.suffix.lower() in SUPPORTED:
+                items.append({
+                    "name": entry.name,
+                    "type": "file",
+                    "path": str(entry),
+                    "size": entry.stat().st_size,
+                })
+    except PermissionError:
+        raise HTTPException(403, "Permission denied")
+
+    return {"current": str(browse_path), "items": items}
+
+
+# ── Job management ────────────────────────────────────────────────────────────
+
+class CreateJobRequest(BaseModel):
+    # Input source (one required)
+    upload_id: Optional[str] = None
+    network_path: Optional[str] = None
+
+    # Input format
+    e57_input: bool = False
+    exterior_scan: bool = False
+
+    # Point cloud options
+    dilute: bool = False
+    dilution_factor: int = 10
+    pc_resolution: float = 0.002
+    grid_coefficient: int = 5
+
+    # Slab thicknesses
+    bfs_thickness: float = 0.3
+    tfs_thickness: float = 0.4
+
+    # Wall options
+    min_wall_length: float = 0.10
+    min_wall_thickness: float = 0.05
+    max_wall_thickness: float = 0.75
+    exterior_walls_thickness: float = 0.3
+
+    # IFC project metadata
+    ifc_project_name: str = "Cloud2BIM Project"
+    ifc_project_long_name: str = "Scan to BIM"
+    ifc_project_version: str = "1.0"
+    ifc_author_name: str = ""
+    ifc_author_surname: str = ""
+    ifc_author_organization: str = ""
+    ifc_building_name: str = ""
+    ifc_building_type: str = ""
+    ifc_building_phase: str = ""
+    ifc_site_latitude: List[int] = Field(default_factory=lambda: [0, 0, 0])
+    ifc_site_longitude: List[int] = Field(default_factory=lambda: [0, 0, 0])
+    ifc_site_elevation: float = 0.0
+    material_for_objects: str = "Concrete"
+
+
+@app.post("/api/jobs")
+async def create_job(request: CreateJobRequest):
+    if not request.upload_id and not request.network_path:
+        raise HTTPException(400, "Either upload_id or network_path is required")
+
+    # Resolve input file
+    if request.upload_id:
+        meta_path = UPLOAD_DIR / request.upload_id / "meta.json"
+        if not meta_path.exists():
+            raise HTTPException(404, "Upload not found")
+        meta = json.loads(meta_path.read_text())
+        if meta["status"] != "complete":
+            raise HTTPException(400, "Upload not complete yet")
+        input_path = str(UPLOAD_DIR / request.upload_id / meta["filename"])
+    else:
+        input_path = request.network_path
+        if not Path(input_path).exists():
+            raise HTTPException(404, f"File not found: {input_path}")
+
+    job_id = str(uuid.uuid4())
+    job_dir = JOBS_DIR / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    output_ifc = str(job_dir / "output.ifc")
+
+    config = {
+        "e57_input": request.e57_input,
+        "xyz_files": [] if request.e57_input else [input_path],
+        "e57_files": [input_path] if request.e57_input else [],
+        "exterior_scan": request.exterior_scan,
+        "dilute": request.dilute,
+        "dilution_factor": request.dilution_factor,
+        "pc_resolution": request.pc_resolution,
+        "grid_coefficient": request.grid_coefficient,
+        "bfs_thickness": request.bfs_thickness,
+        "tfs_thickness": request.tfs_thickness,
+        "min_wall_length": request.min_wall_length,
+        "min_wall_thickness": request.min_wall_thickness,
+        "max_wall_thickness": request.max_wall_thickness,
+        "exterior_walls_thickness": request.exterior_walls_thickness,
+        "output_ifc": output_ifc,
+        "ifc_project_name": request.ifc_project_name,
+        "ifc_project_long_name": request.ifc_project_long_name,
+        "ifc_project_version": request.ifc_project_version,
+        "ifc_author_name": request.ifc_author_name,
+        "ifc_author_surname": request.ifc_author_surname,
+        "ifc_author_organization": request.ifc_author_organization,
+        "ifc_building_name": request.ifc_building_name,
+        "ifc_building_type": request.ifc_building_type,
+        "ifc_building_phase": request.ifc_building_phase,
+        "ifc_site_latitude": list(request.ifc_site_latitude),
+        "ifc_site_longitude": list(request.ifc_site_longitude),
+        "ifc_site_elevation": request.ifc_site_elevation,
+        "material_for_objects": request.material_for_objects,
+    }
+
+    config_path = job_dir / "config.yaml"
+    with open(config_path, "w") as fh:
+        yaml.dump(config, fh, allow_unicode=True)
+
+    job_manager.create_job(job_id, input_path)
+
+    # Run pipeline in background thread (blocking subprocess)
+    thread = threading.Thread(
+        target=job_manager.run_job,
+        args=(job_id, str(config_path)),
+        daemon=True,
+    )
+    thread.start()
+
+    return {"job_id": job_id}
+
+
+@app.get("/api/jobs")
+async def list_jobs():
+    return job_manager.list_jobs()
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job(job_id: str):
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    return job
+
+
+@app.get("/api/jobs/{job_id}/logs")
+async def stream_logs(job_id: str):
+    """Server-Sent Events stream of log lines."""
+    if not job_manager.get_job(job_id):
+        raise HTTPException(404, "Job not found")
+
+    async def generate() -> AsyncGenerator[str, None]:
+        last_idx = 0
+        while True:
+            job = job_manager.get_job(job_id)
+            new_lines = job["log_lines"][last_idx:]
+            for line in new_lines:
+                yield f"data: {json.dumps({'line': line})}\n\n"
+            last_idx += len(new_lines)
+
+            if job["status"] in ("completed", "failed"):
+                yield f"data: {json.dumps({'done': True, 'status': job['status']})}\n\n"
+                break
+
+            await asyncio.sleep(0.4)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/jobs/{job_id}/download")
+async def download_ifc(job_id: str):
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if job["status"] != "completed":
+        raise HTTPException(409, "Job not completed")
+    ifc_path = JOBS_DIR / job_id / "output.ifc"
+    if not ifc_path.exists():
+        raise HTTPException(404, "Output file not found")
+    return FileResponse(
+        str(ifc_path),
+        media_type="application/octet-stream",
+        filename=f"cloud2bim_{job_id[:8]}.ifc",
+    )

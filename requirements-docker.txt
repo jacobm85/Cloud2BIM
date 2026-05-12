@@ -1,0 +1,43 @@
+# Python dependencies for the Docker image.
+# Notable differences from the Windows requirements.txt:
+#   - pywin32 excluded (Windows-only)
+#   - opencv-python-headless instead of opencv-python (no GUI needed)
+
+# Core scientific
+numpy==2.2.4
+scipy==1.15.2
+scikit-image==0.25.2
+pandas==2.2.3
+networkx==3.4.2
+shapely==2.0.7
+pyquaternion==0.9.9
+
+# Point cloud & IFC
+open3d==0.19.0
+opencv-python-headless==4.11.0.86
+ifcopenshell==0.8.1.post1
+pye57==0.4.16
+
+# Visualisation (non-interactive, used for floor plan plots)
+matplotlib==3.10.1
+plotly==6.0.1
+pillow==11.1.0
+imageio==2.37.0
+tifffile==2025.3.13
+contourpy==1.3.1
+
+# Utilities
+PyYAML==6.0.2
+tqdm==4.67.1
+ConfigArgParse==1.7
+python-dateutil==2.9.0.post0
+retrying==1.3.4
+tenacity==8.4.1
+requests==2.32.3
+
+# Web interface
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+aiofiles==24.1.0
+pydantic>=2.0

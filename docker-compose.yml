@@ -1,0 +1,42 @@
+services:
+  cloud2bim:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cloud2bim:latest
+    container_name: cloud2bim
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persistent storage for uploaded files and job outputs (IFC results)
+      - cloud2bim_uploads:/app/web/uploads
+      - cloud2bim_jobs:/app/web/jobs
+
+      # ── Network drives ────────────────────────────────────────────────────
+      # Mount a NAS share or local path that contains point cloud files.
+      # Add one entry per accessible location, then reference the container
+      # path in the NETWORK_DRIVES environment variable below.
+      #
+      # Example — NAS share already mounted on the Docker host:
+      # - /mnt/nas/pointclouds:/data/pointclouds:ro
+      #
+      # Example — local directory on the host:
+      # - /home/jacob/pointclouds:/data/pointclouds:ro
+
+    environment:
+      PYTHONUNBUFFERED: "1"
+      # Prevents Open3D from trying to initialise a GPU/display in headless mode
+      OPEN3D_CPU_RENDERING: "true"
+
+      # ── Network drives exposed in the web file browser ────────────────────
+      # JSON array of {name, path} objects.
+      # Each "path" must match a container path from the volumes section above.
+      # Uncomment and adjust when you have volume mounts configured:
+      #
+      # NETWORK_DRIVES: '[{"name":"Projektfiler","path":"/data/pointclouds"}]'
+
+    restart: unless-stopped
+
+volumes:
+  cloud2bim_uploads:
+  cloud2bim_jobs:

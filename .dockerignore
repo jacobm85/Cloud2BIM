@@ -1,0 +1,28 @@
+.git
+.idea
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Large data files — mount these as Docker volumes instead
+input_e57/*
+input_xyz/*
+output_IFC/*
+output_xyz/*
+*.e57
+*.xyz
+*.las
+*.laz
+*.ifc
+
+# Runtime directories written by the server
+web/uploads/*
+web/jobs/*
+!web/uploads/.gitignore
+!web/jobs/.gitignore
+
+# Generated plots
+images/pdf/*
+images/wall_outputs_images/*
+log.txt
