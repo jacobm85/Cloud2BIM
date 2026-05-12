@@ -80,6 +80,9 @@ for xyz_filename in xyz_filenames:
 points_xyz = np.round(points_xyz, 3)  # round the xyz coordinates to 3 decimals
 last_time = log('All point cloud data imported.', last_time, log_filename)
 
+if len(points_xyz) == 0:
+    sys.exit("[ERROR] Point cloud is empty after import. Check the input file.")
+
 # SECTION: Segment Slabs and Split the Point Cloud to Storeys
 print("-" * 50)
 print("Slab segmentation")
@@ -96,6 +99,11 @@ print("Wall segmentation")
 print("-" * 50)
 
 # merge_horizontal_pointclouds_in_storey(horizontal_surface_planes)
+if len(slabs) < 2:
+    print("[WARNING] Fewer than 2 slabs detected (%d). "
+          "Wall segmentation requires at least a floor and a ceiling slab. "
+          "Try lowering bfs_thickness/tfs_thickness or check scan Z-coverage." % len(slabs))
+
 point_cloud_storeys = split_pointcloud_to_storeys(points_xyz, slabs)
 # display_cross_section_plot(point_cloud_storeys, slabs)
 walls, all_openings, zones = [], [], []

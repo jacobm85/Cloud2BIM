@@ -12,12 +12,38 @@ import pandas as pd
 from scipy.signal import find_peaks
 from skimage.morphology import closing, footprint_rectangle
 import open3d as o3d
+from matplotlib.patches import Polygon as _MplPolygon
 try:
     import e57 as _e57_module
 except ImportError:
     _e57_module = None
 from tqdm import tqdm
 from plotting_functions import *
+
+
+# ── PCA helpers for non-axis-aligned buildings ────────────────────────────
+
+def _pca_dominant_angle(points_2d):
+    """Return the dominant orientation angle of a 2D point set (radians).
+    Normalised to [-pi/4, pi/4] so only corrections up to 45° are applied."""
+    if len(points_2d) < 10:
+        return 0.0
+    cov = np.cov(np.asarray(points_2d).T)
+    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+    dominant = eigenvectors[:, np.argmax(eigenvalues)]
+    angle = np.arctan2(dominant[1], dominant[0])
+    # Normalise: only need to correct up to 45°
+    angle = angle % (np.pi / 2)
+    if angle > np.pi / 4:
+        angle -= np.pi / 2
+    return angle
+
+
+def _rotate_pts_2d(pts, angle):
+    """Rotate an (N,2) array by angle (radians). Returns new (N,2) array."""
+    c, s = np.cos(angle), np.sin(angle)
+    R = np.array([[c, -s], [s, c]])
+    return (R @ np.asarray(pts).T).T
 
 
 def load_config_and_variables():
@@ -276,7 +302,15 @@ def create_hull_from_histogram(points_3d, pointcloud_resolution, grid_coefficien
 
 def identify_slabs(points_xyz, points_rgb, bottom_floor_slab_thickness, top_floor_ceiling_thickness,
                    z_step, pc_resolution, plot_segmented_plane=True):
-    z_min, z_max = min(points_xyz[:, 2]), max(points_xyz[:, 2])
+    if points_xyz is None or len(points_xyz) == 0:
+        print("[WARNING] identify_slabs: empty point cloud — returning no slabs.")
+        return [], []
+
+    z_min, z_max = float(points_xyz[:, 2].min()), float(points_xyz[:, 2].max())
+    if z_max - z_min < z_step:
+        print("[WARNING] identify_slabs: Z-range (%.3f m) smaller than z_step — returning no slabs." % (z_max - z_min))
+        return [], []
+
     n_steps = int((z_max - z_min) / z_step + 1)
     z_array, n_points_array = [], []
     for i in tqdm(range(n_steps), desc="Progress searching for horiz_surface candidate z-coordinates"):
@@ -284,7 +318,9 @@ def identify_slabs(points_xyz, points_rgb, bottom_floor_slab_thickness, top_floo
         idx_selected_xyz = np.where((z < points_xyz[:, 2]) & (points_xyz[:, 2] < (z + z_step)))[0]
         z_array.append(z)
         n_points_array.append(len(idx_selected_xyz))
-    max_n_points_array = 0.6 * max(n_points_array)
+    # Threshold at 40% of peak density (was 60%) — detects ceiling even when
+    # it has lower point density than the floor (common in interior scans).
+    max_n_points_array = 0.4 * max(n_points_array) if max(n_points_array) > 0 else 1
 
     # plot_point_cloud_data(points_xyz, n_points_array, z_array, max_n_points_array, z_step)
 
@@ -907,7 +943,30 @@ def identify_walls(pointcloud, pointcloud_resolution, minimum_wall_length, minim
 
     # Filter points based on z-coordinate limits
     filtered_indices = [i for i, z in enumerate(z_coords) if z_min <= z <= z_max]
+    if not filtered_indices:
+        print("[WARNING] identify_walls: no points in z-range [%.2f, %.2f]." % (z_min, z_max))
+        return [], [], [], [], [], []
+
     points_2d = np.array([(x_coords[i], y_coords[i]) for i in filtered_indices])
+    x_coords_arr = np.array(x_coords)
+    y_coords_arr = np.array(y_coords)
+
+    # ── PCA rotation for non-axis-aligned buildings ───────────────────────
+    # Rotate 2D points so dominant wall orientation aligns with X/Y axes.
+    # Applied only when the dominant angle is > 3°.
+    _pca_angle = _pca_dominant_angle(points_2d)
+    _do_rotate = abs(_pca_angle) > np.radians(3)
+    if _do_rotate:
+        print("[INFO] identify_walls: applying PCA rotation %.1f°" % np.degrees(_pca_angle))
+        points_2d         = _rotate_pts_2d(points_2d,       -_pca_angle)
+        xy_all            = _rotate_pts_2d(np.column_stack([x_coords_arr, y_coords_arr]), -_pca_angle)
+        x_coords_arr      = xy_all[:, 0]
+        y_coords_arr      = xy_all[:, 1]
+        x_coords          = x_coords_arr
+        y_coords          = y_coords_arr
+        if slab_polygon is not None:
+            poly_xy_rot   = _rotate_pts_2d(slab_polygon.get_xy(), -_pca_angle)
+            slab_polygon  = _MplPolygon(poly_xy_rot, fill=None, edgecolor='gray')
 
     # Compute 2D histogram from the 2D point cloud
     print("Computing 2D histogram from the 2D point cloud")
@@ -1046,6 +1105,13 @@ def identify_walls(pointcloud, pointcloud_resolution, minimum_wall_length, minim
         translated_wall = [(x - min_x, y - min_y, z - min_z) for x, y, z in wall_group]
         translated_filtered_rotated_wall_groups.append(translated_wall)
         # plot_wall(translated_wall, wall_thicknesses[idx], idx+1)
+
+    # Inverse-rotate wall axis endpoints back to the original coordinate system
+    if _do_rotate:
+        sp_arr = _rotate_pts_2d(np.array(list(start_points)), _pca_angle)
+        ep_arr = _rotate_pts_2d(np.array(list(end_points)),   _pca_angle)
+        start_points = tuple(map(tuple, sp_arr))
+        end_points   = tuple(map(tuple, ep_arr))
 
     return (start_points, end_points, wall_thicknesses, wall_materials, translated_filtered_rotated_wall_groups,
             wall_labels)
@@ -1290,16 +1356,23 @@ def identify_openings(wall_number, wall_points, wall_label, resolution, grid_rou
                             (inner_threshold <= y <= (y1 + thickness_for_extraction / 2) or
                              (y2 - thickness_for_extraction / 2) <= y <= outer_threshold)]
 
+        if not projected_points:
+            return valid_opening_widths, valid_opening_heights, valid_opening_types
+
         # Project all points onto the x-coordinate
         x_coords, z_coords = zip(*projected_points)
 
         # Create a histogram with bins of size equal to point_cloud_resolution
         x_min, x_max = min(x_coords), max(x_coords)
         bins = int((x_max - x_min) / (resolution * grid_roughness))
+        if bins < 2:
+            return valid_opening_widths, valid_opening_heights, valid_opening_types
         hist, edges = np.histogram(x_coords, bins=bins, range=(x_min, x_max))
 
         z_min, z_max = min(z_coords), max(z_coords)
         z_bins = int((z_max - z_min) / (resolution * grid_roughness))
+        if z_bins < 2:
+            return valid_opening_widths, valid_opening_heights, valid_opening_types
 
         # Define a threshold to decide if a bin contains an opening or not
         if len(hist) > 10:
