@@ -9,7 +9,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender1 \
     libgl1 \
     curl \
-    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -24,18 +23,16 @@ COPY . .
 # Pre-create directories the pipeline writes to at runtime
 RUN mkdir -p web/uploads web/jobs images/pdf images/wall_outputs_images
 
-# ── Download xeokit-bim-viewer (includes its own tested web-ifc) ──────────
-# The full viewer package solves web-ifc version compatibility issues because
-# it ships its own libs/web-ifc/ at a version it was tested against.
-RUN curl -fsSL \
-    "https://github.com/xeokit/xeokit-bim-viewer/archive/refs/heads/master.zip" \
-    -o /tmp/bimviewer.zip && \
-    unzip -q /tmp/bimviewer.zip -d /tmp && \
-    mkdir -p web/static/bimviewer && \
-    cp -r /tmp/xeokit-bim-viewer-master/dist   web/static/bimviewer/dist && \
-    cp -r /tmp/xeokit-bim-viewer-master/src    web/static/bimviewer/src && \
-    cp -r /tmp/xeokit-bim-viewer-master/libs   web/static/bimviewer/libs && \
-    rm -rf /tmp/bimviewer.zip /tmp/xeokit-bim-viewer-master
+# ── IFC viewer assets (downloaded from npm via jsDelivr) ─────────────────
+# web-ifc@0.0.44: UMD bundle that sets window.WebIFC when loaded as <script>
+# xeokit-sdk: ES module IFC viewer library, tested with web-ifc@0.0.44
+RUN mkdir -p web/static/bimviewer/libs/web-ifc web/static/bimviewer/dist && \
+    curl -fsSL "https://cdn.jsdelivr.net/npm/web-ifc@0.0.44/web-ifc-api.js" \
+         -o web/static/bimviewer/libs/web-ifc/web-ifc-api.js && \
+    curl -fsSL "https://cdn.jsdelivr.net/npm/web-ifc@0.0.44/web-ifc.wasm" \
+         -o web/static/bimviewer/libs/web-ifc/web-ifc.wasm && \
+    curl -fsSL "https://cdn.jsdelivr.net/npm/@xeokit/xeokit-sdk/dist/xeokit-sdk.es.js" \
+         -o web/static/bimviewer/dist/xeokit-sdk.es.js
 
 EXPOSE 8000
 
