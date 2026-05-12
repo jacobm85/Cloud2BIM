@@ -335,12 +335,17 @@ function parseStats(lines) {
   const s = { walls: 0, slabs: 0, windows: 0, doors: 0, storeys: 0 };
   lines.forEach(line => {
     let m;
-    if ((m = line.match(/(\d+)\s+slab/i))) s.slabs = +m[1];
-    if ((m = line.match(/Wall\s+(\d+)/i))) s.walls = Math.max(s.walls, +m[1]);
-    if ((m = line.match(/W(\d+)/))) s.windows = Math.max(s.windows, +m[1]);
-    if ((m = line.match(/D(\d+)/))) s.doors = Math.max(s.doors, +m[1]);
+    // "Creating hull for slab no. 2 of 3" → slabs = 3
+    if ((m = line.match(/slab no\.\s*\d+\s+of\s+(\d+)/i)))
+      s.slabs = Math.max(s.slabs, +m[1]);
+    // "Wall 5:" — one line printed per wall
+    if ((m = line.match(/^\s*Wall\s+(\d+)\s*:/)))
+      s.walls = Math.max(s.walls, +m[1]);
+    // "Opening (window):" and "Opening (door):" — one per opening
+    if (/^\s*Opening\s*\(window\)/i.test(line)) s.windows++;
+    if (/^\s*Opening\s*\(door\)/i.test(line)) s.doors++;
   });
-  if (s.slabs > 0) s.storeys = s.slabs - 1;
+  s.storeys = s.slabs > 1 ? s.slabs - 1 : Math.min(s.slabs, 1);
   return s;
 }
 

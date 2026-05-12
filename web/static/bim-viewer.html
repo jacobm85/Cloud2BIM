@@ -56,17 +56,25 @@ function showError(msg) {
 
 if (!jobId) { showError('Inget jobb-ID (?job=…)'); }
 
-// ── Wait for window.WebIFC (set synchronously by the script tag above,
-//    but WASM init may be async — poll until IfcAPI is instantiable) ──────
-setStatus('Laddar web-ifc WASM…');
+// ── Wait for window.WebIFC set by the <script> tag above ─────────────────
+setStatus('Laddar web-ifc…');
 const WebIFC = await new Promise((resolve, reject) => {
   let n = 0;
   (function check() {
-    const wif = window.WebIFC;
-    if (wif && wif.IfcAPI) {
-      try { new wif.IfcAPI(); return resolve(wif); } catch (_) {}
+    // web-ifc@0.0.44 sets window.WebIFC; accept as soon as the key exists
+    if (typeof window.WebIFC !== 'undefined') {
+      console.log('[viewer] window.WebIFC keys:', Object.keys(window.WebIFC).slice(0, 8));
+      return resolve(window.WebIFC);
     }
-    if (++n > 150) return reject(new Error('WebIFC WASM initierades ej (timeout 15 s)'));
+    if (++n > 80) {
+      // Debug: show what W* globals are defined
+      const wGlobals = Object.keys(window).filter(k => /^[A-Z]/.test(k)).slice(0, 20);
+      console.warn('[viewer] global keys (uppercase):', wGlobals);
+      return reject(new Error(
+        'window.WebIFC ej definierat efter 8 s. ' +
+        'Kontrollera att /static/bimviewer/libs/web-ifc/web-ifc-api.js laddas korrekt.'
+      ));
+    }
     setTimeout(check, 100);
   })();
 }).catch(e => { showError(e.message); return null; });
