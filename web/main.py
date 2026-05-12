@@ -355,6 +355,70 @@ async def stream_logs(job_id: str):
     )
 
 
+def _generate_geometry_json(ifc_path: str, json_path: str):
+    """Extract triangulated mesh geometry from IFC using ifcopenshell."""
+    import ifcopenshell
+    import ifcopenshell.geom
+    import json as _json
+
+    COLORS = {
+        'IfcWall': [0.5, 0.65, 0.8], 'IfcWallStandardCase': [0.5, 0.65, 0.8],
+        'IfcSlab': [0.55, 0.55, 0.62],
+        'IfcWindow': [0.55, 0.82, 1.0],
+        'IfcDoor': [0.78, 0.62, 0.5],
+        'IfcColumn': [0.6, 0.6, 0.92], 'IfcBeam': [0.3, 0.72, 0.3],
+        'IfcStair': [0.9, 0.42, 0.32], 'IfcStairFlight': [0.9, 0.42, 0.32],
+        'IfcSpace': [0.92, 0.92, 0.72],
+    }
+    DEFAULT_COLOR = [0.65, 0.65, 0.65]
+
+    ifc = ifcopenshell.open(ifc_path)
+    settings = ifcopenshell.geom.settings()
+    settings.set(settings.USE_WORLD_COORDS, True)
+
+    objects = []
+    it = ifcopenshell.geom.iterator(settings, ifc)
+    if it.initialize():
+        while True:
+            try:
+                shape = it.get()
+                geo = shape.geometry
+                v = list(geo.verts)
+                f = list(geo.faces)
+                if v and f:
+                    t = shape.type
+                    objects.append({
+                        't': t,
+                        'n': (shape.name or '')[:64],
+                        'v': [round(x, 3) for x in v],
+                        'f': f,
+                        'c': COLORS.get(t, DEFAULT_COLOR),
+                    })
+            except Exception:
+                pass
+            if not it.next():
+                break
+
+    with open(json_path, 'w') as fh:
+        _json.dump({'objects': objects}, fh, separators=(',', ':'))
+
+
+@app.get("/api/jobs/{job_id}/geometry")
+async def get_geometry(job_id: str):
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if job["status"] != "completed":
+        raise HTTPException(409, "Job not completed")
+    ifc_path = JOBS_DIR / job_id / "output.ifc"
+    if not ifc_path.exists():
+        raise HTTPException(404, "IFC not found")
+    geo_path = JOBS_DIR / job_id / "geometry.json"
+    if not geo_path.exists():
+        await asyncio.to_thread(_generate_geometry_json, str(ifc_path), str(geo_path))
+    return FileResponse(str(geo_path), media_type="application/json")
+
+
 @app.get("/api/jobs/{job_id}/preview")
 async def get_preview(job_id: str):
     job = job_manager.get_job(job_id)

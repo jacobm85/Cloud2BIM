@@ -3,143 +3,186 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Cloud2BIM — IFC Viewer</title>
+  <title>Cloud2BIM — 3D Viewer</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #0f1117; color: #e2e4f0; font-family: system-ui, sans-serif; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
-    header { padding: 10px 16px; background: #1a1d27; border-bottom: 1px solid #2e3350; display: flex; align-items: center; gap: 10px; font-size: 13px; flex-shrink: 0; }
+    body { background: #0f1117; color: #e2e4f0; font-family: system-ui, sans-serif;
+           height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+    header { padding: 10px 16px; background: #1a1d27; border-bottom: 1px solid #2e3350;
+             display: flex; align-items: center; gap: 12px; font-size: 13px; flex-shrink: 0; }
     header strong { color: #4f8ef7; }
-    #canvas-wrap { flex: 1; position: relative; }
-    #myCanvas { width: 100%; height: 100%; display: block; }
-    #overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; background: #0f1117; color: #7b82a0; font-size: 13px; transition: opacity 0.3s; }
-    #overlay.hidden { opacity: 0; pointer-events: none; }
-    .spinner { width: 32px; height: 32px; border: 3px solid #2e3350; border-top-color: #4f8ef7; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    #wrap { flex: 1; position: relative; }
+    canvas { width: 100% !important; height: 100% !important; display: block; }
+    #overlay { position: absolute; inset: 0; display: flex; flex-direction: column;
+               align-items: center; justify-content: center; gap: 12px;
+               background: #0f1117; color: #7b82a0; font-size: 13px; }
+    .spinner { width: 32px; height: 32px; border: 3px solid #2e3350;
+               border-top-color: #4f8ef7; border-radius: 50%;
+               animation: spin .8s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
-    #status { font-size: 12px; color: #4f8ef7; }
-    #err { display: none; color: #e84855; text-align: center; padding: 16px; max-width: 400px; font-size: 12px; }
+    #legend { position: absolute; top: 12px; right: 12px; background: rgba(26,29,39,.88);
+              border: 1px solid #2e3350; border-radius: 8px; padding: 10px 14px;
+              font-size: 11px; display: flex; flex-direction: column; gap: 5px; backdrop-filter: blur(4px); }
+    .leg { display: flex; align-items: center; gap: 7px; }
+    .dot { width: 11px; height: 11px; border-radius: 3px; flex-shrink: 0; }
+    #stats { position: absolute; bottom: 12px; left: 12px; font-size: 11px;
+             color: #4f5580; }
   </style>
 </head>
 <body>
 
 <header>
-  <strong>Cloud2BIM</strong> IFC Viewer
-  <span id="hdr-status" style="color:#7b82a0;font-size:12px"></span>
+  <strong>Cloud2BIM</strong>
+  <span id="hdr">3D Viewer — extraherar geometri…</span>
 </header>
 
-<div id="canvas-wrap">
-  <canvas id="myCanvas"></canvas>
-  <div id="overlay">
-    <div class="spinner"></div>
-    <div id="status">Initierar web-ifc…</div>
-    <div id="err"></div>
+<div id="wrap">
+  <canvas id="c"></canvas>
+  <div id="overlay"><div class="spinner"></div><div id="status">Laddar…</div></div>
+  <div id="legend" style="display:none">
+    <div class="leg"><div class="dot" style="background:#7fa8cc"></div>Vägg</div>
+    <div class="leg"><div class="dot" style="background:#8c8c9e"></div>Bjälklag</div>
+    <div class="leg"><div class="dot" style="background:#8dd3ff"></div>Fönster</div>
+    <div class="leg"><div class="dot" style="background:#c79e80"></div>Dörr</div>
+    <div class="leg"><div class="dot" style="background:#a6a6a6"></div>Övrigt</div>
   </div>
+  <div id="stats"></div>
 </div>
 
 <script type="module">
-const params = new URLSearchParams(location.search);
-const jobId  = params.get('job');
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js';
+import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.163.0/examples/jsm/controls/OrbitControls.js';
 
-const overlay  = document.getElementById('overlay');
-const statusEl = document.getElementById('status');
-const errEl    = document.getElementById('err');
-const hdrEl    = document.getElementById('hdr-status');
+const params  = new URLSearchParams(location.search);
+const jobId   = params.get('job');
+const overlay = document.getElementById('overlay');
+const status  = document.getElementById('status');
+const wrap    = document.getElementById('wrap');
 
-function setStatus(msg) { statusEl.textContent = msg; }
+function setStatus(msg) { status.textContent = msg; }
 function showError(msg) {
-  errEl.style.display = 'block';
-  errEl.textContent   = '⚠ ' + msg;
-  statusEl.textContent = '';
+  overlay.innerHTML = `<div style="color:#e84855;text-align:center;padding:24px;max-width:400px">
+    <div style="font-size:22px;margin-bottom:8px">⚠️</div><div>${msg}</div></div>`;
 }
 
-if (!jobId) { showError('Inget jobb-ID (?job=…)'); }
+if (!jobId) { showError('Inget jobb-ID (?job=…)'); throw new Error(); }
 
-// ── Load web-ifc via dynamic import (it's an ES module) ──────────────────
-setStatus('Laddar web-ifc…');
-let WebIFC;
+// ── Three.js setup ─────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('c'), antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0f1117);
+scene.fog = new THREE.FogExp2(0x0f1117, 0.008);
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 5000);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.screenSpacePanning = false;
+
+function resize() {
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+resize();
+new ResizeObserver(resize).observe(wrap);
+
+// Lights
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const sun = new THREE.DirectionalLight(0xfff8ee, 1.1);
+sun.position.set(-15, 30, 20);
+sun.castShadow = true;
+scene.add(sun);
+const fill = new THREE.DirectionalLight(0x8899dd, 0.35);
+fill.position.set(10, -5, -15);
+scene.add(fill);
+scene.add(new THREE.HemisphereLight(0x4466aa, 0x224422, 0.3));
+
+// Grid helper
+const grid = new THREE.GridHelper(200, 40, 0x2e3350, 0x1f2236);
+scene.add(grid);
+
+// ── Load geometry from backend ─────────────────────────────────────────────
+setStatus('Extraherar IFC-geometri på servern… (kan ta 10-30 s)');
+
+let data;
 try {
-  const mod = await import('/static/bimviewer/libs/web-ifc/web-ifc-api.js');
-  console.log('[viewer] web-ifc total keys:', Object.keys(mod).length);
-  console.log('[viewer] web-ifc first 12 keys:', Object.keys(mod).slice(0, 12));
-  console.log('[viewer] has IfcAPI:', 'IfcAPI' in mod, typeof mod.IfcAPI);
-  console.log('[viewer] default type:', typeof mod.default);
-  console.log('[viewer] default.IfcAPI:', typeof mod.default?.IfcAPI);
-
-  if (!mod.IfcAPI) {
-    showError('IfcAPI saknas i web-ifc-api.js. Keys: ' + Object.keys(mod).slice(0, 8).join(', '));
-    throw new Error('no IfcAPI');
-  }
-  // Wrap in a plain object — xeokit's property check fails on ES module namespaces
-  WebIFC = { IfcAPI: mod.IfcAPI };
-  console.log('[viewer] WebIFC.IfcAPI:', typeof WebIFC.IfcAPI);
+  const res = await fetch(`/api/jobs/${jobId}/geometry`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  data = await res.json();
 } catch(e) {
-  if (!errEl.style.display || errEl.style.display === 'none') showError('web-ifc import: ' + e.message);
+  showError('Kunde inte ladda geometri: ' + e.message);
   throw e;
 }
 
-// ── Load xeokit-sdk ───────────────────────────────────────────────────────
-setStatus('Laddar xeokit…');
-let xeokit;
-try {
-  xeokit = await import('/static/bimviewer/dist/xeokit-sdk.es.js');
-} catch(e) { showError('xeokit: ' + e.message); throw e; }
+setStatus('Bygger 3D-scen…');
 
-const { Viewer, WebIFCLoaderPlugin, AmbientLight, DirLight } = xeokit;
+const bbox = new THREE.Box3();
+let totalFaces = 0;
 
-// Debug: see what IFC-related names xeokit actually exports
-const ifcExports = Object.keys(xeokit).filter(k => /ifc/i.test(k));
-console.log('[viewer] xeokit IFC exports:', ifcExports);
-console.log('[viewer] WebIFCLoaderPlugin type:', typeof WebIFCLoaderPlugin);
+data.objects.forEach(obj => {
+  if (!obj.v.length || !obj.f.length) return;
 
-// ── Create viewer ─────────────────────────────────────────────────────────
-const viewer = new Viewer({ canvasId: 'myCanvas', transparent: true });
-viewer.camera.eye  = [10, 10, 10];
-viewer.camera.look = [0, 0, 0];
-viewer.camera.up   = [0, 1, 0];
-new AmbientLight(viewer.scene, { color: [1,1,1], intensity: 0.4 });
-new DirLight(viewer.scene, { dir: [-0.5,-0.8,-0.4], color: [1,1,0.95], intensity: 0.7, space: 'world' });
-new DirLight(viewer.scene, { dir: [0.5,0.2,0.8],   color: [0.8,0.9,1], intensity: 0.3, space: 'world' });
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(obj.v, 3));
+  geom.setIndex(obj.f);
+  geom.computeVertexNormals();
 
-// ── Create IFC loader — try three variants ────────────────────────────────
-let ifcLoader;
-const WASM = '/static/bimviewer/libs/web-ifc/';
-const attempts = [
-  // 1. Plain object wrapper (current approach)
-  () => new WebIFCLoaderPlugin(viewer, { WebIFC, wasmPath: WASM }),
-  // 2. Full module namespace directly
-  () => new WebIFCLoaderPlugin(viewer, { WebIFC: (async()=>await import('/static/bimviewer/libs/web-ifc/web-ifc-api.js'))(), wasmPath: WASM }),
-  // 3. No WebIFC — use xeokit's internal asm.js
-  () => new WebIFCLoaderPlugin(viewer, { wasmPath: WASM }),
-];
+  const [r, g, b] = obj.c;
+  const isWindow = obj.t === 'IfcWindow';
+  const mat = new THREE.MeshPhongMaterial({
+    color: new THREE.Color(r, g, b),
+    side: THREE.DoubleSide,
+    shininess: isWindow ? 120 : 25,
+    transparent: isWindow,
+    opacity: isWindow ? 0.55 : 1.0,
+    specular: isWindow ? new THREE.Color(0.6, 0.6, 0.6) : new THREE.Color(0.05, 0.05, 0.05),
+  });
 
-for (let i = 0; i < attempts.length; i++) {
-  try {
-    ifcLoader = await attempts[i]();
-    console.log('[viewer] Loader OK with attempt', i + 1);
-    break;
-  } catch(e) {
-    console.warn(`[viewer] Attempt ${i+1} failed:`, e);
-    if (i === attempts.length - 1) {
-      showError('WebIFCLoaderPlugin (alla försök misslyckades): ' + (e.message || e));
-      throw e;
-    }
-  }
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.castShadow = !isWindow;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+  bbox.expandByObject(mesh);
+  totalFaces += obj.f.length / 3;
+});
+
+// Fit camera to model
+if (!bbox.isEmpty()) {
+  const center = bbox.getCenter(new THREE.Vector3());
+  const size   = bbox.getSize(new THREE.Vector3());
+  const maxDim = Math.max(size.x, size.y, size.z);
+  const dist   = maxDim * 1.8;
+
+  camera.position.set(center.x + dist * 0.6, center.y + dist * 0.5, center.z + dist);
+  camera.near = dist * 0.001;
+  camera.far  = dist * 10;
+  camera.updateProjectionMatrix();
+  controls.target.copy(center);
+  controls.update();
+
+  grid.position.y = bbox.min.y;
 }
 
-// ── Load model ────────────────────────────────────────────────────────────
-setStatus('Laddar IFC-modell…');
-const model = ifcLoader.load({
-  id: 'model',
-  src: '/api/jobs/' + jobId + '/download',
-  edges: true,
-});
+// Stats
+document.getElementById('stats').textContent =
+  `${data.objects.length} objekt · ${totalFaces.toLocaleString()} trianglar`;
+document.getElementById('legend').style.display = 'flex';
+document.getElementById('hdr').textContent = '3D Viewer — ' + data.objects.length + ' objekt';
 
-model.on('loaded', () => {
-  overlay.classList.add('hidden');
-  viewer.cameraFlight.flyTo(model);
-  hdrEl.textContent = '— modell laddad';
-});
+// Hide overlay
+overlay.style.display = 'none';
 
-model.on('error', err => showError('IFC: ' + err));
+// Render loop
+(function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+})();
 </script>
 </body>
 </html>
