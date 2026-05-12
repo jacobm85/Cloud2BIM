@@ -12,7 +12,10 @@ import pandas as pd
 from scipy.signal import find_peaks
 from skimage.morphology import closing, footprint_rectangle
 import open3d as o3d
-import e57
+try:
+    import e57 as _e57_module
+except ImportError:
+    _e57_module = None
 from tqdm import tqdm
 from plotting_functions import *
 
@@ -105,8 +108,12 @@ def log(message, last_time, filename):
 
 
 def read_e57(file_name):
-    # read the documentation at https://github.com/davidcaron/pye57
-    e57_array = e57.read_points(file_name)
+    if _e57_module is None:
+        raise ImportError(
+            "Python package 'e57' is not installed. "
+            "Add 'e57' to requirements and rebuild the Docker image."
+        )
+    e57_array = _e57_module.read_points(file_name)
     return e57_array
 
 

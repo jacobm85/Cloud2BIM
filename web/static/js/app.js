@@ -152,7 +152,7 @@ async function startUpload(file) {
   label.textContent = 'Uppladdning klar ✓';
   dropZone.querySelector('strong').textContent = file.name;
   dropZone.querySelector('p').textContent = fmt_bytes(file.size) + ' — klar';
-  if (file.name.toLowerCase().endsWith('.e57')) document.getElementById('e57-input').checked = true;
+  // Format auto-detected on backend — no manual toggle needed
 
   document.getElementById('btn-next-1').disabled = false;
   console.log('[upload] KLAR — state.uploadId =', state.uploadId);
@@ -358,7 +358,8 @@ function collectConfig() {
   return {
     upload_id: state.sourceType === 'upload' ? state.uploadId : null,
     network_path: state.sourceType === 'network' ? state.networkPath : null,
-    e57_input: b('e57-input'), exterior_scan: b('exterior-scan'),
+    e57_input: false,  // auto-detected on backend from file extension
+    exterior_scan: b('exterior-scan'),
     dilute: b('dilute'), dilution_factor: parseInt(v('dilution-factor')) || 10,
     pc_resolution: n('pc-resolution'), grid_coefficient: parseInt(v('grid-coefficient')) || 5,
     bfs_thickness: n('bfs-thickness'), tfs_thickness: n('tfs-thickness'),

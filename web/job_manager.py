@@ -37,11 +37,16 @@ class JobManager:
                 for j in self._jobs.values()
             ]
 
-    def run_job(self, job_id: str, config_path: str):
+    def run_job(self, job_id: str, config_path: str, preprocess_fn=None):
         """Blocking — run in a daemon thread."""
         project_root = Path(__file__).parent.parent
         self._set_status(job_id, "running")
         try:
+            if preprocess_fn is not None:
+                self._append_log(job_id, "[INFO] Förbereder fil...")
+                preprocess_fn(lambda msg: self._append_log(job_id, msg))
+                self._append_log(job_id, "[INFO] Filkonvertering klar.")
+
             process = subprocess.Popen(
                 [sys.executable, "cloud2entities.py", config_path],
                 stdout=subprocess.PIPE,

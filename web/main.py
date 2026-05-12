@@ -193,6 +193,25 @@ class CreateJobRequest(BaseModel):
     material_for_objects: str = "Concrete"
 
 
+def _convert_las_to_xyz(las_path: str, xyz_path: str, log_fn=None):
+    """Convert .las/.laz to ASCII .xyz using laspy."""
+    try:
+        import laspy
+        import numpy as np
+    except ImportError:
+        raise ImportError("laspy is not installed. Cannot process .las/.laz files.")
+
+    if log_fn:
+        log_fn(f"[INFO] Läser {Path(las_path).name} …")
+    las = laspy.read(las_path)
+    pts = np.column_stack([np.asarray(las.x), np.asarray(las.y), np.asarray(las.z)])
+    if log_fn:
+        log_fn(f"[INFO] {len(pts):,} punkter lästa. Skriver XYZ …")
+    np.savetxt(xyz_path, pts, fmt="%.3f", delimiter=" ")
+    if log_fn:
+        log_fn(f"[INFO] XYZ sparat: {Path(xyz_path).name}")
+
+
 @app.post("/api/jobs")
 async def create_job(request: CreateJobRequest):
     if not request.upload_id and not request.network_path:
@@ -217,10 +236,30 @@ async def create_job(request: CreateJobRequest):
     job_dir.mkdir(parents=True, exist_ok=True)
     output_ifc = str(job_dir / "output.ifc")
 
+    # ── Auto-detect format from file extension ────────────────────────────
+    suffix = Path(input_path).suffix.lower()
+    preprocess_fn = None
+
+    if suffix == ".e57":
+        e57_input = True
+        pipeline_input = input_path
+    elif suffix in (".las", ".laz"):
+        e57_input = False
+        xyz_converted = str(job_dir / "converted_input.xyz")
+        pipeline_input = xyz_converted
+        _las_src = input_path
+        _xyz_dst = xyz_converted
+        def preprocess_fn(log_fn):  # noqa: E731
+            _convert_las_to_xyz(_las_src, _xyz_dst, log_fn)
+    else:
+        # .xyz or any other ASCII format
+        e57_input = False
+        pipeline_input = input_path
+
     config = {
-        "e57_input": request.e57_input,
-        "xyz_files": [] if request.e57_input else [input_path],
-        "e57_files": [input_path] if request.e57_input else [],
+        "e57_input": e57_input,
+        "xyz_files": [] if e57_input else [pipeline_input],
+        "e57_files": [pipeline_input] if e57_input else [],
         "exterior_scan": request.exterior_scan,
         "dilute": request.dilute,
         "dilution_factor": request.dilution_factor,
@@ -254,10 +293,9 @@ async def create_job(request: CreateJobRequest):
 
     job_manager.create_job(job_id, input_path)
 
-    # Run pipeline in background thread (blocking subprocess)
     thread = threading.Thread(
         target=job_manager.run_job,
-        args=(job_id, str(config_path)),
+        args=(job_id, str(config_path), preprocess_fn),
         daemon=True,
     )
     thread.start()
