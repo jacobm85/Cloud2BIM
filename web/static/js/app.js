@@ -324,6 +324,8 @@ async function setupResults() {
   const dlBtn = document.getElementById('btn-download');
   dlBtn.href = '/api/jobs/' + state.jobId + '/download';
   dlBtn.style.display = 'inline-flex';
+  const viewBtn = document.getElementById('btn-open-viewer');
+  if (viewBtn) viewBtn.style.display = 'inline-flex';
   const job = await fetch('/api/jobs/' + state.jobId).then(r => r.json());
   renderStats(parseStats(job.log_lines || []));
   if (typeof window.loadViewer === 'function') window.loadViewer(state.jobId);

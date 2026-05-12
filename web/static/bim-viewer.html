@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cloud2BIM — IFC Viewer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0f1117; color: #e2e4f0; font-family: system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; }
+    header { padding: 10px 16px; background: #1a1d27; border-bottom: 1px solid #2e3350; display: flex; align-items: center; gap: 10px; font-size: 13px; }
+    header strong { color: #4f8ef7; }
+    #canvas-wrap { flex: 1; position: relative; }
+    #myCanvas { width: 100%; height: 100%; display: block; }
+    #loading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; background: #0f1117; color: #7b82a0; font-size: 13px; }
+    .spinner { width: 32px; height: 32px; border: 3px solid #2e3350; border-top-color: #4f8ef7; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #error { display: none; position: absolute; inset: 0; align-items: center; justify-content: center; flex-direction: column; gap: 10px; background: #0f1117; color: #e84855; text-align: center; padding: 24px; font-size: 13px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <strong>Cloud2BIM</strong> IFC Viewer
+  <span id="model-name" style="color:#7b82a0"></span>
+</header>
+
+<div id="canvas-wrap">
+  <canvas id="myCanvas"></canvas>
+  <div id="loading"><div class="spinner"></div><div>Laddar IFC-modell…</div></div>
+  <div id="error"></div>
+</div>
+
+<!-- web-ifc bundled by xeokit-bim-viewer (tested, compatible version) -->
+<script src="/static/bimviewer/libs/web-ifc/web-ifc-api.js"></script>
+
+<script type="module">
+import { Viewer, WebIFCLoaderPlugin, AmbientLight, DirLight }
+    from "/static/bimviewer/dist/xeokit-bim-viewer.es.js";
+
+const params  = new URLSearchParams(location.search);
+const jobId   = params.get('job');
+const loading = document.getElementById('loading');
+const errBox  = document.getElementById('error');
+
+function showError(msg) {
+  loading.style.display = 'none';
+  errBox.style.display  = 'flex';
+  errBox.innerHTML = `<div>⚠️ ${msg}</div><div style="color:#7b82a0;margin-top:6px">Ladda ned IFC-filen och öppna i BIMvision eller Revit.</div>`;
+}
+
+if (!jobId) { showError('Inget jobb-ID i URL (?job=…)'); throw new Error(); }
+
+// Wait for WebIFC global set by the script tag above
+const WebIFC = await new Promise((resolve, reject) => {
+  let n = 0;
+  (function check() {
+    if (window.WebIFC?.IfcAPI) return resolve(window.WebIFC);
+    if (++n > 100) return reject(new Error('WebIFC ej initierat'));
+    setTimeout(check, 100);
+  })();
+}).catch(e => { showError(e.message); return null; });
+if (!WebIFC) throw new Error('no WebIFC');
+
+const viewer = new Viewer({ canvasId: 'myCanvas', transparent: true });
+new AmbientLight(viewer.scene, { color: [1,1,1], intensity: 0.4 });
+new DirLight(viewer.scene, { dir: [-0.5,-0.8,-0.4], color: [1,1,0.95], intensity: 0.7, space: 'world' });
+new DirLight(viewer.scene, { dir: [0.5,0.2,0.8],   color: [0.8,0.9,1], intensity: 0.3, space: 'world' });
+
+viewer.camera.eye  = [10, 10, 10];
+viewer.camera.look = [0, 0, 0];
+viewer.camera.up   = [0, 1, 0];
+
+let ifcLoader;
+try {
+  ifcLoader = new WebIFCLoaderPlugin(viewer, {
+    WebIFC,
+    wasmPath: '/static/bimviewer/libs/web-ifc/',
+  });
+} catch(e) {
+  showError('WebIFCLoaderPlugin: ' + e.message);
+  throw e;
+}
+
+const model = ifcLoader.load({
+  id: 'model',
+  src: `/api/jobs/${jobId}/download`,
+  edges: true,
+});
+
+model.on('loaded', () => {
+  loading.style.display = 'none';
+  viewer.cameraFlight.flyTo(model);
+  document.getElementById('model-name').textContent = '— modell laddad';
+});
+
+model.on('error', err => showError('IFC-fel: ' + err));
+</script>
+</body>
+</html>

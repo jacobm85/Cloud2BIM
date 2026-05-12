@@ -270,9 +270,14 @@
         <!-- populated by JS -->
       </div>
 
-      <a id="btn-download" class="btn btn-success btn-lg" style="display:none;text-decoration:none" download>
-        ⬇&nbsp; Ladda ned IFC-fil
-      </a>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">
+        <a id="btn-download" class="btn btn-success btn-lg" style="display:none;text-decoration:none" download>
+          ⬇&nbsp; Ladda ned IFC-fil
+        </a>
+        <button type="button" id="btn-open-viewer" class="btn btn-primary btn-lg" style="display:none" onclick="window.open('/static/bim-viewer.html?job='+window._state.jobId,'_blank')">
+          🏗&nbsp; Öppna 3D-viewer
+        </button>
+      </div>
     </div>
 
     <!-- Floor plan preview -->

@@ -12,7 +12,7 @@ export async function loadViewer(jobId) {
 
   // Poll up to 30 s for the preview PNG (pipeline generates it last)
   for (let i = 0; i < 30; i++) {
-    const res = await fetch(url, { method: 'HEAD' });
+    const res = await fetch(url, { method: 'GET' });
     if (res.ok) {
       img.src = url + '?t=' + Date.now();  // cache-bust
       img.style.display = 'block';
