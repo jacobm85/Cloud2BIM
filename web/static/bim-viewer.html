@@ -64,11 +64,13 @@ try {
   console.log('[viewer] default type:', typeof mod.default);
   console.log('[viewer] default.IfcAPI:', typeof mod.default?.IfcAPI);
 
-  // Resolve WebIFC object that has .IfcAPI on it
-  if (mod.IfcAPI)             WebIFC = mod;             // named export
-  else if (mod.default?.IfcAPI) WebIFC = mod.default;  // nested in default
-  else if (typeof mod.default === 'function') WebIFC = { IfcAPI: mod.default };
-  else { showError('IfcAPI inte hittad i web-ifc-api.js. Keys: ' + Object.keys(mod).slice(0, 8).join(', ')); throw new Error('no IfcAPI'); }
+  if (!mod.IfcAPI) {
+    showError('IfcAPI saknas i web-ifc-api.js. Keys: ' + Object.keys(mod).slice(0, 8).join(', '));
+    throw new Error('no IfcAPI');
+  }
+  // Wrap in a plain object — xeokit's property check fails on ES module namespaces
+  WebIFC = { IfcAPI: mod.IfcAPI };
+  console.log('[viewer] WebIFC.IfcAPI:', typeof WebIFC.IfcAPI);
 } catch(e) {
   if (!errEl.style.display || errEl.style.display === 'none') showError('web-ifc import: ' + e.message);
   throw e;
