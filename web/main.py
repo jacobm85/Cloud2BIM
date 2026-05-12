@@ -355,6 +355,17 @@ async def stream_logs(job_id: str):
     )
 
 
+@app.get("/api/jobs/{job_id}/preview")
+async def get_preview(job_id: str):
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    preview_path = JOBS_DIR / job_id / "output_preview.png"
+    if not preview_path.exists():
+        raise HTTPException(404, "Preview not available")
+    return FileResponse(str(preview_path), media_type="image/png")
+
+
 @app.get("/api/jobs/{job_id}/download")
 async def download_ifc(job_id: str):
     job = job_manager.get_job(job_id)

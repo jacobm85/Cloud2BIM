@@ -425,3 +425,61 @@ for wall in walls:
 # Write the IFC model to a file
 ifc_model.write()
 last_time = log('\nIFC model saved to %s.' % ifc_output_file, last_time, log_filename)
+
+# Generate 2D floor plan preview image
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+
+    fig, ax = plt.subplots(figsize=(14, 14))
+    fig.patch.set_facecolor('#1a1d27')
+    ax.set_facecolor('#0f1117')
+
+    for slab in slabs:
+        xc = list(slab['polygon_x_coords']) + [slab['polygon_x_coords'][0]]
+        yc = list(slab['polygon_y_coords']) + [slab['polygon_y_coords'][0]]
+        ax.fill(slab['polygon_x_coords'], slab['polygon_y_coords'], color='#2e3350', alpha=0.5)
+        ax.plot(xc, yc, color='#4f5580', linewidth=1, linestyle='--')
+
+    for wall in walls:
+        sp, ep = wall['start_point'], wall['end_point']
+        lw = max(1.5, float(wall['thickness']) * 40)
+        color = '#6699cc' if wall.get('label') == 'exterior' else '#99aacc'
+        ax.plot([float(sp[0]), float(ep[0])], [float(sp[1]), float(ep[1])],
+                color=color, linewidth=lw, solid_capstyle='round')
+
+    for opening in all_openings:
+        wall_obj = next((w for w in walls if w['wall_id'] == opening['opening_wall_id']), None)
+        if wall_obj is None:
+            continue
+        sp, ep = wall_obj['start_point'], wall_obj['end_point']
+        dx, dy = float(ep[0]) - float(sp[0]), float(ep[1]) - float(sp[1])
+        length = (dx**2 + dy**2) ** 0.5
+        if length < 1e-6:
+            continue
+        ux, uy = dx / length, dy / length
+        mx = float(sp[0]) + ux * (opening['x_range_start'] + opening['x_range_end']) / 2
+        my = float(sp[1]) + uy * (opening['x_range_start'] + opening['x_range_end']) / 2
+        color = '#76c8e8' if opening['opening_type'] == 'window' else '#f5a623'
+        w = opening['x_range_end'] - opening['x_range_start']
+        ax.plot([mx - ux * w/2, mx + ux * w/2],
+                [my - uy * w/2, my + uy * w/2],
+                color=color, linewidth=3)
+
+    ax.set_aspect('equal')
+    ax.axis('off')
+    handles = [
+        mpatches.Patch(color='#6699cc', label='Exterior wall'),
+        mpatches.Patch(color='#99aacc', label='Interior wall'),
+        mpatches.Patch(color='#76c8e8', label='Window'),
+        mpatches.Patch(color='#f5a623', label='Door'),
+    ]
+    ax.legend(handles=handles, loc='upper right', facecolor='#1a1d27',
+              labelcolor='white', edgecolor='#2e3350', fontsize=9)
+
+    preview_path = ifc_output_file.replace('.ifc', '_preview.png')
+    fig.savefig(preview_path, dpi=100, bbox_inches='tight')
+    plt.close(fig)
+    print('Floor plan preview saved to %s.' % preview_path)
+except Exception as _preview_err:
+    print('Warning: could not generate preview: %s' % _preview_err)

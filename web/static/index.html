@@ -275,23 +275,15 @@
       </a>
     </div>
 
-    <!-- IFC Viewer -->
+    <!-- Floor plan preview -->
     <div class="card" style="padding:0;overflow:hidden">
       <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
-        <div class="card-title" style="margin-bottom:0"><span class="icon">🏗</span> 3D-viewer</div>
-        <div style="font-size:11px;color:var(--text-dim)">Rotera: vänsterklick · Panorera: högerklick · Zooma: scroll</div>
+        <div class="card-title" style="margin-bottom:0"><span class="icon">🗺</span> Planlösning</div>
+        <div style="font-size:11px;color:var(--text-dim)">Genererad av pipeline</div>
       </div>
-      <div id="viewer-container">
-        <canvas id="viewer-canvas"></canvas>
-        <div id="viewer-loading" class="viewer-loading">
-          <div class="spinner"></div>
-          <div>Laddar IFC-viewer…</div>
-        </div>
-        <div class="viewer-toolbar">
-          <button class="viewer-btn" id="btn-fit">⊙ Centrera</button>
-          <button class="viewer-btn" id="btn-section">✂ Sektionsplan</button>
-          <button class="viewer-btn" id="btn-reset-view">👁 Visa allt</button>
-        </div>
+      <div id="preview-container" style="background:#0f1117;min-height:200px;display:flex;align-items:center;justify-content:center">
+        <div id="preview-loading" style="color:var(--text-dim);font-size:13px">Laddar förhandsgranskning…</div>
+        <img id="preview-img" style="display:none;max-width:100%;height:auto" alt="Floor plan">
       </div>
     </div>
 
