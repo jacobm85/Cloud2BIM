@@ -194,7 +194,7 @@ class CreateJobRequest(BaseModel):
 
 
 def _convert_las_to_xyz(las_path: str, xyz_path: str, log_fn=None):
-    """Convert .las/.laz to ASCII .xyz using laspy."""
+    """Convert .las/.laz to ASCII .xyz using laspy, with progress logging."""
     try:
         import laspy
         import numpy as np
@@ -205,9 +205,20 @@ def _convert_las_to_xyz(las_path: str, xyz_path: str, log_fn=None):
         log_fn(f"[INFO] Läser {Path(las_path).name} …")
     las = laspy.read(las_path)
     pts = np.column_stack([np.asarray(las.x), np.asarray(las.y), np.asarray(las.z)])
+    total = len(pts)
     if log_fn:
-        log_fn(f"[INFO] {len(pts):,} punkter lästa. Skriver XYZ …")
-    np.savetxt(xyz_path, pts, fmt="%.3f", delimiter=" ")
+        log_fn(f"[INFO] {total:,} punkter lästa. Skriver XYZ …")
+
+    # Write in chunks so we can report progress
+    chunk = 500_000
+    with open(xyz_path, "w") as fh:
+        for i in range(0, total, chunk):
+            np.savetxt(fh, pts[i : i + chunk], fmt="%.3f", delimiter=" ")
+            done = min(i + chunk, total)
+            pct = int(done / total * 100)
+            if log_fn:
+                log_fn(f"[INFO] Skriver XYZ … {done:,} / {total:,} ({pct}%)")
+
     if log_fn:
         log_fn(f"[INFO] XYZ sparat: {Path(xyz_path).name}")
 

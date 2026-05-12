@@ -9,8 +9,8 @@ def set_plot_style():
     """
     Set the common plotting style for all plots.
     """
-    plt.rc('text', usetex=True)
-    plt.rc('font', family='serif', size=11)
+    plt.rc('text', usetex=False)  # LaTeX not available in headless/Docker
+    plt.rc('font', family='sans-serif', size=11)
 
 
 def plot_contours(contours):
