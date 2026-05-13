@@ -70,6 +70,11 @@ stair_colour_rgb = (0.992, 0.270, 0.153)
 last_time = time.time()
 log_filename = "log.txt"
 
+# Ensure output directories exist (required even when bind-mounted)
+os.makedirs("images/pdf", exist_ok=True)
+os.makedirs("images/wall_outputs_images", exist_ok=True)
+os.makedirs("output_xyz", exist_ok=True)
+
 # SECTION: Import Point Clouds
 
 # read e57 files and create xyz

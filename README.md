@@ -1,63 +1,138 @@
 # Cloud2BIM
-![Workflow](title.png)
 
-# Project Update & Advanced Version:
-> This repository contains the foundational open-source research version of the Cloud2BIM algorithm. An advanced, production-ready version of this software, **Cloud2BIM-AI**, is now available through **Constriq** (a Czech Technical University spin-off). 
->
-> While the open-source script provides core functionality, **Cloud2BIM-AI** is actively developed for commercial and enterprise workflows, offering the following expanded capabilities:
-> * **Enhanced Element Recognition:** Advanced AI models capable of recognizing a wider variety of complex building elements with higher precision.
-> * **Increased Robustness:** Fully automated processing that eliminates the need for manual parameter tuning.
-> * **Optimized Performance:** Significantly reduced computational time for large-scale point cloud datasets.
-> * **Continuous Support & GUI:** A user-friendly interface with visual verification and ongoing technical development.
->
-> For professional deployment and access to the advanced version, please visit: **[constriq.tech](https://constriq.tech/)**
+Automated Scan-to-BIM pipeline that converts 3D point clouds into IFC models.
+Supports indoor building scans in E57, LAS/LAZ, and XYZ format.
+
+> **Advanced version:** A production-ready AI-enhanced edition is available through
+> [Constriq](https://constriq.tech/) (CTU spin-off), with higher accuracy, faster
+> processing, and a full GUI.
 
 ---
 
-### Description
-Cloud2BIM automates the Scan-to-BIM process by converting point clouds into 3D parametric entities. It employs a segmentation algorithm that utilizes point cloud density analysis, augmented by image and morphological operations. This allows the software to precisely extract the geometry of building elements such as slabs, walls, windows, and doors.
+## What it does
 
-### Installation
-To install Cloud2BIM, follow these steps:
-git clone 
+1. **Slab detection** — scans the Z-axis histogram to find floor and ceiling slabs
+2. **Wall segmentation** — builds a 2D occupancy map, extracts wall contours and groups parallel segments; PCA rotation handles non-axis-aligned buildings
+3. **Opening detection** — classifies windows and doors from wall cross-sections
+4. **IFC export** — writes a standards-compliant IFC 2x3 file with slabs, walls, openings and spaces
+5. **3D viewer** — interactive BIM viewer in the browser (Three.js)
 
-https://github.com/VaclavNezerka/Cloud2BIM.git
+---
 
-Install dependencies:
+## Quick start — Docker (recommended)
 
-First, ensure you have Python and pip installed.
-Then, install the required dependencies listed in the requirements.txt file:
+### 1. Create data directories
 
+```bash
+mkdir -p /mnt/ssd250/scan2bim/{uploads,jobs,output_xyz,images,pointclouds}
+```
+
+### 2. Edit `docker-compose.yml`
+
+Change the host paths on the left side of `:` to match your setup:
+
+```yaml
+volumes:
+  - /mnt/ssd250/scan2bim/uploads:/app/web/uploads
+  - /mnt/ssd250/scan2bim/jobs:/app/web/jobs
+  - /mnt/ssd250/scan2bim/output_xyz:/app/output_xyz
+  - /mnt/ssd250/scan2bim/images:/app/images
+  - /mnt/ssd250/scan2bim/pointclouds:/drives/Punktmoln
+```
+
+Add more `/drives/<Name>` lines for additional point cloud locations.
+
+### 3. Build and run
+
+```bash
+docker compose up --build
+```
+
+Open **http://localhost:8001** in a browser.
+
+---
+
+## Web interface
+
+The 4-step wizard guides you through:
+
+1. **Select file** — upload a point cloud (E57, LAS, LAZ, XYZ) or browse a mounted network drive
+2. **Parameters** — slab thickness, wall dimensions, dilution factor, IFC metadata
+3. **Processing** — live log stream; jobs run in the background
+4. **Result** — interactive 3D IFC viewer, download IFC file
+
+### Network drives
+
+Mount any host directory under `/drives/<Name>` in `docker-compose.yml`:
+
+```yaml
+- /mnt/nas/projects:/drives/NAS_Projekt:ro
+- /mnt/nas/scans:/drives/Skanningar:ro
+```
+
+The name after `/drives/` appears automatically in the file browser — no other configuration needed.
+
+---
+
+## Command-line usage
+
+```bash
 pip install -r requirements.txt
-
-# Running the Script
-The `cloud2entities.py` script requires a YAML configuration file to run. You can provide the path to the 
-configuration file as a command-line argument. If no argument is provided, the script will 
-automatically use the default file `config.yaml`.
-
-### Example command
-
 python cloud2entities.py config.yaml
+```
 
-### Dataset
-The complete original point cloud for Kladno station is available at Zenodo platform.
+Edit `config.yaml` to point to your input files and set processing parameters.
 
-https://zenodo.org/records/14221915
+### Key parameters
 
-## Citation
+| Parameter | Default | Description |
+|---|---|---|
+| `dilute` | `true` | Enable point cloud downsampling |
+| `dilution_factor` | `10` | Keep every Nth point (10 = 90% reduction) |
+| `pc_resolution` | `0.002` | Expected point spacing (m) |
+| `bfs_thickness` | `0.3` | Bottom floor slab thickness (m) |
+| `tfs_thickness` | `0.4` | Top floor slab thickness (m) |
+| `min_wall_length` | `0.10` | Minimum wall length to keep (m) |
+| `max_wall_thickness` | `0.75` | Maximum wall thickness (m) |
 
-If you find this project or any part of it useful in your research or work, please consider citing the following article:
+---
 
-@article{Cloud2BIM_2025,
-    title = {Open-source automatic pipeline for efficient conversion of large-scale point clouds to IFC format},
-    journal = {Automation in Construction},
-    volume = {177},
-    pages = {106303},
-    year = {2025},
-    issn = {0926-5805},
-    doi = {https://doi.org/10.1016/j.autcon.2025.106303},
-    author = {Slávek Zbirovský and Václav Nežerka},
-}
+## Supported formats
 
-# License
-MIT License
+| Format | Notes |
+|---|---|
+| `.xyz` | Tab-separated ASCII, header line `//X\tY\tZ` |
+| `.e57` | Native E57 — converted to XYZ automatically |
+| `.las` / `.laz` | LiDAR formats — converted via laspy |
+
+---
+
+## Requirements
+
+- Python 3.11+
+- See `requirements.txt` (CPU-only) or `requirements-docker.txt` (Docker image)
+- No GPU required
+
+---
+
+## Project structure
+
+```
+cloud2entities.py     Main pipeline script
+aux_functions.py      Slab/wall/opening detection algorithms
+space_generator.py    Room/zone extraction (Shapely)
+generate_ifc.py       IFC model builder (ifcopenshell)
+plotting_functions.py Debug visualisations
+config.yaml           Default CLI configuration
+web/
+  main.py             FastAPI backend
+  job_manager.py      Background job runner
+  static/             Frontend (vanilla JS, Three.js viewer)
+```
+
+---
+
+## License
+
+Original research code by Václav Nežerka et al., CTU in Prague.
+Web interface and pipeline improvements by Jacob Schachtschabel.
