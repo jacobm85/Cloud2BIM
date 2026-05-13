@@ -143,11 +143,17 @@ for i, storey_pointcloud in enumerate(point_cloud_storeys):
 
     top_z_placement = slabs[i + 1]['slab_bottom_z_coord']
 
-    (start_points, end_points, wall_thicknesses, wall_materials,
-     translated_filtered_rotated_wall_groups, wall_labels) = (
-        identify_walls(storey_pointcloud, pc_resolution, min_wall_length, min_wall_thickness, max_wall_thickness,
-                       z_placement, top_z_placement, grid_coefficient, slabs[i + 1]['polygon'], exterior_scan,
-                       exterior_walls_thickness=0.45))
+    try:
+        (start_points, end_points, wall_thicknesses, wall_materials,
+         translated_filtered_rotated_wall_groups, wall_labels) = (
+            identify_walls(storey_pointcloud, pc_resolution, min_wall_length, min_wall_thickness, max_wall_thickness,
+                           z_placement, top_z_placement, grid_coefficient, slabs[i + 1]['polygon'], exterior_scan,
+                           exterior_walls_thickness=0.45))
+    except Exception as _wall_err:
+        print(f"[WARNING] Wall detection failed for storey {i + 1}, skipping: {_wall_err}")
+        _traceback.print_exc(file=sys.stdout)
+        zones.append({})
+        continue
 
     print("-" * 50)
     print("Rectangular openings detection")

@@ -1077,6 +1077,8 @@ def identify_walls(pointcloud, pointcloud_resolution, minimum_wall_length, minim
         wall_axis, wall_thickness = calculate_wall_axis(group)
         if wall_axis is None:
             continue
+        if any(np.isnan(c) for pt in wall_axis for c in pt):
+            continue
         wall_axes.append(wall_axis)
         wall_thicknesses.append(wall_thickness)
         valid_parallel_groups.append(group)
