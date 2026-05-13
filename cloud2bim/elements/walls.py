@@ -214,7 +214,12 @@ def _extract_2d_segments(points_2d: np.ndarray, pixel_size: float, min_length: f
 
 
 def _group_segments(segments, max_thickness: float):
-    """Group parallel segments within ``max_thickness`` distance."""
+    """Group parallel segments within ``max_thickness`` distance.
+
+    Singletons are kept too — an unpaired segment usually still represents a
+    real wall (one side scanned, the other obscured). Caller can tell them
+    apart by group length.
+    """
     grouped = []
     labels = []
     remaining = list(segments)
@@ -229,9 +234,8 @@ def _group_segments(segments, max_thickness: float):
                 remaining.pop(i)
             else:
                 i += 1
-        if len(group) >= 2:
-            grouped.append(group)
-            labels.append("interior")
+        grouped.append(group)
+        labels.append("interior")
     return grouped, labels
 
 
@@ -253,23 +257,32 @@ def _segments_close(s1, s2, max_dist: float) -> bool:
     )
 
 
-def _calculate_wall_axis(group):
+def _calculate_wall_axis(group, default_thickness: float = 0.10):
     """Find wall axis from a group of parallel segments.
 
-    Returns ``(None, 0)`` for degenerate (zero-length) groups so callers
-    can filter them out cleanly.
+    Singleton groups: use the segment itself as the axis with a default
+    thickness (the other face wasn't scanned, but the wall is still real).
+
+    Returns ``(None, 0)`` only for truly degenerate (zero-length) groups.
     """
-    if len(group) < 2:
+    if len(group) == 0:
         return None, 0.0
+
     lengths = [np.linalg.norm(np.array(s[1]) - np.array(s[0])) for s in group]
     longest = group[int(np.argmax(lengths))]
-    shorter = group[1 - int(np.argmax(lengths)) if len(group) == 2 else 0]
     direction = np.array(longest[1]) - np.array(longest[0])
     norm = float(np.linalg.norm(direction))
     if norm == 0:
         return None, 0.0
+
+    if len(group) == 1:
+        # Single-face wall — axis IS the segment, thickness is a guess
+        return [list(longest[0]), list(longest[1])], default_thickness
+
     direction /= norm
-    # Mean perpendicular distance between the two longest segments
+    # Pick the second-longest segment (any partner that isn't the longest)
+    other_idx = int(np.argsort(lengths)[-2])
+    shorter = group[other_idx]
     mid_long = (np.array(longest[0]) + np.array(longest[1])) / 2
     mid_short = (np.array(shorter[0]) + np.array(shorter[1])) / 2
     mean_dist = float(np.linalg.norm(mid_long - mid_short))

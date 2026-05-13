@@ -172,6 +172,16 @@ def run_pipeline(cfg: Config) -> int:
     builder.write(cfg.io.output_ifc)
     log.info("IFC export: %.1fs", time.time() - t0)
 
+    # ── 9. Floor-plan preview ───────────────────────────────────────────
+    try:
+        from cloud2bim.preview import render_floor_plan
+        preview_path = Path(str(cfg.io.output_ifc).replace(".ifc", "_preview.png"))
+        all_walls = [w for storey in storey_walls for w in storey]
+        all_openings = [op for storey in storey_openings for op in storey]
+        render_floor_plan(preview_path, slabs, all_walls, all_openings)
+    except Exception as exc:
+        log.warning("Preview generation failed: %s", exc)
+
     log.info(
         "─── DONE in %.1fs: %d slabs, %d walls, %d openings, %d roof planes ───",
         time.time() - t_total,

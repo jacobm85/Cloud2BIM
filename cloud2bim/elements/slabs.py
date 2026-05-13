@@ -64,9 +64,11 @@ def detect_slabs(
         log.warning("Empty Z-histogram — no slabs detected")
         return []
 
-    # Peaks above 60% of max density
-    threshold = 0.6 * hist.max()
-    peaks, _ = find_peaks(hist, height=threshold, distance=int(0.5 / cfg.z_step))
+    # Peaks above 25 % of max density (more permissive than v1 — many real
+    # scans have dense floor + sparser ceiling that miss a 0.6× cut-off).
+    threshold = 0.25 * hist.max()
+    min_separation = max(2, int(0.5 / cfg.z_step))
+    peaks, _ = find_peaks(hist, height=threshold, distance=min_separation)
     log.info("Found %d horizontal-surface peaks", len(peaks))
 
     if len(peaks) < 2:
