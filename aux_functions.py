@@ -875,7 +875,7 @@ def adjust_intersections(wall_axes, max_wall_thickness):
                 continue  # Don't compare the segment with itself
 
             intersection = line_intersection(axis1, axis2)
-            if intersection:
+            if intersection and not any(np.isnan(v) or np.isinf(v) for v in intersection):
                 # Check the distance from the intersection to each endpoint of the axes
                 for k in range(2):  # Check both endpoints for each axis
                     if distance_between_points(axis1[k], intersection) <= half_max_thickness:

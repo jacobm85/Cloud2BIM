@@ -97,6 +97,13 @@ last_time = log('All point cloud data imported.', last_time, log_filename)
 if len(points_xyz) == 0:
     sys.exit("[ERROR] Point cloud is empty after import. Check the input file.")
 
+# Translate to local coordinates to avoid floating-point precision loss
+# from large absolute coordinate systems (e.g. SWEREF, national grids).
+# Z is preserved relative so floor heights stay correct; XY are centred.
+_xyz_offset = np.array([points_xyz[:, 0].min(), points_xyz[:, 1].min(), 0.0])
+points_xyz = points_xyz - _xyz_offset
+print(f"[INFO] Coordinate offset applied: X={_xyz_offset[0]:.3f} Y={_xyz_offset[1]:.3f} (local origin)")
+
 # SECTION: Segment Slabs and Split the Point Cloud to Storeys
 print("-" * 50)
 print("Slab segmentation")
