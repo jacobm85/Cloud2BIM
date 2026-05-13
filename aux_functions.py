@@ -949,24 +949,27 @@ def swell_polygon(vertices, thickness):
 def identify_walls(pointcloud, pointcloud_resolution, minimum_wall_length, minimum_wall_thickness,
                    maximum_wall_thickness, z_floor, z_ceiling, grid_coefficient=5, slab_polygon=None,
                    exterior_scan=False, exterior_walls_thickness=0.3):
-    x_coords, y_coords, z_coords = zip(*pointcloud)
+    x_coords_arr = pointcloud[:, 0]
+    y_coords_arr = pointcloud[:, 1]
+    z_coords_arr = pointcloud[:, 2]
     z_section_boundaries = [0.85, 1.2]  # percentage of the height for the storey sections
 
     # Calculate z-coordinate limits
-    z_max_in_point_cloud = np.max(z_coords)
-    z_min_in_point_cloud = np.min(z_coords)
+    z_max_in_point_cloud = z_coords_arr.max()
+    z_min_in_point_cloud = z_coords_arr.min()
     z_max = z_min_in_point_cloud + z_section_boundaries[1] * (z_max_in_point_cloud - z_min_in_point_cloud)
     z_min = z_min_in_point_cloud + z_section_boundaries[0] * (z_max_in_point_cloud - z_min_in_point_cloud)
 
     # Filter points based on z-coordinate limits
-    filtered_indices = [i for i, z in enumerate(z_coords) if z_min <= z <= z_max]
-    if not filtered_indices:
+    z_mask = (z_coords_arr >= z_min) & (z_coords_arr <= z_max)
+    if not np.any(z_mask):
         print("[WARNING] identify_walls: no points in z-range [%.2f, %.2f]." % (z_min, z_max))
         return [], [], [], [], [], []
 
-    points_2d = np.array([(x_coords[i], y_coords[i]) for i in filtered_indices])
-    x_coords_arr = np.array(x_coords)
-    y_coords_arr = np.array(y_coords)
+    points_2d = np.column_stack([x_coords_arr[z_mask], y_coords_arr[z_mask]])
+    x_coords = x_coords_arr
+    y_coords = y_coords_arr
+    z_coords = z_coords_arr
 
     # ── PCA rotation for non-axis-aligned buildings ───────────────────────
     # Rotate 2D points so dominant wall orientation aligns with X/Y axes.
