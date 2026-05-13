@@ -197,7 +197,11 @@ for i, storey_pointcloud in enumerate(point_cloud_storeys):
     # SECTION: Split the Storeys to Zones (Spaces in the IFC)
     print('Segmenting the storey to zones (spaces)...')
     print("-" * 50)
-    zones_in_storey = identify_zones(walls, snapping_distance=0.8, plot_zones=False)
+    try:
+        zones_in_storey = identify_zones(walls, snapping_distance=0.8, plot_zones=False)
+    except Exception as _zone_err:
+        print(f"[WARNING] Zone detection failed for storey {i + 1}, skipping zones: {_zone_err}")
+        zones_in_storey = {}
     zones.append(zones_in_storey)
 
 # SECTION: Generate IFC
