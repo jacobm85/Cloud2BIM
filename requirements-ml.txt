@@ -1,0 +1,18 @@
+# Optional ML dependencies for semantic segmentation backends.
+# Install separately on the production server (GPU recommended):
+#
+#   pip install -r requirements-ml.txt
+#
+# CUDA 11.8 build of torch + spconv. Adjust for your GPU/driver.
+
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.1.0+cu118
+torchvision==0.16.0+cu118
+
+# PointTransformer V3 backend (Pointcept)
+spconv-cu118==2.3.6
+git+https://github.com/Pointcept/Pointcept.git@main#egg=pointcept
+
+# RandLA-Net backend (Open3D-ML torch)
+# open3d already in requirements-docker.txt; ML extras need:
+tensorboard

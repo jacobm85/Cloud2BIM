@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git push *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(docker --version)",
+      "PowerShell(docker --version; docker ps | Select-Object -First 3)",
+      "Bash(git commit -m 'Fix WebIFC module shape: use mod.default for CJS dynamic import *)",
+      "Bash(git commit -m 'Wrap IfcAPI in plain object for xeokit compatibility *)",
+      "Bash(git rm *)",
+      "Bash(git checkout *)",
+      "Bash(python *)"
+    ]
+  }
+}

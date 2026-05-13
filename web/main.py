@@ -236,23 +236,30 @@ def _convert_las_to_xyz(las_path: str, xyz_path: str, log_fn=None):
 
 @app.get("/api/jobs/reusable")
 async def list_reusable_jobs():
-    """Return jobs that have a converted_input.xyz ready to re-use."""
+    """Return jobs that can be re-run.
+
+    v2: lists any job with cached semantic labels (skips the slow ML step).
+    v1 legacy: also lists jobs with converted_input.xyz (skips conversion).
+    """
     result = []
     if not JOBS_DIR.exists():
         return result
     for job_dir in sorted(JOBS_DIR.iterdir(), key=lambda d: d.stat().st_mtime, reverse=True):
         if not job_dir.is_dir():
             continue
+        labels = job_dir / "labels.npy"
         xyz = job_dir / "converted_input.xyz"
-        if not xyz.exists():
+        if not labels.exists() and not xyz.exists():
             continue
         info_path = job_dir / "job_info.json"
         info = json.loads(info_path.read_text()) if info_path.exists() else {}
+        cached_size_mb = round(((labels if labels.exists() else xyz).stat().st_size) / 1_000_000, 1)
         result.append({
             "job_id": job_dir.name,
             "created_at": info.get("created_at", ""),
             "original_filename": info.get("original_filename", job_dir.name),
-            "xyz_size_mb": round(xyz.stat().st_size / 1_000_000, 1),
+            "xyz_size_mb": cached_size_mb,
+            "has_labels": labels.exists(),
         })
     return result
 
@@ -308,24 +315,10 @@ async def create_job(request: CreateJobRequest):
     job_dir.mkdir(parents=True, exist_ok=True)
     output_ifc = str(job_dir / "output.ifc")
 
-    # ── Auto-detect format (skipped when re-using existing XYZ) ──────────
+    # ── Resolve pipeline input (v2 reads E57/LAS/XYZ natively) ───────────
     if not request.source_job_id:
-        suffix = Path(input_path).suffix.lower()
-        if suffix == ".e57":
-            e57_input = True
-            pipeline_input = input_path
-            xyz_converted = str(job_dir / "converted_input.xyz")
-        elif suffix in (".las", ".laz"):
-            e57_input = False
-            xyz_converted = str(job_dir / "converted_input.xyz")
-            pipeline_input = xyz_converted
-            _las_src = input_path
-            _xyz_dst = xyz_converted
-            def preprocess_fn(log_fn):  # noqa: E731
-                _convert_las_to_xyz(_las_src, _xyz_dst, log_fn)
-        else:
-            e57_input = False
-            pipeline_input = input_path
+        # v2 readers handle .e57/.las/.laz/.xyz directly — no preprocess step
+        pipeline_input = input_path
 
     # ── Persist job metadata for later re-use ────────────────────────────
     from datetime import datetime as _dt
@@ -334,35 +327,64 @@ async def create_job(request: CreateJobRequest):
         "original_filename": original_filename,
     }))
 
+    # ── v2 config schema ─────────────────────────────────────────────────
     config = {
-        "e57_input": e57_input,
-        "xyz_files": [xyz_converted] if e57_input else [pipeline_input],
-        "e57_files": [pipeline_input] if e57_input else [],
+        "io": {
+            "input_files": [pipeline_input],
+            "output_ifc": output_ifc,
+            "work_dir": str(job_dir),
+            "dilute": request.dilute,
+            "dilution_factor": request.dilution_factor,
+            "center_coordinates": True,
+        },
+        "segmentation": {
+            "enabled": False,  # set True once ML weights are mounted at /data/models
+            "backend": "ptv3",
+            "voxel_size": 0.05,
+            "device": "auto",
+            "cache_labels": True,
+        },
+        "slabs": {
+            "bottom_floor_thickness": request.bfs_thickness,
+            "top_floor_thickness": request.tfs_thickness,
+            "pc_resolution": request.pc_resolution,
+            "grid_coefficient": request.grid_coefficient,
+        },
+        "walls": {
+            "min_length": request.min_wall_length,
+            "min_thickness": request.min_wall_thickness,
+            "max_thickness": request.max_wall_thickness,
+            "exterior_thickness": request.exterior_walls_thickness,
+            "use_ml_filter": True,
+            "enable_ransac_fallback": True,
+        },
+        "openings": {},
+        "roofs": {"enabled": False},
+        "ifc": {
+            "project": {
+                "name": request.ifc_project_name,
+                "long_name": request.ifc_project_long_name,
+                "version": request.ifc_project_version,
+            },
+            "author": {
+                "given_name": request.ifc_author_name,
+                "family_name": request.ifc_author_surname,
+                "organization": request.ifc_author_organization,
+            },
+            "building": {
+                "name": request.ifc_building_name,
+                "type": request.ifc_building_type,
+                "phase": request.ifc_building_phase,
+            },
+            "site": {
+                "latitude": list(request.ifc_site_latitude),
+                "longitude": list(request.ifc_site_longitude),
+                "elevation": request.ifc_site_elevation,
+            },
+            "default_material": request.material_for_objects,
+            "revit_compatible": True,
+        },
         "exterior_scan": request.exterior_scan,
-        "dilute": request.dilute,
-        "dilution_factor": request.dilution_factor,
-        "pc_resolution": request.pc_resolution,
-        "grid_coefficient": request.grid_coefficient,
-        "bfs_thickness": request.bfs_thickness,
-        "tfs_thickness": request.tfs_thickness,
-        "min_wall_length": request.min_wall_length,
-        "min_wall_thickness": request.min_wall_thickness,
-        "max_wall_thickness": request.max_wall_thickness,
-        "exterior_walls_thickness": request.exterior_walls_thickness,
-        "output_ifc": output_ifc,
-        "ifc_project_name": request.ifc_project_name,
-        "ifc_project_long_name": request.ifc_project_long_name,
-        "ifc_project_version": request.ifc_project_version,
-        "ifc_author_name": request.ifc_author_name,
-        "ifc_author_surname": request.ifc_author_surname,
-        "ifc_author_organization": request.ifc_author_organization,
-        "ifc_building_name": request.ifc_building_name,
-        "ifc_building_type": request.ifc_building_type,
-        "ifc_building_phase": request.ifc_building_phase,
-        "ifc_site_latitude": list(request.ifc_site_latitude),
-        "ifc_site_longitude": list(request.ifc_site_longitude),
-        "ifc_site_elevation": request.ifc_site_elevation,
-        "material_for_objects": request.material_for_objects,
     }
 
     config_path = job_dir / "config.yaml"

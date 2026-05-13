@@ -56,7 +56,7 @@ class JobManager:
                 self._append_log(job_id, "[INFO] Filkonvertering klar.")
 
             process = subprocess.Popen(
-                [sys.executable, "cloud2entities.py", config_path],
+                [sys.executable, "-m", "cloud2bim", "run", config_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
