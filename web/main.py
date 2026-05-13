@@ -257,6 +257,17 @@ async def list_reusable_jobs():
     return result
 
 
+@app.delete("/api/jobs/{job_id}")
+async def delete_job(job_id: str):
+    import shutil
+    job_dir = JOBS_DIR / job_id
+    if not job_dir.exists() or not job_dir.is_dir():
+        raise HTTPException(404, "Job not found")
+    shutil.rmtree(job_dir)
+    job_manager._jobs.pop(job_id, None)
+    return {"deleted": job_id}
+
+
 @app.post("/api/jobs")
 async def create_job(request: CreateJobRequest):
     if not request.source_job_id and not request.upload_id and not request.network_path:

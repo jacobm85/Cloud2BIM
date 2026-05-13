@@ -223,14 +223,33 @@ async function loadReusableJobs() {
       row.className = 'browser-item';
       row.style.cssText = 'cursor:pointer;padding:8px 10px;border-radius:6px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;background:var(--surface2)';
       const date = job.created_at ? new Date(job.created_at).toLocaleString('sv-SE') : '—';
-      row.innerHTML = `<div><div style="font-weight:600;font-size:13px">${job.original_filename}</div>
-        <div style="font-size:11px;color:var(--text-dim)">${date} &nbsp;·&nbsp; ${job.xyz_size_mb} MB XYZ</div></div>
-        <div style="font-size:11px;color:var(--text-dim);padding-left:8px">${job.job_id.slice(0,8)}…</div>`;
-      row.addEventListener('click', () => {
+      row.innerHTML = `
+        <div style="flex:1;min-width:0" class="reuse-select-area">
+          <div style="font-weight:600;font-size:13px">${job.original_filename}</div>
+          <div style="font-size:11px;color:var(--text-dim)">${date} &nbsp;·&nbsp; ${job.xyz_size_mb} MB XYZ &nbsp;·&nbsp; ${job.job_id.slice(0,8)}…</div>
+        </div>
+        <button class="btn-delete-job" title="Ta bort jobb och alla filer"
+          style="margin-left:10px;background:none;border:none;cursor:pointer;color:var(--text-dim);font-size:16px;padding:4px 6px;border-radius:4px;flex-shrink:0">🗑</button>`;
+      row.querySelector('.reuse-select-area').addEventListener('click', () => {
         $$('#reuse-list .browser-item').forEach(r => r.classList.remove('selected'));
         row.classList.add('selected');
         state.sourceJobId = job.job_id;
         document.getElementById('btn-next-1').disabled = false;
+      });
+      row.querySelector('.btn-delete-job').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Ta bort jobbet och alla dess filer?\n${job.original_filename}`)) return;
+        try {
+          const res = await fetch(`/api/jobs/${job.job_id}`, { method: 'DELETE' });
+          if (!res.ok) throw new Error(await res.text());
+          row.remove();
+          if (state.sourceJobId === job.job_id) {
+            state.sourceJobId = null;
+            document.getElementById('btn-next-1').disabled = true;
+          }
+        } catch (err) {
+          alert('Kunde inte ta bort jobbet: ' + err.message);
+        }
       });
       list.appendChild(row);
     });
