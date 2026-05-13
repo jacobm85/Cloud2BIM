@@ -266,7 +266,6 @@ async function browseDir(path) {
         $$('.browser-item').forEach(r => r.classList.remove('selected'));
         row.classList.add('selected');
         state.networkPath = item.path;
-        if (item.name.toLowerCase().endsWith('.e57')) document.getElementById('e57-input').checked = true;
         document.getElementById('btn-next-1').disabled = false;
       });
     }
