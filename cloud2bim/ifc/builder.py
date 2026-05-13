@@ -121,10 +121,17 @@ class IfcBuilder:
         opening_el.GlobalId = guid_open
         rep = self._opening_solid(opening, host_wall)
         self._assign_representation(opening_el, rep)
-        ifcopenshell.api.run("void.add_opening", self.model,
-                             opening=opening_el, element=host_wall_ifc)
 
-        # Insert door or window filling
+        # void.add_opening API was removed in ifcopenshell 0.8 — use direct
+        # entity creation which works across all versions.
+        self.model.create_entity(
+            "IfcRelVoidsElement",
+            GlobalId=ifcopenshell.guid.new(),
+            OwnerHistory=None,
+            RelatingBuildingElement=host_wall_ifc,
+            RelatedOpeningElement=opening_el,
+        )
+
         ifc_class = "IfcDoor" if opening.type == "door" else "IfcWindow"
         guid_fill = _stable_guid("fill", guid_open)
         fill = ifcopenshell.api.run(
@@ -132,8 +139,13 @@ class IfcBuilder:
             ifc_class=ifc_class, name=f"{opening.type.capitalize()}",
         )
         fill.GlobalId = guid_fill
-        ifcopenshell.api.run("void.add_filling", self.model,
-                             opening=opening_el, element=fill)
+        self.model.create_entity(
+            "IfcRelFillsElement",
+            GlobalId=ifcopenshell.guid.new(),
+            OwnerHistory=None,
+            RelatingOpeningElement=opening_el,
+            RelatedBuildingElement=fill,
+        )
 
     def add_roof_plane(self, roof: RoofPlane, storey_idx: int) -> ifcopenshell.entity_instance:
         storey = self._ensure_storey(storey_idx, float(roof.polygon[:, 2].min()))

@@ -23,7 +23,7 @@ import numpy as np
 from skimage.morphology import closing, footprint_rectangle
 
 from cloud2bim.config import WallConfig
-from cloud2bim.geometry.lines import line_intersection
+from cloud2bim.geometry.lines import distance_points_to_line, line_intersection
 from cloud2bim.geometry.pca import dominant_angle, rotate_points_2d
 from cloud2bim.geometry.polygon import swell_polygon
 from cloud2bim.logging import get_logger
@@ -82,17 +82,24 @@ def detect_walls(
         else:
             log.warning("Storey %d: no wall-labelled points; using all", storey_idx)
 
-    # 2. Restrict to a height band where walls are most reliable (0.85-1.2 of height)
-    z_min = pts_for_walls[:, 2].min()
-    z_max = pts_for_walls[:, 2].max()
-    z_range = z_max - z_min
-    band_low = z_min + 0.85 * z_range
-    band_high = z_min + 1.20 * z_range  # caps at z_max
-    band_mask = (pts_for_walls[:, 2] >= band_low) & (pts_for_walls[:, 2] <= band_high)
+    # 2. Horizontal cross-section 30–130 cm above the floor.
+    #    This height contains wall faces but mostly misses furniture tops and
+    #    open spaces between floors. Using a fixed absolute height avoids the
+    #    85-120% relative-band problem that collapsed when storey height varied.
+    BAND_BOTTOM = 0.30   # m above floor
+    BAND_TOP    = 1.30   # m above floor
+    band_mask = (
+        (pts_for_walls[:, 2] >= z_floor + BAND_BOTTOM) &
+        (pts_for_walls[:, 2] <= z_floor + BAND_TOP)
+    )
     if not band_mask.any():
-        log.warning("Storey %d: no points in wall height band", storey_idx)
+        log.warning("Storey %d: no points in cross-section band [%.2f, %.2f]",
+                    storey_idx, z_floor + BAND_BOTTOM, z_floor + BAND_TOP)
         return []
     points_2d = pts_for_walls[band_mask, :2]
+    log.info("Storey %d: cross-section band %.2f–%.2f m, %s points",
+             storey_idx, z_floor + BAND_BOTTOM, z_floor + BAND_TOP,
+             f"{band_mask.sum():,}")
 
     # 3. PCA rotation
     pca_angle = dominant_angle(points_2d)
@@ -140,7 +147,39 @@ def detect_walls(
         log.warning("Storey %d: no valid wall axes after filtering", storey_idx)
         return []
 
-    # 8. Snap intersections (NaN-safe)
+    # 8. Height validation — keep only axes that have points spanning at
+    #    least 50% of the expected storey height. Singletons from furniture
+    #    or clutter are typically short in Z even if they appear in the
+    #    cross-section band.
+    storey_height = z_ceiling - z_floor
+    min_span = max(0.3, storey_height * 0.4)  # at least 40% of storey or 30 cm
+    valid_axes, valid_thicknesses, valid_groups, valid_labels = [], [], [], []
+    for ax, th, grp, lbl in zip(wall_axes, wall_thicknesses, valid_parallel_groups, wall_labels):
+        # Collect points near this axis in full storey height
+        near = pts_for_walls[
+            distance_points_to_line(pts_for_walls[:, :2],
+                                    np.array(ax[0]), np.array(ax[1])) < max(th, cfg.min_thickness) * 2
+        ]
+        if len(near) == 0:
+            continue
+        z_span = float(near[:, 2].max() - near[:, 2].min())
+        if z_span < min_span:
+            log.debug("Storey %d: discarding axis (z_span=%.2f < %.2f)", storey_idx, z_span, min_span)
+            continue
+        valid_axes.append(ax)
+        valid_thicknesses.append(th)
+        valid_groups.append(grp)
+        valid_labels.append(lbl)
+
+    wall_axes, wall_thicknesses = valid_axes, valid_thicknesses
+    valid_parallel_groups, wall_labels = valid_groups, valid_labels
+    log.info("Storey %d: %d axes survive height validation", storey_idx, len(wall_axes))
+
+    if not wall_axes:
+        log.warning("Storey %d: no walls after height validation", storey_idx)
+        return []
+
+    # 9. Snap intersections (NaN-safe)
     wall_axes = _adjust_intersections(wall_axes, cfg.max_thickness)
 
     # 9. Inverse PCA rotation

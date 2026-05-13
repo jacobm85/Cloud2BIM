@@ -93,7 +93,7 @@ class WallConfig(BaseModel):
         default=True,
         description="Try 3D plane RANSAC for walls the 2D histogram misses (curved walls)",
     )
-    max_walls_per_storey: int = Field(default=200, ge=1, description="Safety cap")
+    max_walls_per_storey: int = Field(default=50, ge=1, description="Safety cap")
     placeholder_height: float = Field(
         default=0.10,
         gt=0,
