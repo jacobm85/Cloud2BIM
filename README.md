@@ -3,9 +3,9 @@
 Automated Scan-to-BIM pipeline that converts 3D point clouds into IFC models.
 Supports indoor building scans in E57, LAS/LAZ, and XYZ format.
 
-> **Advanced version:** A production-ready AI-enhanced edition is available through
-> [Constriq](https://constriq.tech/) (CTU spin-off), with higher accuracy, faster
-> processing, and a full GUI.
+Fork of [VaclavNezerka/Cloud2BIM](https://github.com/VaclavNezerka/Cloud2BIM) —
+extended with a Docker-based web interface, additional input format support,
+and various pipeline improvements.
 
 ---
 
@@ -135,4 +135,4 @@ web/
 ## License
 
 Original research code by Václav Nežerka et al., CTU in Prague.
-Web interface and pipeline improvements by Jacob Schachtschabel.
+Web interface and pipeline improvements by Jacob.
