@@ -1319,11 +1319,17 @@ def assign_points_to_walls(x_coords, y_coords, z_coords, wall_axes, parallel_gro
         min_distances[better] = wall_dist[better]
         min_distance_indices[better] = wall_idx
 
-    # Vectorised wall group assignment (replaces Python loop over all points)
+    # Vectorised wall group assignment; subsample to cap memory use.
+    # Opening detection only needs a representative sample, not all points.
+    MAX_WALL_PTS = 50_000
     wall_groups = []
+    rng = np.random.default_rng(0)
     for wall_idx in range(len(wall_axes)):
         mask = (min_distance_indices == wall_idx) & (min_distances <= acceptable_distances[wall_idx])
-        wall_groups.append(valid_points[mask].tolist())
+        pts = valid_points[mask]
+        if len(pts) > MAX_WALL_PTS:
+            pts = pts[rng.choice(len(pts), MAX_WALL_PTS, replace=False)]
+        wall_groups.append(pts.tolist())
 
     return wall_groups, wall_thicknesses
 
@@ -1333,14 +1339,16 @@ def rotate_points_to_xz_plane(points, direction_vector):
     # Calculate the angle between the direction vector and the x-axis
     angle = math.atan2(direction_vector[1], direction_vector[0])
 
-    rotated_points = []
-    for x, y, z in points:
-        # Apply 2D rotation matrix on the x-y plane
-        new_x = x * math.cos(angle) + y * math.sin(angle)
-        new_y = -x * math.sin(angle) + y * math.cos(angle)
-        rotated_points.append((new_x, new_y, z))
-
-    return rotated_points
+    pts = np.asarray(points, dtype=float)
+    if pts.ndim == 1:
+        pts = pts.reshape(1, -1)
+    c, s = math.cos(angle), math.sin(angle)
+    rotated = np.column_stack([
+        pts[:, 0] * c + pts[:, 1] * s,
+        -pts[:, 0] * s + pts[:, 1] * c,
+        pts[:, 2],
+    ])
+    return rotated.tolist()
 
 
 def export_wall_points_to_txt(wall_groups, output_dir="walls_outputs_txt"):

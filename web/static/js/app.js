@@ -231,8 +231,14 @@ async function loadReusableJobs() {
         <button class="btn-delete-job" title="Ta bort jobb och alla filer"
           style="margin-left:10px;background:none;border:none;cursor:pointer;color:var(--text-dim);font-size:16px;padding:4px 6px;border-radius:4px;flex-shrink:0">🗑</button>`;
       row.querySelector('.reuse-select-area').addEventListener('click', () => {
-        $$('#reuse-list .browser-item').forEach(r => r.classList.remove('selected'));
+        $$('#reuse-list .browser-item').forEach(r => {
+          r.classList.remove('selected');
+          r.style.background = 'var(--surface2)';
+          r.style.color = '';
+        });
         row.classList.add('selected');
+        row.style.background = 'var(--accent, #4f6ef7)';
+        row.style.color = 'white';
         state.sourceJobId = job.job_id;
         document.getElementById('btn-next-1').disabled = false;
       });
