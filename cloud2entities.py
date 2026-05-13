@@ -72,6 +72,8 @@ log_filename = "log.txt"
 
 # SECTION: Import Point Clouds
 
+print(f"[DEBUG] e57_input={e57_input}, e57_file_names={e57_file_names if e57_input else 'N/A'}, xyz_filenames={xyz_filenames}")
+
 # read e57 files and create xyz
 if e57_input:
     for (idx, e57_file_name) in enumerate(e57_file_names):
