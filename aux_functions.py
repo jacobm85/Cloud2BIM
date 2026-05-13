@@ -1303,31 +1303,27 @@ def assign_points_to_walls(x_coords, y_coords, z_coords, wall_axes, parallel_gro
     line_starts = np.array([axis[0] for axis in wall_axes])
     line_ends = np.array([axis[1] for axis in wall_axes])
 
-    all_distances = []
-
+    # Memory-efficient: track closest wall per point without building the
+    # full (n_walls × n_points) distance matrix which can exceed several GB.
     batch_size = 1_000_000
     n_points = valid_points.shape[0]
+    min_distances = np.full(n_points, np.inf)
+    min_distance_indices = np.zeros(n_points, dtype=np.int32)
 
-    for start, end in zip(line_starts, line_ends):
-        distances_for_wall = []
-        for i in range(0, n_points, batch_size):
-            batch = valid_points[i:i + batch_size, :2]
-            distances = distance_points_to_line_np(batch, start, end)
-            distances_for_wall.append(distances)
-        all_distances.append(np.concatenate(distances_for_wall))
+    for wall_idx, (start, end) in enumerate(zip(line_starts, line_ends)):
+        wall_dist = np.concatenate([
+            distance_points_to_line_np(valid_points[i:i + batch_size, :2], start, end)
+            for i in range(0, n_points, batch_size)
+        ])
+        better = wall_dist < min_distances
+        min_distances[better] = wall_dist[better]
+        min_distance_indices[better] = wall_idx
 
-    all_distances = np.stack(all_distances)
-
-    # Determine the closest wall for each point
-    min_distances = np.min(all_distances, axis=0)
-    min_distance_indices = np.argmin(all_distances, axis=0)
-
-    # Group points based on their closest wall
-    wall_groups = [[] for _ in range(len(wall_axes))]
-    for idx, point in enumerate(valid_points):
-        min_dist_idx = min_distance_indices[idx]
-        if min_distances[idx] <= acceptable_distances[min_dist_idx]:
-            wall_groups[min_dist_idx].append(point.tolist())
+    # Vectorised wall group assignment (replaces Python loop over all points)
+    wall_groups = []
+    for wall_idx in range(len(wall_axes)):
+        mask = (min_distance_indices == wall_idx) & (min_distances <= acceptable_distances[wall_idx])
+        wall_groups.append(valid_points[mask].tolist())
 
     return wall_groups, wall_thicknesses
 
