@@ -34,6 +34,6 @@ RUN mkdir -p web/static/bimviewer/libs/web-ifc web/static/bimviewer/dist && \
     curl -fsSL "https://cdn.jsdelivr.net/npm/@xeokit/xeokit-sdk/dist/xeokit-sdk.es.js" \
          -o web/static/bimviewer/dist/xeokit-sdk.es.js
 
-EXPOSE 8000
+EXPOSE 8001
 
-CMD ["uvicorn", "web.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["uvicorn", "web.main:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "1"]

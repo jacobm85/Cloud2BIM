@@ -6,7 +6,7 @@ services:
     image: cloud2bim:latest
     container_name: cloud2bim
     ports:
-      - "8000:8000"
+      - "8001:8001"
     volumes:
       # Persistent storage for uploaded files and job outputs (IFC results)
       - cloud2bim_uploads:/app/web/uploads

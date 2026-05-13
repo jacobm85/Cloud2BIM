@@ -1,6 +1,6 @@
 """
 Cloud2BIM Web Interface — FastAPI backend
-Run from project root:  uvicorn web.main:app --host 0.0.0.0 --port 8000
+Run from project root:  uvicorn web.main:app --host 0.0.0.0 --port 8001
 """
 
 import asyncio
