@@ -12,29 +12,21 @@ services:
       - cloud2bim_uploads:/app/web/uploads
       - cloud2bim_jobs:/app/web/jobs
 
-      # ── Network drives ────────────────────────────────────────────────────
-      # Mount a NAS share or local path that contains point cloud files.
-      # Add one entry per accessible location, then reference the container
-      # path in the NETWORK_DRIVES environment variable below.
+      # ── Nätverksdiskar ────────────────────────────────────────────────────
+      # Lägg till en rad per disk/mapp du vill exponera i webbgränssnittet.
+      # Format:  /sökväg/på/hosten:/drives/Visningsnamn:ro
+      # Mappnamnet efter /drives/ används som visningsnamn i filbläddraren.
       #
-      # Example — NAS share already mounted on the Docker host:
-      # - /mnt/nas/pointclouds:/data/pointclouds:ro
-      #
-      # Example — local directory on the host:
-      # - /home/jacob/pointclouds:/data/pointclouds:ro
+      # Exempel:
+      # - /mnt/exNas01/projects:/drives/NAS_Projekt:ro
+      # - /mnt/exNas01/scans:/drives/Skanningar:ro
+      # - C:\PointClouds:/drives/Lokalt:ro   (Windows Docker Desktop)
 
     environment:
       PYTHONUNBUFFERED: "1"
       # Prevents Open3D from trying to initialise a GPU/display in headless mode
       OPEN3D_CPU_RENDERING: "true"
       MPLBACKEND: "Agg"
-
-      # ── Network drives exposed in the web file browser ────────────────────
-      # JSON array of {name, path} objects.
-      # Each "path" must match a container path from the volumes section above.
-      # Uncomment and adjust when you have volume mounts configured:
-      #
-      # NETWORK_DRIVES: '[{"name":"Projektfiler","path":"/data/pointclouds"}]'
 
     restart: unless-stopped
 

@@ -34,15 +34,23 @@ else:
 UPLOAD_DIR = _PROJECT_ROOT / _web_cfg.get("upload_dir", "web/uploads")
 JOBS_DIR = _PROJECT_ROOT / _web_cfg.get("jobs_dir", "web/jobs")
 
-# NETWORK_DRIVES: env var (JSON) takes priority over web_config.yaml
+# NETWORK_DRIVES: auto-scan /drives/* first, then merge NETWORK_DRIVES env var
+# and web_config.yaml for backward compatibility.
+_DRIVES_ROOT = Path(os.environ.get("DRIVES_DIR", "/drives"))
+NETWORK_DRIVES: list = []
+if _DRIVES_ROOT.is_dir():
+    for _d in sorted(_DRIVES_ROOT.iterdir()):
+        if _d.is_dir():
+            NETWORK_DRIVES.append({"name": _d.name, "path": str(_d)})
+
 _env_drives = os.environ.get("NETWORK_DRIVES", "")
 if _env_drives:
     try:
-        NETWORK_DRIVES: list = json.loads(_env_drives)
+        NETWORK_DRIVES += json.loads(_env_drives)
     except json.JSONDecodeError:
-        NETWORK_DRIVES = []
+        pass
 else:
-    NETWORK_DRIVES = _web_cfg.get("network_drives") or []
+    NETWORK_DRIVES += _web_cfg.get("network_drives") or []
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
