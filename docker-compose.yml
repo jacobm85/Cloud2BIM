@@ -9,21 +9,20 @@ services:
       - "8001:8001"
     volumes:
       # ── Datamappar ───────────────────────────────────────────────────────────
-      # Bassökväg styrs av DATA_ROOT i .env (standard: /mnt/ssd250/scan2bim).
+      # Ändra vänster sida av : till din lokala sökväg.
       # Skapa mapparna första gången med:
-      #   mkdir -p ${DATA_ROOT:-/mnt/ssd250/scan2bim}/{uploads,jobs,output_xyz,images,pointclouds}
+      #   mkdir -p /mnt/ssd250/scan2bim/{uploads,jobs,output_xyz,images,pointclouds}
       #
-      - ${DATA_ROOT:-/mnt/ssd250/scan2bim}/uploads:/app/web/uploads
-      - ${DATA_ROOT:-/mnt/ssd250/scan2bim}/jobs:/app/web/jobs
-      - ${DATA_ROOT:-/mnt/ssd250/scan2bim}/output_xyz:/app/output_xyz
-      - ${DATA_ROOT:-/mnt/ssd250/scan2bim}/images:/app/images
+      - /mnt/ssd250/scan2bim/uploads:/app/web/uploads
+      - /mnt/ssd250/scan2bim/jobs:/app/web/jobs
+      - /mnt/ssd250/scan2bim/output_xyz:/app/output_xyz
+      - /mnt/ssd250/scan2bim/images:/app/images
 
       # ── Nätverksdiskar ───────────────────────────────────────────────────────
       # Varje mapp monterad under /drives/<Namn> visas automatiskt i
       # filbläddraren med <Namn> som visningsnamn.
-      # Lägg till en rad per källa du vill kunna bläddra i.
       #
-      - ${DATA_ROOT:-/mnt/ssd250/scan2bim}/pointclouds:/drives/Punktmoln
+      - /mnt/ssd250/scan2bim/pointclouds:/drives/Punktmoln
       # - /mnt/annanNas/projekt:/drives/NAS_Projekt:ro
       # - /mnt/annanNas/skanningar:/drives/Skanningar:ro
 
