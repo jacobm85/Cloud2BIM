@@ -810,6 +810,8 @@ def calculate_wall_axis(group):
     # Calculate the direction of the axis based on the longer segment
     direction = [longer_segment[1][0] - longer_segment[0][0], longer_segment[1][1] - longer_segment[0][1]]
     norm = (direction[0] ** 2 + direction[1] ** 2) ** 0.5
+    if norm == 0:
+        return None, 0
     direction = [direction[0] / norm, direction[1] / norm]
 
     # Calculate the mean distance between the two segments
@@ -1070,10 +1072,17 @@ def identify_walls(pointcloud, pointcloud_resolution, minimum_wall_length, minim
     # plot_segments_with_candidates(facade_wall_candidates)
 
     wall_axes, wall_thicknesses = [], []
-    for group in parallel_groups:
+    valid_parallel_groups, valid_wall_labels = [], []
+    for group, label in zip(parallel_groups, wall_labels):
         wall_axis, wall_thickness = calculate_wall_axis(group)
+        if wall_axis is None:
+            continue
         wall_axes.append(wall_axis)
         wall_thicknesses.append(wall_thickness)
+        valid_parallel_groups.append(group)
+        valid_wall_labels.append(label)
+    parallel_groups = valid_parallel_groups
+    wall_labels = valid_wall_labels
 
     wall_axes = adjust_intersections(wall_axes, maximum_wall_thickness)
     # plot_parallel_groups(parallel_groups, wall_axes, binary_image, points_2d, x_min, x_max, y_min, y_max, storey)
