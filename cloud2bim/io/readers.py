@@ -44,7 +44,16 @@ def _read_e57(path: Path) -> tuple[np.ndarray, np.ndarray | None]:
     has_color = True
 
     for scan_idx in range(n_scans):
-        data = e57.read_scan(scan_idx, ignore_missing_fields=True)
+        try:
+            data = e57.read_scan(scan_idx, ignore_missing_fields=True)
+        except Exception as exc:
+            # Some scanners write E57 without /data3D/N/pose, which makes the
+            # default to_global() transform fail. Retry with transform=False.
+            log.warning(
+                "Scan %d transform failed (%s) — reading local coordinates",
+                scan_idx, exc,
+            )
+            data = e57.read_scan(scan_idx, ignore_missing_fields=True, transform=False)
         xyz = np.column_stack([data["cartesianX"], data["cartesianY"], data["cartesianZ"]])
         xyz_chunks.append(xyz.astype(np.float64))
         if "colorRed" in data and "colorGreen" in data and "colorBlue" in data:

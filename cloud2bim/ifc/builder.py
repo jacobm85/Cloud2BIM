@@ -50,6 +50,10 @@ class IfcBuilder:
         self.offset = offset or CoordinateOffset(0, 0, 0)
         self.model = ifcopenshell.api.run("project.create_file", version="IFC2X3")
 
+        # Owner history setup — required by ifcopenshell ≥ 0.7 before any
+        # root.create_entity call, otherwise it raises "Please create a user".
+        self._init_owner_history()
+
         self._project = ifcopenshell.api.run(
             "root.create_entity", self.model,
             ifc_class="IfcProject", name=cfg.project.name,
@@ -155,6 +159,39 @@ class IfcBuilder:
         log.info("IFC written: %s", path)
 
     # ── internal ────────────────────────────────────────────────────────
+
+    def _init_owner_history(self) -> None:
+        """Create person + organisation + application so OwnerHistory works."""
+        import ifcopenshell.api.owner.settings as _owner_settings
+
+        person = ifcopenshell.api.run(
+            "owner.add_person", self.model,
+            identification=self.cfg.author.given_name or "cloud2bim",
+            family_name=self.cfg.author.family_name or "Cloud2BIM",
+            given_name=self.cfg.author.given_name or "Pipeline",
+        )
+        org = ifcopenshell.api.run(
+            "owner.add_organisation", self.model,
+            identification=self.cfg.author.organization or "Cloud2BIM",
+            name=self.cfg.author.organization or "Cloud2BIM",
+        )
+        person_org = ifcopenshell.api.run(
+            "owner.add_person_and_organisation", self.model,
+            person=person, organisation=org,
+        )
+        application = ifcopenshell.api.run(
+            "owner.add_application", self.model,
+            application_developer=org,
+            version="2.0.0",
+            application_full_name="Cloud2BIM",
+            application_identifier="Cloud2BIM",
+        )
+        # ifcopenshell.api.owner.settings.{set_user,set_application} accept a
+        # callable; we pass a lambda that returns our pre-built entities.
+        _owner_settings.set_user = lambda *_a, **_k: person_org
+        _owner_settings.set_application = lambda *_a, **_k: application
+        _owner_settings.get_user = lambda *_a, **_k: person_org
+        _owner_settings.get_application = lambda *_a, **_k: application
 
     def _create_spatial(self, ifc_class: str, name: str, parent):
         entity = ifcopenshell.api.run(
