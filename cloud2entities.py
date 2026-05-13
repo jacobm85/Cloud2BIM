@@ -6,6 +6,18 @@ from aux_functions import *
 from generate_ifc import IFCmodel
 from space_generator import *
 
+import traceback as _traceback
+
+def _crash_handler(exc_type, exc_val, exc_tb):
+    if issubclass(exc_type, SystemExit):
+        sys.__excepthook__(exc_type, exc_val, exc_tb)
+        return
+    _traceback.print_exception(exc_type, exc_val, exc_tb, file=sys.stdout)
+    sys.stdout.flush()
+    sys.exit(1)
+
+sys.excepthook = _crash_handler
+
 # === Load Configuration ===
 config = load_config_and_variables()
 

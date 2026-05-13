@@ -162,7 +162,7 @@ class CreateJobRequest(BaseModel):
     exterior_scan: bool = False
 
     # Point cloud options
-    dilute: bool = False
+    dilute: bool = True
     dilution_factor: int = 10
     pc_resolution: float = 0.002
     grid_coefficient: int = 5

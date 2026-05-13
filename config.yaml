@@ -3,7 +3,7 @@ e57_files:
   - input_e57/werk_satny_vstup.e57
 xyz_files:
   - input_xyz/new_data/ISPR_UO2_1st.xyz
-dilute: false
+dilute: true
 dilution_factor: 10
 exterior_scan: false
 pc_resolution: 0.002

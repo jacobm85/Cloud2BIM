@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 import threading
@@ -61,6 +62,7 @@ class JobManager:
                 text=True,
                 bufsize=1,
                 cwd=str(project_root),
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
             )
 
             # Read output with a watchdog timer
