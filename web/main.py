@@ -256,6 +256,7 @@ async def create_job(request: CreateJobRequest):
     if suffix == ".e57":
         e57_input = True
         pipeline_input = input_path
+        xyz_converted = str(job_dir / "converted_input.xyz")
     elif suffix in (".las", ".laz"):
         e57_input = False
         xyz_converted = str(job_dir / "converted_input.xyz")
@@ -271,7 +272,7 @@ async def create_job(request: CreateJobRequest):
 
     config = {
         "e57_input": e57_input,
-        "xyz_files": [] if e57_input else [pipeline_input],
+        "xyz_files": [xyz_converted] if e57_input else [pipeline_input],
         "e57_files": [pipeline_input] if e57_input else [],
         "exterior_scan": request.exterior_scan,
         "dilute": request.dilute,
