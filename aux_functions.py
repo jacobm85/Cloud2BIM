@@ -371,8 +371,6 @@ def identify_slabs(points_xyz, points_rgb, bottom_floor_slab_thickness, top_floo
     # merge lower and upper surface of each horiz_surface and create a hull
     slabs = []
     os.makedirs("output_xyz", exist_ok=True)
-    os.makedirs("images/pdf", exist_ok=True)
-    os.makedirs("images/wall_outputs_images", exist_ok=True)
     for i in range(len(h_surf_candidates)):
         if i == 0:
             print('Creating hull for slab no. %d of %d.' % ((i + 1), int(len(h_surf_candidates) / 2) + 1))

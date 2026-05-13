@@ -1,8 +1,12 @@
+import os
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.ticker import MultipleLocator
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
 from matplotlib.patches import Polygon
+
+os.makedirs("images/pdf", exist_ok=True)
+os.makedirs("images/wall_outputs_images", exist_ok=True)
 
 
 def set_plot_style():
