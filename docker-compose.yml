@@ -11,18 +11,18 @@ services:
       # ── Datamappar ───────────────────────────────────────────────────────────
       # Ändra vänster sida av : till din lokala sökväg.
       # Skapa mapparna första gången med:
-      #   mkdir -p /mnt/ssd250/scan2bim/{uploads,jobs,output_xyz,images,pointclouds}
+      #   mkdir -p /mnt/SSD250/scan2bim/{uploads,jobs,output_xyz,images,pointclouds}
       #
-      - /mnt/ssd250/scan2bim/uploads:/app/web/uploads
-      - /mnt/ssd250/scan2bim/jobs:/app/web/jobs
-      - /mnt/ssd250/scan2bim/output_xyz:/app/output_xyz
-      - /mnt/ssd250/scan2bim/images:/app/images
+      - /mnt/SSD250/scan2bim/uploads:/app/web/uploads
+      - /mnt/SSD250/scan2bim/jobs:/app/web/jobs
+      - /mnt/SSD250/scan2bim/output_xyz:/app/output_xyz
+      - /mnt/SSD250/scan2bim/images:/app/images
 
       # ── Nätverksdiskar ───────────────────────────────────────────────────────
       # Varje mapp monterad under /drives/<Namn> visas automatiskt i
       # filbläddraren med <Namn> som visningsnamn.
       #
-      - /mnt/ssd250/scan2bim/pointclouds:/drives/Punktmoln
+      - /mnt/SSD250/scan2bim/pointclouds:/drives/Punktmoln
       # - /mnt/annanNas/projekt:/drives/NAS_Projekt:ro
       # - /mnt/annanNas/skanningar:/drives/Skanningar:ro
 
