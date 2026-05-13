@@ -67,9 +67,18 @@ def run_pipeline(cfg: Config) -> int:
     t0 = time.time()
     slabs = detect_slabs(points_xyz, cfg.slabs)
     log.info("Slabs: %d in %.1fs", len(slabs), time.time() - t0)
+
+    # Synthesize missing floor/ceiling so we can still emit placeholder walls
+    placeholder_storeys: set[int] = set()
     if len(slabs) < 2:
-        log.error("Need ≥ 2 slabs for wall detection (got %d)", len(slabs))
-        return _emit_ifc_only_slabs(cfg, slabs, offset)
+        log.warning(
+            "Fewer than 2 slabs (%d) — synthesizing from scan Z bounds; walls "
+            "will be drawn as %.0f cm placeholders so the modeller knows "
+            "something is there.",
+            len(slabs), cfg.walls.placeholder_height * 100,
+        )
+        slabs = _synthesize_slabs(slabs, points_xyz, cfg)
+        placeholder_storeys = set(range(len(slabs) - 1))
 
     # ── 6. Per-storey walls + openings ──────────────────────────────────
     log.info("─── Wall & opening segmentation ───")
@@ -78,6 +87,7 @@ def run_pipeline(cfg: Config) -> int:
     for i in range(len(slabs) - 1):
         z_floor = slabs[i].bottom_z + slabs[i].thickness
         z_ceiling = slabs[i + 1].bottom_z
+        is_placeholder = i in placeholder_storeys
         storey_mask = (points_xyz[:, 2] >= z_floor - 0.1) & (points_xyz[:, 2] <= z_ceiling + 0.1)
         storey_pts = points_xyz[storey_mask]
         storey_labels = SemanticLabels(
@@ -100,7 +110,15 @@ def run_pipeline(cfg: Config) -> int:
                 semantic_labels=storey_labels,
                 exterior_scan=cfg.exterior_scan,
             )
-            log.info("Storey %d walls: %d in %.1fs", i, len(walls), time.time() - t0)
+            if is_placeholder:
+                for w in walls:
+                    w.height = cfg.walls.placeholder_height
+                    w.label = w.label + "_placeholder"
+            log.info(
+                "Storey %d walls: %d in %.1fs%s",
+                i, len(walls), time.time() - t0,
+                " (placeholder height)" if is_placeholder else "",
+            )
         except Exception as exc:
             log.exception("Storey %d wall detection failed — skipping: %s", i, exc)
             walls = []
@@ -196,11 +214,38 @@ def _run_segmentation(cfg: Config, points: np.ndarray) -> SemanticLabels:
     return labels
 
 
-def _emit_ifc_only_slabs(cfg: Config, slabs: list[Slab], offset: CoordinateOffset) -> int:
-    """Fallback: write a slab-only IFC if wall detection cannot proceed."""
-    builder = IfcBuilder(cfg.ifc, offset=offset)
-    for i, slab in enumerate(slabs):
-        builder.add_slab(slab, storey_idx=i)
-    builder.write(cfg.io.output_ifc)
-    log.warning("IFC contains slabs only (insufficient slabs for walls)")
-    return 0
+def _synthesize_slabs(detected: list[Slab], points_xyz: np.ndarray, cfg: Config) -> list[Slab]:
+    """Fill in missing floor/ceiling so wall detection can still run.
+
+    Strategy:
+        - 0 slabs: use scan z_min as floor, z_max as ceiling
+        - 1 slab: use it as either floor or ceiling depending on its Z
+                  relative to the scan centre; synthesize the other end.
+    """
+    z_min, z_max = float(points_xyz[:, 2].min()), float(points_xyz[:, 2].max())
+    xs = points_xyz[:, 0]
+    ys = points_xyz[:, 1]
+    bbox_x = np.array([xs.min(), xs.max(), xs.max(), xs.min(), xs.min()])
+    bbox_y = np.array([ys.min(), ys.min(), ys.max(), ys.max(), ys.min()])
+
+    def _virtual_slab(z: float, thickness: float, label: str) -> Slab:
+        s = Slab(bottom_z=z, thickness=thickness, polygon_x=bbox_x, polygon_y=bbox_y)
+        log.info("Synthesized %s slab at z=%.2f m (placeholder geometry)", label, z)
+        return s
+
+    if not detected:
+        return [
+            _virtual_slab(z_min, cfg.slabs.bottom_floor_thickness, "floor"),
+            _virtual_slab(z_max - cfg.slabs.top_floor_thickness,
+                          cfg.slabs.top_floor_thickness, "ceiling"),
+        ]
+    # Exactly 1 slab: decide whether it's a floor or ceiling
+    only = detected[0]
+    mid = (z_min + z_max) / 2
+    if only.bottom_z < mid:
+        # It's a floor — synthesize a ceiling above
+        return [only, _virtual_slab(
+            z_max - cfg.slabs.top_floor_thickness,
+            cfg.slabs.top_floor_thickness, "ceiling")]
+    # It's a ceiling — synthesize a floor below
+    return [_virtual_slab(z_min, cfg.slabs.bottom_floor_thickness, "floor"), only]
