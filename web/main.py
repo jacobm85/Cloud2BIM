@@ -176,6 +176,14 @@ class CreateJobRequest(BaseModel):
     pc_resolution: float = 0.002
     grid_coefficient: int = 5
 
+    # ML semantic segmentation
+    seg_enabled: bool = False
+    seg_backend: str = "ptv3"
+    seg_weights: Optional[str] = None
+
+    # Roofs
+    roofs_enabled: bool = False
+
     # Slab thicknesses
     bfs_thickness: float = 0.3
     tfs_thickness: float = 0.4
@@ -338,8 +346,9 @@ async def create_job(request: CreateJobRequest):
             "center_coordinates": True,
         },
         "segmentation": {
-            "enabled": False,  # set True once ML weights are mounted at /data/models
-            "backend": "ptv3",
+            "enabled": request.seg_enabled,
+            "backend": request.seg_backend,
+            "weights_path": request.seg_weights,
             "voxel_size": 0.05,
             "device": "auto",
             "cache_labels": True,
@@ -359,7 +368,7 @@ async def create_job(request: CreateJobRequest):
             "enable_ransac_fallback": True,
         },
         "openings": {},
-        "roofs": {"enabled": False},
+        "roofs": {"enabled": request.roofs_enabled},
         "ifc": {
             "project": {
                 "name": request.ifc_project_name,

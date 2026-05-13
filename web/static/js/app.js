@@ -423,27 +423,28 @@ async function setupResults() {
 }
 
 function parseStats(lines) {
-  const s = { walls: 0, slabs: 0, windows: 0, doors: 0, storeys: 0 };
-  lines.forEach(line => {
-    let m;
-    // "Creating hull for slab no. 2 of 3" → slabs = 3
-    if ((m = line.match(/slab no\.\s*\d+\s+of\s+(\d+)/i)))
-      s.slabs = Math.max(s.slabs, +m[1]);
-    // "Wall 5:" — one line printed per wall
-    if ((m = line.match(/^\s*Wall\s+(\d+)\s*:/)))
-      s.walls = Math.max(s.walls, +m[1]);
-    // "Opening (window):" and "Opening (door):" — one per opening
-    if (/^\s*Opening\s*\(window\)/i.test(line)) s.windows++;
-    if (/^\s*Opening\s*\(door\)/i.test(line)) s.doors++;
-  });
+  // v2 final summary: "DONE in N.Ns: 3 slabs, 14 walls, 7 openings, 0 roof planes"
+  const s = { walls: 0, slabs: 0, windows: 0, doors: 0, storeys: 0, openings: 0, roofs: 0 };
+  for (const line of lines) {
+    let m = line.match(/DONE in [\d.]+s:\s*(\d+)\s+slabs?,\s*(\d+)\s+walls?,\s*(\d+)\s+openings?,\s*(\d+)\s+roof/i);
+    if (m) {
+      s.slabs = +m[1];
+      s.walls = +m[2];
+      s.openings = +m[3];
+      s.roofs = +m[4];
+    }
+  }
   s.storeys = s.slabs > 1 ? s.slabs - 1 : Math.min(s.slabs, 1);
+  // Doors and windows aren't broken out in summary; show combined as "Öppningar"
+  s.windows = s.openings;
+  s.doors = 0;
   return s;
 }
 
 function renderStats(s) {
   document.getElementById('result-stats').innerHTML =
     [['Våningar', s.storeys], ['Väggar', s.walls], ['Bjälklag', s.slabs],
-     ['Fönster', s.windows], ['Dörrar', s.doors]]
+     ['Öppningar', s.openings || 0], ['Tak', s.roofs || 0]]
     .map(([l, n]) => '<div class="stat-box"><div class="stat-num">' + n +
       '</div><div class="stat-label">' + l + '</div></div>').join('');
 }
@@ -458,6 +459,10 @@ function collectConfig() {
     network_path: state.sourceType === 'network' ? state.networkPath : null,
     source_job_id: state.sourceType === 'reuse' ? state.sourceJobId : null,
     e57_input: false,  // auto-detected on backend from file extension
+    seg_enabled: b('seg-enabled'),
+    seg_backend: v('seg-backend') || 'ptv3',
+    seg_weights: v('seg-weights') || null,
+    roofs_enabled: b('roofs-enabled'),
     exterior_scan: b('exterior-scan'),
     dilute: b('dilute'), dilution_factor: parseInt(v('dilution-factor')) || 10,
     pc_resolution: n('pc-resolution'), grid_coefficient: parseInt(v('grid-coefficient')) || 5,

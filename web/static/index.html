@@ -98,56 +98,74 @@
     <div class="card">
       <div class="card-title"><span class="icon">⚙️</span> Grundinställningar</div>
 
-      <div class="section-label">Filformat</div>
-      <div class="alert alert-info" id="format-info" style="margin-bottom:16px">
-        Format detekteras automatiskt från filändelsen (.xyz / .e57 / .las / .laz)
+      <div class="alert alert-info" style="margin-bottom:16px">
+        Format detekteras automatiskt (.xyz / .e57 / .las / .laz). Koordinater
+        centreras automatiskt så att SWEREF/RT90 hanteras korrekt.
       </div>
+
+      <div class="section-label">Skanning</div>
       <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px">
         <label class="toggle-group">
           <span class="toggle"><input type="checkbox" id="exterior-scan"><span class="toggle-slider"></span></span>
-          Exteriör skanning
+          Exteriör skanning (saknar inre väggar)
         </label>
       </div>
 
       <div class="section-label">Punktmoln</div>
-      <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px">
+      <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:12px">
         <label class="toggle-group">
-          <span class="toggle"><input type="checkbox" id="dilute"><span class="toggle-slider"></span></span>
-          Gleslägg punktmoln
+          <span class="toggle"><input type="checkbox" id="dilute" checked><span class="toggle-slider"></span></span>
+          Gleslägg punktmoln (rekommenderas för stora skanningar)
         </label>
       </div>
-      <div class="form-grid">
-        <div class="form-group">
-          <label for="pc-resolution">Punktmolnsupplösning (m)</label>
-          <input type="number" id="pc-resolution" value="0.002" step="0.001" min="0.001">
-        </div>
+      <div class="form-grid" style="margin-bottom:8px">
         <div class="form-group">
           <label for="dilution-factor">Glesläggningsfaktor (var n:te punkt)</label>
-          <input type="number" id="dilution-factor" value="10" min="2">
-        </div>
-        <div class="form-group">
-          <label for="grid-coefficient">Gridkoefficient</label>
-          <input type="number" id="grid-coefficient" value="5" min="1">
-        </div>
-        <div class="form-group">
-          <label for="material">Material</label>
-          <select id="material">
-            <option value="Concrete">Betong</option>
-            <option value="Brick">Tegel</option>
-            <option value="Wood">Trä</option>
-            <option value="Steel">Stål</option>
-            <option value="Unknown">Okänt</option>
-          </select>
+          <input type="number" id="dilution-factor" value="10" min="1">
         </div>
       </div>
 
-      <!-- Advanced: Wall & slab params -->
+      <div class="section-label">Semantisk segmentering (ML)</div>
+      <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:12px">
+        <label class="toggle-group">
+          <span class="toggle"><input type="checkbox" id="seg-enabled"><span class="toggle-slider"></span></span>
+          Aktivera ML-segmentering (filtrerar bort möbler innan väggdetektering)
+        </label>
+      </div>
+      <div class="form-grid" style="margin-bottom:8px">
+        <div class="form-group">
+          <label for="seg-backend">Backend</label>
+          <select id="seg-backend">
+            <option value="ptv3">PointTransformer V3 (rekommenderas)</option>
+            <option value="randla">RandLA-Net (lättare)</option>
+            <option value="none">Ingen (passthrough)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="seg-weights">Sökväg till modellvikter (valfritt)</label>
+          <input type="text" id="seg-weights" placeholder="/data/models/ptv3-s3dis.pth">
+        </div>
+      </div>
+      <div class="alert alert-info" style="font-size:12px;margin-bottom:16px">
+        ℹ️ Kräver att <code>requirements-ml.txt</code> är installerade och GPU/torch är tillgängligt i containern.
+      </div>
+
+      <div class="section-label">Element att detektera</div>
+      <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px">
+        <label class="toggle-group">
+          <span class="toggle"><input type="checkbox" id="roofs-enabled"><span class="toggle-slider"></span></span>
+          Sneda tak (RANSAC-planpassning)
+        </label>
+      </div>
+
+      <!-- Advanced: Geometry params -->
       <div class="collapsible-header" id="adv-toggle">
-        Avancerade parametrar (väggar & bjälklag)
+        Avancerade geometriparametrar
         <span class="collapsible-arrow">▾</span>
       </div>
       <div class="collapsible-body" id="adv-body">
-        <div class="form-grid">
+        <div class="section-label" style="margin-top:0">Bjälklag</div>
+        <div class="form-grid" style="margin-bottom:16px">
           <div class="form-group">
             <label for="bfs-thickness">Golvbjälklag tjocklek (m)</label>
             <input type="number" id="bfs-thickness" value="0.3" step="0.05" min="0.05">
@@ -156,6 +174,10 @@
             <label for="tfs-thickness">Takbjälklag tjocklek (m)</label>
             <input type="number" id="tfs-thickness" value="0.4" step="0.05" min="0.05">
           </div>
+        </div>
+
+        <div class="section-label">Väggar</div>
+        <div class="form-grid" style="margin-bottom:16px">
           <div class="form-group">
             <label for="min-wall-length">Min vägglängd (m)</label>
             <input type="number" id="min-wall-length" value="0.10" step="0.05" min="0.05">
@@ -171,6 +193,28 @@
           <div class="form-group">
             <label for="ext-wall-thickness">Ytterväggar tjocklek (m)</label>
             <input type="number" id="ext-wall-thickness" value="0.3" step="0.05">
+          </div>
+        </div>
+
+        <div class="section-label">Histogramupplösning</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="pc-resolution">Förväntad punktdistans (m)</label>
+            <input type="number" id="pc-resolution" value="0.002" step="0.001" min="0.001">
+          </div>
+          <div class="form-group">
+            <label for="grid-coefficient">Gridkoefficient (pixel = distans × detta)</label>
+            <input type="number" id="grid-coefficient" value="5" min="1">
+          </div>
+          <div class="form-group">
+            <label for="material">Standardmaterial</label>
+            <select id="material">
+              <option value="Concrete">Betong</option>
+              <option value="Brick">Tegel</option>
+              <option value="Wood">Trä</option>
+              <option value="Steel">Stål</option>
+              <option value="Unknown">Okänt</option>
+            </select>
           </div>
         </div>
       </div>
