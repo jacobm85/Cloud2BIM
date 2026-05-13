@@ -1,0 +1,72 @@
+# Cloud2BIM v2 — example configuration with all available keys.
+# Copy and edit. Only the io section is required; everything else has defaults.
+
+io:
+  input_files:
+    - input.e57           # E57, LAS, LAZ or XYZ
+  output_ifc: output.ifc
+  work_dir: ./work
+  dilute: true
+  dilution_factor: 10
+  center_coordinates: true   # required for SWEREF / national grid coordinates
+
+segmentation:
+  enabled: true
+  backend: ptv3              # ptv3 | randla | none
+  weights_path: null         # null = bundled default for the backend
+  voxel_size: 0.05
+  device: auto               # cuda | cpu | auto
+  batch_size: 4
+  cache_labels: true
+
+slabs:
+  bottom_floor_thickness: 0.30
+  top_floor_thickness: 0.40
+  pc_resolution: 0.002
+  grid_coefficient: 5
+  z_step: 0.15
+
+walls:
+  min_length: 0.10
+  min_thickness: 0.05
+  max_thickness: 0.75
+  exterior_thickness: 0.30
+  use_ml_filter: true
+  enable_ransac_fallback: true
+  max_walls_per_storey: 200
+
+openings:
+  min_window_width: 0.40
+  min_window_height: 0.60
+  door_min_height: 1.60
+  door_max_z: 0.10
+  max_aspect_ratio: 4.0
+  validate_with_semantics: true
+
+roofs:
+  enabled: false
+  min_slope_deg: 10.0
+  ransac_distance: 0.05
+  min_inliers: 1000
+
+ifc:
+  project:
+    name: "Project name"
+    long_name: "Scan to BIM"
+    version: "1.0"
+  author:
+    given_name: ""
+    family_name: ""
+    organization: ""
+  building:
+    name: ""
+    type: ""
+    phase: ""
+  site:
+    latitude: [0, 0, 0]
+    longitude: [0, 0, 0]
+    elevation: 0.0
+  default_material: Concrete
+  revit_compatible: true
+
+exterior_scan: false
