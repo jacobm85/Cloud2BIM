@@ -3,6 +3,7 @@ const state = {
   currentStep: 1,
   uploadId: null,
   networkPath: null,
+  sourceJobId: null,
   sourceType: 'upload',
   jobId: null,
   jobStatus: null,
@@ -49,6 +50,7 @@ function resetJob() {
   state.jobStatus = null;
   state.uploadId = null;
   state.networkPath = null;
+  state.sourceJobId = null;
 
   clearUploadError();
   document.getElementById('upload-progress').classList.remove('visible');
@@ -103,7 +105,10 @@ $$('.upload-tab').forEach(tab => {
       tab.dataset.tab === 'upload' ? 'block' : 'none';
     document.getElementById('network-panel').style.display =
       tab.dataset.tab === 'network' ? 'block' : 'none';
+    document.getElementById('reuse-panel').style.display =
+      tab.dataset.tab === 'reuse' ? 'block' : 'none';
     if (tab.dataset.tab === 'network') loadDrives();
+    if (tab.dataset.tab === 'reuse') loadReusableJobs();
   });
 });
 
@@ -190,16 +195,48 @@ async function startUpload(file) {
 
 // Next button — uses onclick in HTML, but also wired here as fallback
 function onNext1() {
-  console.log('[next1] clicked, uploadId =', state.uploadId, 'sourceType =', state.sourceType);
   if (state.sourceType === 'upload' && !state.uploadId) {
-    showUploadError('Filen är inte uppladdad än.');
-    return;
+    showUploadError('Filen är inte uppladdad än.'); return;
   }
   if (state.sourceType === 'network' && !state.networkPath) {
-    showUploadError('Välj en fil från nätverksdisken.');
-    return;
+    showUploadError('Välj en fil från nätverksdisken.'); return;
+  }
+  if (state.sourceType === 'reuse' && !state.sourceJobId) {
+    showUploadError('Välj ett tidigare jobb.'); return;
   }
   goTo(2);
+}
+
+async function loadReusableJobs() {
+  const list = document.getElementById('reuse-list');
+  list.innerHTML = '<div style="color:var(--text-dim);font-size:13px">Laddar…</div>';
+  try {
+    const res = await fetch('/api/jobs/reusable');
+    const jobs = await res.json();
+    if (!jobs.length) {
+      list.innerHTML = '<div style="color:var(--text-dim);font-size:13px">Inga tidigare jobb med konverterade punktmoln hittades.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    jobs.forEach(job => {
+      const row = document.createElement('div');
+      row.className = 'browser-item';
+      row.style.cssText = 'cursor:pointer;padding:8px 10px;border-radius:6px;margin-bottom:4px;display:flex;justify-content:space-between;align-items:center;background:var(--surface2)';
+      const date = job.created_at ? new Date(job.created_at).toLocaleString('sv-SE') : '—';
+      row.innerHTML = `<div><div style="font-weight:600;font-size:13px">${job.original_filename}</div>
+        <div style="font-size:11px;color:var(--text-dim)">${date} &nbsp;·&nbsp; ${job.xyz_size_mb} MB XYZ</div></div>
+        <div style="font-size:11px;color:var(--text-dim);padding-left:8px">${job.job_id.slice(0,8)}…</div>`;
+      row.addEventListener('click', () => {
+        $$('#reuse-list .browser-item').forEach(r => r.classList.remove('selected'));
+        row.classList.add('selected');
+        state.sourceJobId = job.job_id;
+        document.getElementById('btn-next-1').disabled = false;
+      });
+      list.appendChild(row);
+    });
+  } catch (e) {
+    list.innerHTML = '<div style="color:var(--danger)">Kunde inte ladda tidigare jobb.</div>';
+  }
 }
 window.onNext1 = onNext1;
 
@@ -394,6 +431,7 @@ function collectConfig() {
   return {
     upload_id: state.sourceType === 'upload' ? state.uploadId : null,
     network_path: state.sourceType === 'network' ? state.networkPath : null,
+    source_job_id: state.sourceType === 'reuse' ? state.sourceJobId : null,
     e57_input: false,  // auto-detected on backend from file extension
     exterior_scan: b('exterior-scan'),
     dilute: b('dilute'), dilution_factor: parseInt(v('dilution-factor')) || 10,

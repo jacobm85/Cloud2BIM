@@ -46,6 +46,7 @@
       <div class="upload-tabs">
         <div class="upload-tab active" data-tab="upload">⬆ Ladda upp fil</div>
         <div class="upload-tab" data-tab="network">🗂 Nätverksdisk</div>
+        <div class="upload-tab" data-tab="reuse">♻ Tidigare jobb</div>
       </div>
 
       <!-- Upload panel -->
@@ -74,6 +75,14 @@
         <div class="alert alert-info">
           ℹ️ Konfigurerade nätverksdiskar visas nedan. Välj en fil för att fortsätta.
         </div>
+      </div>
+
+      <!-- Reuse panel -->
+      <div id="reuse-panel" style="display:none">
+        <div class="alert alert-info">
+          ♻ Välj ett tidigare jobb för att köra om detekteringen med nya inställningar — konverteringssteget hoppas över.
+        </div>
+        <div id="reuse-list" style="margin-top:8px"></div>
       </div>
     </div>
 

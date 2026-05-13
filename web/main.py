@@ -164,6 +164,7 @@ class CreateJobRequest(BaseModel):
     # Input source (one required)
     upload_id: Optional[str] = None
     network_path: Optional[str] = None
+    source_job_id: Optional[str] = None  # re-use converted_input.xyz from a previous job
 
     # Input format
     e57_input: bool = False
@@ -233,13 +234,50 @@ def _convert_las_to_xyz(las_path: str, xyz_path: str, log_fn=None):
         log_fn(f"[INFO] XYZ sparat: {Path(xyz_path).name}")
 
 
+@app.get("/api/jobs/reusable")
+async def list_reusable_jobs():
+    """Return jobs that have a converted_input.xyz ready to re-use."""
+    result = []
+    if not JOBS_DIR.exists():
+        return result
+    for job_dir in sorted(JOBS_DIR.iterdir(), key=lambda d: d.stat().st_mtime, reverse=True):
+        if not job_dir.is_dir():
+            continue
+        xyz = job_dir / "converted_input.xyz"
+        if not xyz.exists():
+            continue
+        info_path = job_dir / "job_info.json"
+        info = json.loads(info_path.read_text()) if info_path.exists() else {}
+        result.append({
+            "job_id": job_dir.name,
+            "created_at": info.get("created_at", ""),
+            "original_filename": info.get("original_filename", job_dir.name),
+            "xyz_size_mb": round(xyz.stat().st_size / 1_000_000, 1),
+        })
+    return result
+
+
 @app.post("/api/jobs")
 async def create_job(request: CreateJobRequest):
-    if not request.upload_id and not request.network_path:
-        raise HTTPException(400, "Either upload_id or network_path is required")
+    if not request.source_job_id and not request.upload_id and not request.network_path:
+        raise HTTPException(400, "Either source_job_id, upload_id or network_path is required")
 
-    # Resolve input file
-    if request.upload_id:
+    preprocess_fn = None
+
+    # ── Re-use an existing converted XYZ from a previous job ─────────────
+    if request.source_job_id:
+        source_xyz = JOBS_DIR / request.source_job_id / "converted_input.xyz"
+        if not source_xyz.exists():
+            raise HTTPException(404, "Source job XYZ not found")
+        source_info_path = JOBS_DIR / request.source_job_id / "job_info.json"
+        source_info = json.loads(source_info_path.read_text()) if source_info_path.exists() else {}
+        input_path = str(source_xyz)
+        original_filename = source_info.get("original_filename", request.source_job_id)
+        e57_input = False
+        pipeline_input = input_path
+
+    # ── Resolve uploaded or network file ─────────────────────────────────
+    elif request.upload_id:
         meta_path = UPLOAD_DIR / request.upload_id / "meta.json"
         if not meta_path.exists():
             raise HTTPException(404, "Upload not found")
@@ -247,36 +285,43 @@ async def create_job(request: CreateJobRequest):
         if meta["status"] != "complete":
             raise HTTPException(400, "Upload not complete yet")
         input_path = str(UPLOAD_DIR / request.upload_id / meta["filename"])
+        original_filename = Path(input_path).name
     else:
         input_path = request.network_path
         if not Path(input_path).exists():
             raise HTTPException(404, f"File not found: {input_path}")
+        original_filename = Path(input_path).name
 
     job_id = str(uuid.uuid4())
     job_dir = JOBS_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     output_ifc = str(job_dir / "output.ifc")
 
-    # ── Auto-detect format from file extension ────────────────────────────
-    suffix = Path(input_path).suffix.lower()
-    preprocess_fn = None
+    # ── Auto-detect format (skipped when re-using existing XYZ) ──────────
+    if not request.source_job_id:
+        suffix = Path(input_path).suffix.lower()
+        if suffix == ".e57":
+            e57_input = True
+            pipeline_input = input_path
+            xyz_converted = str(job_dir / "converted_input.xyz")
+        elif suffix in (".las", ".laz"):
+            e57_input = False
+            xyz_converted = str(job_dir / "converted_input.xyz")
+            pipeline_input = xyz_converted
+            _las_src = input_path
+            _xyz_dst = xyz_converted
+            def preprocess_fn(log_fn):  # noqa: E731
+                _convert_las_to_xyz(_las_src, _xyz_dst, log_fn)
+        else:
+            e57_input = False
+            pipeline_input = input_path
 
-    if suffix == ".e57":
-        e57_input = True
-        pipeline_input = input_path
-        xyz_converted = str(job_dir / "converted_input.xyz")
-    elif suffix in (".las", ".laz"):
-        e57_input = False
-        xyz_converted = str(job_dir / "converted_input.xyz")
-        pipeline_input = xyz_converted
-        _las_src = input_path
-        _xyz_dst = xyz_converted
-        def preprocess_fn(log_fn):  # noqa: E731
-            _convert_las_to_xyz(_las_src, _xyz_dst, log_fn)
-    else:
-        # .xyz or any other ASCII format
-        e57_input = False
-        pipeline_input = input_path
+    # ── Persist job metadata for later re-use ────────────────────────────
+    from datetime import datetime as _dt
+    (job_dir / "job_info.json").write_text(json.dumps({
+        "created_at": _dt.now().isoformat(),
+        "original_filename": original_filename,
+    }))
 
     config = {
         "e57_input": e57_input,
