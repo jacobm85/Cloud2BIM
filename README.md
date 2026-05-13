@@ -1,138 +1,137 @@
-# Cloud2BIM
+# Cloud2BIM v2
 
-Automated Scan-to-BIM pipeline that converts 3D point clouds into IFC models.
-Supports indoor building scans in E57, LAS/LAZ, and XYZ format.
+Production Scan-to-BIM pipeline. Converts E57/LAS/LAZ/XYZ point clouds into
+IFC 2x3 models with semantic ML pre-filtering, PCA-corrected wall detection,
+sloped roof handling, and Revit-friendly output.
 
-Fork of [VaclavNezerka/Cloud2BIM](https://github.com/VaclavNezerka/Cloud2BIM) —
-extended with a Docker-based web interface, additional input format support,
-and various pipeline improvements.
-
----
-
-## What it does
-
-1. **Slab detection** — scans the Z-axis histogram to find floor and ceiling slabs
-2. **Wall segmentation** — builds a 2D occupancy map, extracts wall contours and groups parallel segments; PCA rotation handles non-axis-aligned buildings
-3. **Opening detection** — classifies windows and doors from wall cross-sections
-4. **IFC export** — writes a standards-compliant IFC 2x3 file with slabs, walls, openings and spaces
-5. **3D viewer** — interactive BIM viewer in the browser (Three.js)
+Fork of [VaclavNezerka/Cloud2BIM](https://github.com/VaclavNezerka/Cloud2BIM).
+The v2 rewrite (this branch) replaces the original monolithic scripts with a
+typed package, adds ML semantic segmentation, and addresses the geometric
+edge-cases that triggered NaN crashes on real-world building scans.
 
 ---
 
-## Quick start — Docker (recommended)
+## What's new in v2
 
-### 1. Create data directories
+| Capability | v1 | v2 |
+|---|---|---|
+| Input formats | E57 / LAS via converter step | E57 / LAS / LAZ / XYZ read directly |
+| Coordinate handling | Fails silently on SWEREF | Auto-centers, preserves IFC site placement |
+| Semantic segmentation | None | PointTransformer V3, RandLA-Net, or none |
+| Wall detection | Trips on furniture | ML-filtered + RANSAC fallback |
+| Roof detection | Horizontal slabs only | Sloped via RANSAC plane fitting |
+| IFC output | Manual entity construction | ifcopenshell.api with stable GUIDs |
+| Configuration | Untyped flat YAML | Pydantic-validated nested YAML |
+| Error handling | Crashes whole job | Per-storey fault tolerance |
 
-```bash
-mkdir -p /mnt/ssd250/scan2bim/{uploads,jobs,output_xyz,images,pointclouds}
-```
+---
 
-### 2. Edit `docker-compose.yml`
-
-Change the host paths on the left side of `:` to match your setup:
-
-```yaml
-volumes:
-  - /mnt/ssd250/scan2bim/uploads:/app/web/uploads
-  - /mnt/ssd250/scan2bim/jobs:/app/web/jobs
-  - /mnt/ssd250/scan2bim/output_xyz:/app/output_xyz
-  - /mnt/ssd250/scan2bim/images:/app/images
-  - /mnt/ssd250/scan2bim/pointclouds:/drives/Punktmoln
-```
-
-Add more `/drives/<Name>` lines for additional point cloud locations.
-
-### 3. Build and run
+## Quick start (Docker)
 
 ```bash
+mkdir -p /mnt/SSD250/scan2bim/{uploads,jobs,output_xyz,images,pointclouds}
 docker compose up --build
 ```
 
-Open **http://localhost:8001** in a browser.
+Open **http://localhost:8001** and follow the 4-step wizard.
 
----
-
-## Web interface
-
-The 4-step wizard guides you through:
-
-1. **Select file** — upload a point cloud (E57, LAS, LAZ, XYZ) or browse a mounted network drive
-2. **Parameters** — slab thickness, wall dimensions, dilution factor, IFC metadata
-3. **Processing** — live log stream; jobs run in the background
-4. **Result** — interactive 3D IFC viewer, download IFC file
-
-### Network drives
-
-Mount any host directory under `/drives/<Name>` in `docker-compose.yml`:
+To enable ML semantic segmentation, mount a model weights directory and set
+`segmentation.enabled: true` in the per-job config (or update the default in
+`web/main.py`):
 
 ```yaml
-- /mnt/nas/projects:/drives/NAS_Projekt:ro
-- /mnt/nas/scans:/drives/Skanningar:ro
+# in docker-compose.yml volumes:
+- /path/to/model/weights:/data/models:ro
 ```
 
-The name after `/drives/` appears automatically in the file browser — no other configuration needed.
+Install ML dependencies inside the container:
+```bash
+docker compose exec cloud2bim pip install -r requirements-ml.txt
+```
 
 ---
 
-## Command-line usage
+## CLI usage
 
 ```bash
-pip install -r requirements.txt
-python cloud2entities.py config.yaml
+python -m cloud2bim run config.yaml
+python -m cloud2bim validate scan.e57         # sanity-check a point cloud
 ```
 
-Edit `config.yaml` to point to your input files and set processing parameters.
-
-### Key parameters
-
-| Parameter | Default | Description |
-|---|---|---|
-| `dilute` | `true` | Enable point cloud downsampling |
-| `dilution_factor` | `10` | Keep every Nth point (10 = 90% reduction) |
-| `pc_resolution` | `0.002` | Expected point spacing (m) |
-| `bfs_thickness` | `0.3` | Bottom floor slab thickness (m) |
-| `tfs_thickness` | `0.4` | Top floor slab thickness (m) |
-| `min_wall_length` | `0.10` | Minimum wall length to keep (m) |
-| `max_wall_thickness` | `0.75` | Maximum wall thickness (m) |
+See `cloud2bim/config/defaults.yaml` for the full schema.
 
 ---
 
-## Supported formats
+## Architecture
 
-| Format | Notes |
-|---|---|
-| `.xyz` | Tab-separated ASCII, header line `//X\tY\tZ` |
-| `.e57` | Native E57 — converted to XYZ automatically |
-| `.las` / `.laz` | LiDAR formats — converted via laspy |
+```
+cloud2bim/
+├── pipeline.py              orchestrator
+├── config/
+│   └── schema.py            pydantic Config (typed, validated)
+├── io/
+│   ├── readers.py           E57 / LAS / XYZ → numpy
+│   └── coordinates.py       SWEREF-safe centering
+├── segmentation/            ML semantic labelling
+│   ├── base.py              Segmenter ABC + SemanticLabels
+│   ├── ptv3.py              PointTransformer V3 (Pointcept)
+│   ├── randla.py            RandLA-Net (Open3D-ML)
+│   └── factory.py           backend dispatch w/ passthrough fallback
+├── geometry/                pure geometric utilities
+│   ├── lines.py             NaN-safe line intersection / distance
+│   ├── pca.py               dominant-orientation detection
+│   └── polygon.py           contour smoothing, polygon offsetting
+├── elements/                building element extractors
+│   ├── slabs.py             horizontal Z-histogram slab detection
+│   ├── walls.py             2D-histogram + ML filter + NaN guards
+│   ├── openings.py          windows / doors from wall cross-sections
+│   └── roofs.py             RANSAC plane fitting for sloped roofs
+├── ifc/
+│   └── builder.py           IFC 2x3 with stable GUIDs (Revit-ready)
+└── cli.py                   `python -m cloud2bim run|validate`
+
+scripts/
+└── validate.py              end-to-end smoke test with element counts
+
+web/                         FastAPI + Three.js IFC viewer (unchanged)
+```
 
 ---
 
-## Requirements
+## Plugging in custom-trained model weights
 
-- Python 3.11+
-- See `requirements.txt` (CPU-only) or `requirements-docker.txt` (Docker image)
-- No GPU required
+`SegmentationConfig` accepts a path to your own checkpoint:
+
+```yaml
+segmentation:
+  backend: ptv3
+  weights_path: /data/models/my-finetuned.pth
+  wall_classes: [wall, partition_wall]      # match your label vocabulary
+  clutter_classes: [furniture, equipment]
+  door_classes: [door, sliding_door]
+  window_classes: [window, skylight]
+```
+
+No code changes needed — the `Segmenter` interface absorbs label vocabulary
+differences via config.
 
 ---
 
-## Project structure
+## Validation
 
+Run the smoke test against any config:
+
+```bash
+python scripts/validate.py path/to/config.yaml
+python scripts/validate.py path/to/config.yaml --reference reference.ifc
 ```
-cloud2entities.py     Main pipeline script
-aux_functions.py      Slab/wall/opening detection algorithms
-space_generator.py    Room/zone extraction (Shapely)
-generate_ifc.py       IFC model builder (ifcopenshell)
-plotting_functions.py Debug visualisations
-config.yaml           Default CLI configuration
-web/
-  main.py             FastAPI backend
-  job_manager.py      Background job runner
-  static/             Frontend (vanilla JS, Three.js viewer)
-```
+
+Reports timing per stage and element counts. With `--reference`, also diffs
+element counts against a known-good IFC.
 
 ---
 
 ## License
 
 Original research code by Václav Nežerka et al., CTU in Prague.
-Web interface and pipeline improvements by Jacob.
+v2 production rewrite by Jacob.
