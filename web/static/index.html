@@ -185,15 +185,27 @@
         <span class="collapsible-arrow">▾</span>
       </div>
       <div class="collapsible-body" id="adv-body">
-        <div class="section-label" style="margin-top:0">Bjälklag</div>
+        <div class="section-label" style="margin-top:0">Bjälklag — Z-histogram & peak-detektion</div>
         <div class="form-grid" style="margin-bottom:16px">
           <div class="form-group">
-            <label for="bfs-thickness">Golvbjälklag tjocklek (m)</label>
+            <label for="bfs-thickness">Golvbjälklag tjocklek (m, default)</label>
             <input type="number" id="bfs-thickness" value="0.3" step="0.05" min="0.05">
           </div>
           <div class="form-group">
-            <label for="tfs-thickness">Takbjälklag tjocklek (m)</label>
+            <label for="tfs-thickness">Takbjälklag tjocklek (m, default)</label>
             <input type="number" id="tfs-thickness" value="0.4" step="0.05" min="0.05">
+          </div>
+          <div class="form-group">
+            <label for="max-slab-thickness">Max slab-tjocklek (m) — toppar närmare paras</label>
+            <input type="number" id="max-slab-thickness" value="0.5" step="0.05" min="0.05">
+          </div>
+          <div class="form-group">
+            <label for="slab-peak-ratio">Peak-tröskel (0–1, fraktion av max)</label>
+            <input type="number" id="slab-peak-ratio" value="0.25" step="0.05" min="0.05" max="1">
+          </div>
+          <div class="form-group">
+            <label for="slab-z-step">Z-binstorlek i histogram (m)</label>
+            <input type="number" id="slab-z-step" value="0.15" step="0.05" min="0.05">
           </div>
         </div>
 
@@ -354,11 +366,11 @@
 
         <div id="wizard-stage-detail" style="margin-top:16px"></div>
 
-        <div class="collapsible-header" id="wizard-log-toggle">
+        <div class="collapsible-header open" id="wizard-log-toggle">
           Loggar
           <span class="collapsible-arrow">▾</span>
         </div>
-        <div class="collapsible-body" id="wizard-log-body">
+        <div class="collapsible-body open" id="wizard-log-body">
           <div id="wizard-log" class="log-console" style="margin-top:8px"></div>
         </div>
       </div>

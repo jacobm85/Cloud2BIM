@@ -329,28 +329,69 @@ def stage_ifc(cfg: Config) -> None:
     t0 = time.time()
     _, offset = load_points(cfg)
     slabs = load_slabs(cfg)
-    storey_walls = load_walls(cfg)
-    storey_openings = load_openings(cfg) if Path(cfg.io.work_dir, "openings.pkl").exists() else [[] for _ in storey_walls]
-    roof_planes = load_roofs(cfg) if Path(cfg.io.work_dir, "roofs.pkl").exists() else []
+    work = Path(cfg.io.work_dir)
+    storey_walls = load_walls(cfg) if (work / "walls.pkl").exists() else []
+    storey_openings = load_openings(cfg) if (work / "openings.pkl").exists() else [[] for _ in storey_walls]
+    roof_planes = load_roofs(cfg) if (work / "roofs.pkl").exists() else []
+    log.info(
+        "ifc inputs: %d slabs, %d storeys (%d walls), %d openings, %d roof planes",
+        len(slabs), len(storey_walls), sum(len(s) for s in storey_walls),
+        sum(len(s) for s in storey_openings), len(roof_planes),
+    )
 
     builder = IfcBuilder(cfg.ifc, offset=offset)
+
+    failed_slabs = 0
     for i, slab in enumerate(slabs):
-        builder.add_slab(slab, storey_idx=i)
+        try:
+            builder.add_slab(slab, storey_idx=i)
+        except Exception:
+            failed_slabs += 1
+            log.exception("Slab %d failed to add to IFC", i)
+    if failed_slabs:
+        log.warning("%d slab(s) skipped due to IFC errors", failed_slabs)
+
+    failed_walls = failed_openings = 0
     for storey_idx, walls in enumerate(storey_walls):
-        wall_ifc_by_idx = {}
+        wall_ifc_by_idx: dict[int, object] = {}
         for w_idx, w in enumerate(walls):
-            wall_ifc_by_idx[w_idx] = builder.add_wall(w)
+            try:
+                wall_ifc_by_idx[w_idx] = builder.add_wall(w)
+            except Exception:
+                failed_walls += 1
+                log.exception("Storey %d wall %d failed to add to IFC", storey_idx, w_idx)
         ops = storey_openings[storey_idx] if storey_idx < len(storey_openings) else []
         for op in ops:
-            host = walls[op.wall_index]
-            builder.add_opening(op, wall_ifc_by_idx[op.wall_index], host)
-    for rp in roof_planes:
-        builder.add_roof_plane(rp, storey_idx=len(slabs) - 1)
-    builder.write(cfg.io.output_ifc)
+            if op.wall_index not in wall_ifc_by_idx:
+                failed_openings += 1
+                continue
+            try:
+                host = walls[op.wall_index]
+                builder.add_opening(op, wall_ifc_by_idx[op.wall_index], host)
+            except Exception:
+                failed_openings += 1
+                log.exception("Storey %d opening failed to add to IFC", storey_idx)
+    if failed_walls or failed_openings:
+        log.warning("IFC skipped: %d walls, %d openings", failed_walls, failed_openings)
+
+    for rp_idx, rp in enumerate(roof_planes):
+        try:
+            builder.add_roof_plane(rp, storey_idx=max(0, len(slabs) - 1))
+        except Exception:
+            log.exception("Roof plane %d failed to add to IFC", rp_idx)
+
+    try:
+        builder.write(cfg.io.output_ifc)
+        log.info("IFC written: %s", cfg.io.output_ifc)
+    except Exception:
+        log.exception("Failed to write IFC")
+        raise  # writing IFC is the *output* of this stage — if it fails, fail loudly
+
     write_state(cfg, "ifc")
     log.info("ifc: %.1fs", time.time() - t0)
 
-    # Floor-plan preview alongside IFC
+    # Floor-plan preview alongside IFC — never let preview rendering kill
+    # the IFC stage (we already wrote the model above).
     try:
         from cloud2bim.preview import render_floor_plan
         preview_path = Path(str(cfg.io.output_ifc).replace(".ifc", "_preview.png"))
@@ -358,7 +399,7 @@ def stage_ifc(cfg: Config) -> None:
         all_ops = [op for st in storey_openings for op in st]
         render_floor_plan(preview_path, slabs, all_walls, all_ops)
     except Exception:
-        log.exception("Preview generation failed")
+        log.exception("Preview generation failed (IFC was written successfully)")
 
 
 STAGE_FNS = {

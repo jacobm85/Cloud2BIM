@@ -476,6 +476,9 @@ function collectConfig() {
     dilute: b('dilute'), dilution_factor: parseInt(v('dilution-factor')) || 10,
     pc_resolution: n('pc-resolution'), grid_coefficient: parseInt(v('grid-coefficient')) || 5,
     bfs_thickness: n('bfs-thickness'), tfs_thickness: n('tfs-thickness'),
+    max_slab_thickness: n('max-slab-thickness') || 0.5,
+    slab_peak_height_ratio: n('slab-peak-ratio') || 0.25,
+    slab_z_step: n('slab-z-step') || 0.15,
     min_wall_length: n('min-wall-length'), min_wall_thickness: n('min-wall-thickness'),
     max_wall_thickness: n('max-wall-thickness'), exterior_walls_thickness: n('ext-wall-thickness'),
     ifc_project_name: v('ifc-project-name'), ifc_project_long_name: v('ifc-project-long-name'),
@@ -705,17 +708,41 @@ async function renderSlabsReview() {
 
 async function renderWallsReview() {
   const extra = document.getElementById('stage-extra');
-  extra.innerHTML = `
-    <div style="margin-bottom:14px">
-      <div style="font-weight:600;margin-bottom:4px">Horisontella tvärsnitt</div>
-      <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">
-        Ett snitt per våning. Förslaget är 30–130 cm över golvet. Ändra om bjälklagsdetektionen
-        gjorde fel — då kan du istället plocka ett band direkt från Z-histogrammet.
-      </div>
-      <div id="storey-bands"></div>
-    </div>`;
-  const list = document.getElementById('storey-bands');
+  // Make sure we have slab data — needed for default bands
+  if (!wizard.slabsData) {
+    try {
+      wizard.slabsData = await fetch('/api/jobs/' + wizard.jobId + '/slabs').then(r => r.json());
+      wizard.slabCount = wizard.slabsData.slabs.length;
+      if (wizard.bands.length === 0) {
+        for (let i = 0; i < wizard.slabsData.slabs.length - 1; i++) {
+          const floor = wizard.slabsData.slabs[i].top_z;
+          wizard.bands.push({ z_min: floor + 0.30, z_max: floor + 1.30 });
+        }
+      }
+    } catch (e) { /* ignore — handled below */ }
+  }
   const numStoreys = Math.max(0, wizard.slabCount - 1);
+  extra.innerHTML = `
+    <div class="stage-preview-row" style="margin-bottom:12px">
+      <div style="flex:0 0 320px">
+        <img id="walls-z-hist" src="/api/jobs/${wizard.jobId}/z_histogram.png?t=${Date.now()}" alt="Z-histogram">
+      </div>
+      <div style="padding:12px;font-size:12px;line-height:1.55">
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px">Horisontellt tvärsnitt per våning</div>
+        <p style="color:var(--text-dim);margin-bottom:8px">
+          Förslag: 30–130 cm över golvet. Om bjälklagsdetektionen gjorde fel —
+          ändra Z min/max manuellt nedan. Snittet ritas automatiskt så du ser
+          planlösningen direkt.
+        </p>
+        <div style="color:var(--text-dim)">${numStoreys} våning${numStoreys === 1 ? '' : 'ar'} hittade.</div>
+      </div>
+    </div>
+    <div id="storey-bands"></div>`;
+  const list = document.getElementById('storey-bands');
+  if (numStoreys === 0) {
+    list.innerHTML = '<div class="alert alert-danger">Inga våningar — bjälklagsdetektionen gav färre än 2 bjälklag. Kör om "Bjälklag"-steget med andra inställningar.</div>';
+    return;
+  }
   for (let i = 0; i < numStoreys; i++) {
     const band = wizard.bands[i] || { z_min: 0, z_max: 1 };
     const row = document.createElement('div');
@@ -726,14 +753,28 @@ async function renderWallsReview() {
         <input type="number" step="0.05" class="band-min" value="${band.z_min.toFixed(2)}" data-storey="${i}"></div>
       <div><label style="display:block;font-size:11px">Z max (m)</label>
         <input type="number" step="0.05" class="band-max" value="${band.z_max.toFixed(2)}" data-storey="${i}"></div>
-      <button class="btn btn-outline" data-storey="${i}" data-action="preview">Visa snitt</button>`;
+      <button class="btn btn-outline" data-storey="${i}" data-action="preview">Uppdatera</button>`;
     list.appendChild(row);
+    // Auto-render preview for this storey
+    const previewBox = document.createElement('div');
+    previewBox.id = 'cross-section-preview-' + i;
+    previewBox.className = 'stage-preview-row';
+    previewBox.style.marginTop = '4px';
+    list.appendChild(previewBox);
+    renderCrossSection(i, band.z_min, band.z_max);
   }
+  const debouncers = {};
   list.addEventListener('input', e => {
     const storey = parseInt(e.target.dataset.storey, 10);
     if (Number.isNaN(storey)) return;
     if (e.target.classList.contains('band-min')) wizard.bands[storey].z_min = parseFloat(e.target.value);
     if (e.target.classList.contains('band-max')) wizard.bands[storey].z_max = parseFloat(e.target.value);
+    // Debounce live re-render
+    if (debouncers[storey]) clearTimeout(debouncers[storey]);
+    debouncers[storey] = setTimeout(() => {
+      const b = wizard.bands[storey];
+      renderCrossSection(storey, b.z_min, b.z_max);
+    }, 600);
   });
   list.addEventListener('click', async e => {
     if (e.target.dataset.action !== 'preview') return;
@@ -744,25 +785,27 @@ async function renderWallsReview() {
 }
 
 async function renderCrossSection(storey, zMin, zMax) {
-  let preview = document.getElementById('cross-section-preview-' + storey);
-  if (!preview) {
-    preview = document.createElement('div');
-    preview.id = 'cross-section-preview-' + storey;
-    preview.className = 'stage-preview-row';
-    document.getElementById('storey-bands').appendChild(preview);
+  const preview = document.getElementById('cross-section-preview-' + storey);
+  if (!preview) return;
+  preview.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim);font-size:12px">Renderar snitt…</div>';
+  try {
+    const res = await fetch('/api/jobs/' + wizard.jobId + '/cross_section_preview', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ storey_idx: storey, z_min: zMin, z_max: zMax }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    preview.innerHTML = `
+      <div>
+        <div style="padding:6px 10px;background:var(--surface2);border-bottom:1px solid var(--border);font-size:11px;color:var(--text-dim)">
+          Våning ${storey}: Z = ${zMin.toFixed(2)}–${zMax.toFixed(2)} m
+        </div>
+        <img src="${url}" alt="Snitt våning ${storey}">
+      </div>`;
+  } catch (e) {
+    preview.innerHTML = '<div class="alert alert-danger">Kunde inte rendera snittet: ' + e.message + '</div>';
   }
-  preview.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-dim)">Renderar…</div>';
-  const res = await fetch('/api/jobs/' + wizard.jobId + '/cross_section_preview', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ storey_idx: storey, z_min: zMin, z_max: zMax }),
-  });
-  if (!res.ok) {
-    preview.innerHTML = '<div class="alert alert-danger">Kunde inte rendera snittet</div>';
-    return;
-  }
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  preview.innerHTML = `<div><img src="${url}" alt="Snitt våning ${storey}"></div>`;
 }
 
 function renderIfcReview() {
@@ -871,10 +914,9 @@ async function wizardRunStage(stage) {
 }
 
 document.getElementById('btn-wizard-start').addEventListener('click', wizardStart);
-document.getElementById('wizard-log-toggle').addEventListener('click', () => {
-  document.getElementById('wizard-log-toggle').classList.toggle('open');
-  document.getElementById('wizard-log-body').classList.toggle('open');
-});
+// Note: the .collapsible-header global handler (registered in Step 2 block)
+// already wires the "Loggar" toggle. A second listener here would double-
+// toggle and leave the panel in its starting state.
 
 // ── Init ──────────────────────────────────────────────────────────────────
 goTo(1);
