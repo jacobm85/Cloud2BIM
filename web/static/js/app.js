@@ -471,6 +471,11 @@ function collectConfig() {
     seg_enabled: b('seg-enabled'),
     seg_backend: v('seg-backend') || 'ptv3',
     seg_weights: v('seg-weights') || null,
+    slabs_enabled: b('slabs-enabled'),
+    walls_enabled: b('walls-enabled'),
+    openings_enabled: b('openings-enabled'),
+    columns_enabled: b('columns-enabled'),
+    stairs_enabled: b('stairs-enabled'),
     roofs_enabled: b('roofs-enabled'),
     exterior_scan: b('exterior-scan'),
     dilute: b('dilute'), dilution_factor: parseInt(v('dilution-factor')) || 10,
@@ -492,7 +497,7 @@ function collectConfig() {
 }
 
 // ── Wizard mode (stepwise pipeline) ───────────────────────────────────────
-const WIZARD_STAGES = ['prepare', 'segment', 'slabs', 'walls', 'openings', 'roofs', 'ifc'];
+const WIZARD_STAGES = ['prepare', 'segment', 'slabs', 'walls', 'openings', 'columns', 'stairs', 'roofs', 'ifc'];
 
 const STAGE_INFO = {
   prepare: {
@@ -514,6 +519,14 @@ const STAGE_INFO = {
   openings: {
     title: 'Öppningar',
     desc: 'Hittar fönster och dörrar i varje vägg baserat på lokala håligheter och semantiska etiketter.',
+  },
+  columns: {
+    title: 'Pelare',
+    desc: 'Hittar fristående vertikala pelare i 2D-occupancy-histogrammet — små isolerade kluster som spänner hela våningshöjden och inte ligger på en vägg.',
+  },
+  stairs: {
+    title: 'Trappor',
+    desc: 'Letar efter serier av tätt liggande horisontella Z-toppar (steg) mellan två bjälklagsnivåer och grupperar dem i trapplöp.',
   },
   roofs: {
     title: 'Tak',

@@ -146,7 +146,55 @@ def run_pipeline(cfg: Config) -> int:
         storey_walls.append(walls)
         storey_openings.append(openings)
 
-    # ── 7. Roof detection (optional) ────────────────────────────────────
+    # ── 7a. Columns ─────────────────────────────────────────────────────
+    storey_columns: list[list] = []
+    if cfg.columns.enabled:
+        from cloud2bim.elements.columns import detect_columns
+        log.info("─── Column segmentation ───")
+        t0 = time.time()
+        for i in range(len(slabs) - 1):
+            z_floor = slabs[i].bottom_z + slabs[i].thickness
+            z_ceiling = slabs[i + 1].bottom_z
+            storey_mask = (points_xyz[:, 2] >= z_floor) & (points_xyz[:, 2] <= z_ceiling)
+            try:
+                cols = detect_columns(
+                    storey_points=points_xyz[storey_mask],
+                    walls=storey_walls[i] if i < len(storey_walls) else [],
+                    z_floor=z_floor, z_ceiling=z_ceiling, storey_idx=i,
+                    cfg=cfg.columns,
+                    pc_resolution=cfg.slabs.pc_resolution,
+                    grid_coefficient=cfg.slabs.grid_coefficient,
+                )
+            except Exception:
+                log.exception("Storey %d column detection failed", i)
+                cols = []
+            storey_columns.append(cols)
+        log.info("Columns: %d in %.1fs",
+                 sum(len(s) for s in storey_columns), time.time() - t0)
+    else:
+        storey_columns = [[] for _ in range(max(0, len(slabs) - 1))]
+
+    # ── 7b. Stairs ──────────────────────────────────────────────────────
+    storey_stairs: list[list] = []
+    if cfg.stairs.enabled:
+        from cloud2bim.elements.stairs import detect_stairs
+        log.info("─── Stair segmentation ───")
+        t0 = time.time()
+        for i in range(len(slabs) - 1):
+            z_floor = slabs[i].bottom_z + slabs[i].thickness
+            z_ceiling = slabs[i + 1].bottom_z
+            try:
+                flights = detect_stairs(points_xyz, z_floor, z_ceiling, i, cfg.stairs)
+            except Exception:
+                log.exception("Storey %d stair detection failed", i)
+                flights = []
+            storey_stairs.append(flights)
+        log.info("Stairs: %d flights in %.1fs",
+                 sum(len(s) for s in storey_stairs), time.time() - t0)
+    else:
+        storey_stairs = [[] for _ in range(max(0, len(slabs) - 1))]
+
+    # ── 7c. Roof detection (optional) ───────────────────────────────────
     roof_planes = []
     if cfg.roofs.enabled:
         log.info("─── Roof segmentation ───")
@@ -172,6 +220,18 @@ def run_pipeline(cfg: Config) -> int:
         for op in openings:
             host = walls[op.wall_index]
             builder.add_opening(op, wall_ifc_by_idx[op.wall_index], host)
+    for storey_idx, cols in enumerate(storey_columns):
+        for col in cols:
+            try:
+                builder.add_column(col)
+            except Exception:
+                log.exception("Column add failed")
+    for storey_idx, flights in enumerate(storey_stairs):
+        for stair in flights:
+            try:
+                builder.add_stair_flight(stair)
+            except Exception:
+                log.exception("Stair add failed")
     for rp in roof_planes:
         builder.add_roof_plane(rp, storey_idx=len(slabs) - 1)
     builder.write(cfg.io.output_ifc)
@@ -183,7 +243,10 @@ def run_pipeline(cfg: Config) -> int:
         preview_path = Path(str(cfg.io.output_ifc).replace(".ifc", "_preview.png"))
         all_walls = [w for storey in storey_walls for w in storey]
         all_openings = [op for storey in storey_openings for op in storey]
-        render_floor_plan(preview_path, slabs, all_walls, all_openings)
+        all_cols = [c for storey in storey_columns for c in storey]
+        all_stairs = [s for storey in storey_stairs for s in storey]
+        render_floor_plan(preview_path, slabs, all_walls, all_openings,
+                          columns=all_cols, stairs=all_stairs)
     except Exception as exc:
         log.warning("Preview generation failed: %s", exc)
 

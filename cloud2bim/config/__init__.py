@@ -1,4 +1,5 @@
 from cloud2bim.config.schema import (
+    ColumnConfig,
     Config,
     IFCConfig,
     IOConfig,
@@ -6,11 +7,13 @@ from cloud2bim.config.schema import (
     RoofConfig,
     SegmentationConfig,
     SlabConfig,
+    StairConfig,
     WallConfig,
     load_config,
 )
 
 __all__ = [
+    "ColumnConfig",
     "Config",
     "IFCConfig",
     "IOConfig",
@@ -18,6 +21,7 @@ __all__ = [
     "RoofConfig",
     "SegmentationConfig",
     "SlabConfig",
+    "StairConfig",
     "WallConfig",
     "load_config",
 ]

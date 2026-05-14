@@ -31,9 +31,11 @@ from pathlib import Path
 import numpy as np
 
 from cloud2bim.config import Config
+from cloud2bim.elements.columns import Column, detect_columns
 from cloud2bim.elements.openings import detect_openings
 from cloud2bim.elements.roofs import detect_roofs
 from cloud2bim.elements.slabs import Slab, compute_z_histogram, detect_slabs
+from cloud2bim.elements.stairs import StairFlight, detect_stairs
 from cloud2bim.elements.walls import detect_walls
 from cloud2bim.ifc import IfcBuilder
 from cloud2bim.io import center_xy, read_pointcloud
@@ -46,7 +48,8 @@ from cloud2bim.segmentation.base import load_cached_labels, save_cached_labels
 log = get_logger(__name__)
 
 STAGES: tuple[str, ...] = (
-    "prepare", "segment", "slabs", "walls", "openings", "roofs", "ifc",
+    "prepare", "segment", "slabs", "walls", "openings",
+    "columns", "stairs", "roofs", "ifc",
 )
 
 
@@ -127,6 +130,16 @@ def load_openings(cfg: Config) -> list[list]:
     return _load_pickle(p) if p.exists() else []
 
 
+def load_columns(cfg: Config) -> list[list]:
+    p = Path(cfg.io.work_dir) / "columns.pkl"
+    return _load_pickle(p) if p.exists() else []
+
+
+def load_stairs(cfg: Config) -> list[list]:
+    p = Path(cfg.io.work_dir) / "stairs.pkl"
+    return _load_pickle(p) if p.exists() else []
+
+
 def load_roofs(cfg: Config) -> list:
     p = Path(cfg.io.work_dir) / "roofs.pkl"
     return _load_pickle(p) if p.exists() else []
@@ -190,6 +203,14 @@ def stage_slabs(cfg: Config) -> None:
     """Z-histogram → slab detection."""
     log.info("─── slabs ───")
     t0 = time.time()
+    if not cfg.slabs.enabled:
+        _save_pickle(Path(cfg.io.work_dir) / "slabs.pkl", [])
+        _save_pickle(Path(cfg.io.work_dir) / "z_histogram.pkl",
+                     compute_z_histogram(load_points(cfg)[0], cfg.slabs.z_step,
+                                          cfg.slabs.peak_height_ratio))
+        write_state(cfg, "slabs")
+        log.info("slabs: disabled (skipping)")
+        return
     pts, _ = load_points(cfg)
     slabs = detect_slabs(pts, cfg.slabs)
     zh = compute_z_histogram(pts, cfg.slabs.z_step, cfg.slabs.peak_height_ratio)
@@ -209,6 +230,11 @@ def stage_walls(cfg: Config) -> None:
     from cloud2bim.pipeline import _synthesize_slabs  # avoid circular import
     log.info("─── walls ───")
     t0 = time.time()
+    if not cfg.walls.enabled:
+        _save_pickle(Path(cfg.io.work_dir) / "walls.pkl", [])
+        write_state(cfg, "walls")
+        log.info("walls: disabled (skipping)")
+        return
     pts, _ = load_points(cfg)
     labels = load_labels(cfg)
     slabs = load_slabs(cfg)
@@ -269,6 +295,11 @@ def stage_walls(cfg: Config) -> None:
 def stage_openings(cfg: Config) -> None:
     log.info("─── openings ───")
     t0 = time.time()
+    if not cfg.openings.enabled:
+        _save_pickle(Path(cfg.io.work_dir) / "openings.pkl", [])
+        write_state(cfg, "openings")
+        log.info("openings: disabled (skipping)")
+        return
     pts, _ = load_points(cfg)
     labels = load_labels(cfg)
     slabs = load_slabs(cfg)
@@ -304,6 +335,77 @@ def stage_openings(cfg: Config) -> None:
              sum(len(s) for s in storey_openings), time.time() - t0)
 
 
+def stage_columns(cfg: Config) -> None:
+    """Per-storey column detection."""
+    log.info("─── columns ───")
+    t0 = time.time()
+    if not cfg.columns.enabled:
+        _save_pickle(Path(cfg.io.work_dir) / "columns.pkl", [])
+        write_state(cfg, "columns")
+        log.info("columns: disabled (skipping)")
+        return
+    pts, _ = load_points(cfg)
+    slabs = load_slabs(cfg)
+    storey_walls = load_walls(cfg) if (Path(cfg.io.work_dir) / "walls.pkl").exists() else []
+
+    storey_columns: list[list[Column]] = []
+    for i in range(max(0, len(slabs) - 1)):
+        z_floor = slabs[i].bottom_z + slabs[i].thickness
+        z_ceiling = slabs[i + 1].bottom_z
+        storey_mask = (pts[:, 2] >= z_floor) & (pts[:, 2] <= z_ceiling)
+        storey_pts = pts[storey_mask]
+        walls_here = storey_walls[i] if i < len(storey_walls) else []
+        try:
+            cols = detect_columns(
+                storey_points=storey_pts,
+                walls=walls_here,
+                z_floor=z_floor,
+                z_ceiling=z_ceiling,
+                storey_idx=i,
+                cfg=cfg.columns,
+                pc_resolution=cfg.slabs.pc_resolution,
+                grid_coefficient=cfg.slabs.grid_coefficient,
+            )
+        except Exception:
+            log.exception("Storey %d column detection failed", i)
+            cols = []
+        storey_columns.append(cols)
+
+    _save_pickle(Path(cfg.io.work_dir) / "columns.pkl", storey_columns)
+    write_state(cfg, "columns")
+    log.info("columns: %d total in %.1fs",
+             sum(len(s) for s in storey_columns), time.time() - t0)
+
+
+def stage_stairs(cfg: Config) -> None:
+    """Per-storey stair-flight detection."""
+    log.info("─── stairs ───")
+    t0 = time.time()
+    if not cfg.stairs.enabled:
+        _save_pickle(Path(cfg.io.work_dir) / "stairs.pkl", [])
+        write_state(cfg, "stairs")
+        log.info("stairs: disabled (skipping)")
+        return
+    pts, _ = load_points(cfg)
+    slabs = load_slabs(cfg)
+
+    storey_stairs: list[list[StairFlight]] = []
+    for i in range(max(0, len(slabs) - 1)):
+        z_floor = slabs[i].bottom_z + slabs[i].thickness
+        z_ceiling = slabs[i + 1].bottom_z
+        try:
+            flights = detect_stairs(pts, z_floor, z_ceiling, i, cfg.stairs)
+        except Exception:
+            log.exception("Storey %d stair detection failed", i)
+            flights = []
+        storey_stairs.append(flights)
+
+    _save_pickle(Path(cfg.io.work_dir) / "stairs.pkl", storey_stairs)
+    write_state(cfg, "stairs")
+    log.info("stairs: %d total in %.1fs",
+             sum(len(s) for s in storey_stairs), time.time() - t0)
+
+
 def stage_roofs(cfg: Config) -> None:
     log.info("─── roofs ───")
     t0 = time.time()
@@ -332,11 +434,17 @@ def stage_ifc(cfg: Config) -> None:
     work = Path(cfg.io.work_dir)
     storey_walls = load_walls(cfg) if (work / "walls.pkl").exists() else []
     storey_openings = load_openings(cfg) if (work / "openings.pkl").exists() else [[] for _ in storey_walls]
+    storey_columns = load_columns(cfg) if (work / "columns.pkl").exists() else []
+    storey_stairs = load_stairs(cfg) if (work / "stairs.pkl").exists() else []
     roof_planes = load_roofs(cfg) if (work / "roofs.pkl").exists() else []
     log.info(
-        "ifc inputs: %d slabs, %d storeys (%d walls), %d openings, %d roof planes",
+        "ifc inputs: %d slabs, %d storeys (%d walls), %d openings, "
+        "%d columns, %d stair flights, %d roof planes",
         len(slabs), len(storey_walls), sum(len(s) for s in storey_walls),
-        sum(len(s) for s in storey_openings), len(roof_planes),
+        sum(len(s) for s in storey_openings),
+        sum(len(s) for s in storey_columns),
+        sum(len(s) for s in storey_stairs),
+        len(roof_planes),
     )
 
     builder = IfcBuilder(cfg.ifc, offset=offset)
@@ -374,6 +482,24 @@ def stage_ifc(cfg: Config) -> None:
     if failed_walls or failed_openings:
         log.warning("IFC skipped: %d walls, %d openings", failed_walls, failed_openings)
 
+    failed_cols = failed_stairs = 0
+    for storey_idx, cols in enumerate(storey_columns):
+        for c_idx, col in enumerate(cols):
+            try:
+                builder.add_column(col)
+            except Exception:
+                failed_cols += 1
+                log.exception("Storey %d column %d failed to add to IFC", storey_idx, c_idx)
+    for storey_idx, flights in enumerate(storey_stairs):
+        for s_idx, stair in enumerate(flights):
+            try:
+                builder.add_stair_flight(stair)
+            except Exception:
+                failed_stairs += 1
+                log.exception("Storey %d stair %d failed to add to IFC", storey_idx, s_idx)
+    if failed_cols or failed_stairs:
+        log.warning("IFC skipped: %d columns, %d stairs", failed_cols, failed_stairs)
+
     for rp_idx, rp in enumerate(roof_planes):
         try:
             builder.add_roof_plane(rp, storey_idx=max(0, len(slabs) - 1))
@@ -397,7 +523,10 @@ def stage_ifc(cfg: Config) -> None:
         preview_path = Path(str(cfg.io.output_ifc).replace(".ifc", "_preview.png"))
         all_walls = [w for st in storey_walls for w in st]
         all_ops = [op for st in storey_openings for op in st]
-        render_floor_plan(preview_path, slabs, all_walls, all_ops)
+        all_cols = [c for st in storey_columns for c in st]
+        all_stairs = [s for st in storey_stairs for s in st]
+        render_floor_plan(preview_path, slabs, all_walls, all_ops,
+                          columns=all_cols, stairs=all_stairs)
     except Exception:
         log.exception("Preview generation failed (IFC was written successfully)")
 
@@ -408,6 +537,8 @@ STAGE_FNS = {
     "slabs": stage_slabs,
     "walls": stage_walls,
     "openings": stage_openings,
+    "columns": stage_columns,
+    "stairs": stage_stairs,
     "roofs": stage_roofs,
     "ifc": stage_ifc,
 }

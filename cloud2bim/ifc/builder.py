@@ -22,9 +22,11 @@ import ifcopenshell.api
 import numpy as np
 
 from cloud2bim.config import IFCConfig
+from cloud2bim.elements.columns import Column
 from cloud2bim.elements.openings import Opening
 from cloud2bim.elements.roofs import RoofPlane
 from cloud2bim.elements.slabs import Slab
+from cloud2bim.elements.stairs import StairFlight
 from cloud2bim.elements.walls import Wall
 from cloud2bim.io.coordinates import CoordinateOffset
 from cloud2bim.logging import get_logger
@@ -166,6 +168,55 @@ class IfcBuilder:
         ifcopenshell.api.run("spatial.assign_container", self.model,
                              relating_structure=storey, products=[roof_el])
         return roof_el
+
+    def add_column(self, column: Column) -> ifcopenshell.entity_instance:
+        storey = self._ensure_storey(column.storey, column.z_placement)
+        guid = _stable_guid("column", str(column.storey),
+                            f"{column.center_x:.3f}", f"{column.center_y:.3f}")
+        col = ifcopenshell.api.run(
+            "root.create_entity", self.model,
+            ifc_class="IfcColumn", name=f"Column {guid[-6:]}",
+        )
+        col.GlobalId = guid
+        # Build extruded rectangle. _extruded_solid_from_polygon takes XS/YS in
+        # world coords + base_z + height, so synthesise the rect corners.
+        hx, hy = column.size_x / 2, column.size_y / 2
+        xs = np.array([column.center_x - hx, column.center_x + hx,
+                       column.center_x + hx, column.center_x - hx,
+                       column.center_x - hx])
+        ys = np.array([column.center_y - hy, column.center_y - hy,
+                       column.center_y + hy, column.center_y + hy,
+                       column.center_y - hy])
+        rep = self._extruded_solid_from_polygon(xs, ys, column.height, column.z_placement)
+        self._assign_representation(col, rep)
+        self._assign_material(col, self._wall_material)
+        ifcopenshell.api.run("spatial.assign_container", self.model,
+                             relating_structure=storey, products=[col])
+        return col
+
+    def add_stair_flight(self, stair: StairFlight) -> ifcopenshell.entity_instance:
+        """Emit one IfcStairFlight with a thin slab footprint as a placeholder
+        geometry — proper step-by-step tread/riser geometry is left for a
+        later pass once detection is more reliable."""
+        storey = self._ensure_storey(stair.storey, stair.bottom_z)
+        guid = _stable_guid("stair", str(stair.storey),
+                            f"{stair.bottom_z:.3f}", f"{stair.top_z:.3f}")
+        flight = ifcopenshell.api.run(
+            "root.create_entity", self.model,
+            ifc_class="IfcStairFlight", name=f"Stair {stair.n_steps}-step",
+        )
+        flight.GlobalId = guid
+        # Approximate the flight as a thin extrusion of the footprint, with
+        # height equal to the run rise + tread thickness margin.
+        run_height = max(0.05, stair.top_z - stair.bottom_z + 0.05)
+        rep = self._extruded_solid_from_polygon(
+            stair.polygon_x, stair.polygon_y, run_height, stair.bottom_z,
+        )
+        self._assign_representation(flight, rep)
+        self._assign_material(flight, self._wall_material)
+        ifcopenshell.api.run("spatial.assign_container", self.model,
+                             relating_structure=storey, products=[flight])
+        return flight
 
     def write(self, path: str | Path) -> None:
         path = Path(path)

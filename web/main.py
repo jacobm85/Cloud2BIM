@@ -185,7 +185,12 @@ class CreateJobRequest(BaseModel):
     seg_backend: str = "ptv3"
     seg_weights: Optional[str] = None
 
-    # Roofs
+    # Element-type toggles (controls whether each detection stage runs)
+    slabs_enabled: bool = True
+    walls_enabled: bool = True
+    openings_enabled: bool = True
+    columns_enabled: bool = False
+    stairs_enabled: bool = False
     roofs_enabled: bool = False
 
     # Slab thicknesses + peak detection
@@ -361,6 +366,7 @@ async def create_job(request: CreateJobRequest):
             "cache_labels": True,
         },
         "slabs": {
+            "enabled": request.slabs_enabled,
             "bottom_floor_thickness": request.bfs_thickness,
             "top_floor_thickness": request.tfs_thickness,
             "pc_resolution": request.pc_resolution,
@@ -370,6 +376,7 @@ async def create_job(request: CreateJobRequest):
             "peak_height_ratio": request.slab_peak_height_ratio,
         },
         "walls": {
+            "enabled": request.walls_enabled,
             "min_length": request.min_wall_length,
             "min_thickness": request.min_wall_thickness,
             "max_thickness": request.max_wall_thickness,
@@ -377,7 +384,9 @@ async def create_job(request: CreateJobRequest):
             "use_ml_filter": True,
             "enable_ransac_fallback": True,
         },
-        "openings": {},
+        "openings": {"enabled": request.openings_enabled},
+        "columns": {"enabled": request.columns_enabled},
+        "stairs": {"enabled": request.stairs_enabled},
         "roofs": {"enabled": request.roofs_enabled},
         "ifc": {
             "project": {
@@ -484,8 +493,8 @@ def _generate_geometry_json(ifc_path: str, json_path: str):
         'IfcSlab': [0.55, 0.55, 0.62],
         'IfcWindow': [0.55, 0.82, 1.0],
         'IfcDoor': [0.78, 0.62, 0.5],
-        'IfcColumn': [0.6, 0.6, 0.92], 'IfcBeam': [0.3, 0.72, 0.3],
-        'IfcStair': [0.9, 0.42, 0.32], 'IfcStairFlight': [0.9, 0.42, 0.32],
+        'IfcColumn': [0.64, 0.56, 0.90], 'IfcBeam': [0.3, 0.72, 0.3],
+        'IfcStair': [0.90, 0.66, 0.35], 'IfcStairFlight': [0.90, 0.66, 0.35],
         'IfcSpace': [0.92, 0.92, 0.72],
     }
     DEFAULT_COLOR = [0.65, 0.65, 0.65]

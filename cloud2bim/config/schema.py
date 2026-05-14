@@ -71,6 +71,7 @@ class SegmentationConfig(BaseModel):
 # ─── Slabs ────────────────────────────────────────────────────────────────────
 
 class SlabConfig(BaseModel):
+    enabled: bool = Field(default=True, description="Toggle slab detection off entirely")
     bottom_floor_thickness: float = Field(default=0.3, gt=0, description="m")
     top_floor_thickness: float = Field(default=0.4, gt=0, description="m")
     pc_resolution: float = Field(default=0.002, gt=0, description="Expected point spacing (m)")
@@ -99,6 +100,7 @@ class SlabConfig(BaseModel):
 # ─── Walls ────────────────────────────────────────────────────────────────────
 
 class WallConfig(BaseModel):
+    enabled: bool = Field(default=True, description="Toggle wall detection off entirely")
     min_length: float = Field(default=0.10, gt=0, description="m")
     min_thickness: float = Field(default=0.05, gt=0, description="m")
     max_thickness: float = Field(default=0.75, gt=0, description="m")
@@ -154,6 +156,7 @@ class WallConfig(BaseModel):
 # ─── Openings ─────────────────────────────────────────────────────────────────
 
 class OpeningConfig(BaseModel):
+    enabled: bool = Field(default=True, description="Toggle window/door detection off entirely")
     min_window_width: float = Field(default=0.40, gt=0)
     min_window_height: float = Field(default=0.60, gt=0)
     door_min_height: float = Field(default=1.60, gt=0)
@@ -172,6 +175,57 @@ class RoofConfig(BaseModel):
     min_slope_deg: float = Field(default=10.0, ge=0, description="Below this = flat slab")
     ransac_distance: float = Field(default=0.05, gt=0, description="RANSAC inlier threshold (m)")
     min_inliers: int = Field(default=1000, ge=1)
+
+
+# ─── Columns ──────────────────────────────────────────────────────────────────
+
+class ColumnConfig(BaseModel):
+    """Vertical free-standing column detection.
+
+    Columns are small XY blobs that span (close to) the full storey height
+    and aren't connected to any wall. Distinct from walls by their compact
+    aspect ratio in both X and Y.
+    """
+    enabled: bool = Field(default=False)
+    min_size: float = Field(default=0.15, gt=0, description="Minimum column edge (m)")
+    max_size: float = Field(default=0.80, gt=0, description="Maximum column edge (m)")
+    min_height_fraction: float = Field(
+        default=0.7, gt=0, le=1.0,
+        description="Fraction of storey height the column must span vertically",
+    )
+    min_points: int = Field(default=200, ge=10, description="Minimum points to consider a column")
+    wall_clearance: float = Field(
+        default=0.20, ge=0,
+        description="Drop blobs within this distance of any detected wall axis",
+    )
+
+
+# ─── Stairs ───────────────────────────────────────────────────────────────────
+
+class StairConfig(BaseModel):
+    """Stair flight detection from a series of close-spaced horizontal peaks.
+
+    Each step is a horizontal tread (~20-30 cm deep) and the runs sit
+    between the main slab levels. A run is detected as 3+ peaks separated
+    by `min_riser` .. `max_riser` along Z, with a compact common XY
+    footprint (so we don't pick up e.g. balconies at different heights).
+    """
+    enabled: bool = Field(default=False)
+    min_riser: float = Field(default=0.13, gt=0, description="Minimum step rise (m)")
+    max_riser: float = Field(default=0.22, gt=0, description="Maximum step rise (m)")
+    min_steps: int = Field(default=3, ge=2, description="Minimum steps in a flight")
+    z_step: float = Field(
+        default=0.03, gt=0,
+        description="Z-histogram bin for step detection (much finer than slab z_step)",
+    )
+    peak_height_ratio: float = Field(
+        default=0.05, gt=0, le=1.0,
+        description="Peak threshold for step detection — lower than slabs since treads are sparser",
+    )
+    max_footprint: float = Field(
+        default=4.0, gt=0,
+        description="Maximum XY extent of a stair run (m). Filters out balconies.",
+    )
 
 
 # ─── IFC ──────────────────────────────────────────────────────────────────────
@@ -222,6 +276,8 @@ class Config(BaseModel):
     slabs: SlabConfig = Field(default_factory=SlabConfig)
     walls: WallConfig = Field(default_factory=WallConfig)
     openings: OpeningConfig = Field(default_factory=OpeningConfig)
+    columns: ColumnConfig = Field(default_factory=ColumnConfig)
+    stairs: StairConfig = Field(default_factory=StairConfig)
     roofs: RoofConfig = Field(default_factory=RoofConfig)
     ifc: IFCConfig = Field(default_factory=IFCConfig)
 

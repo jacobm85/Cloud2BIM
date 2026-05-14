@@ -29,6 +29,8 @@ def render_floor_plan(
     slabs: List[Slab],
     walls: Iterable[Wall],
     openings: Iterable[Opening],
+    columns: Iterable = (),
+    stairs: Iterable = (),
 ) -> None:
     """Save a PNG floor plan to ``output_path``."""
     fig, ax = plt.subplots(figsize=(14, 14))
@@ -79,6 +81,22 @@ def render_floor_plan(
             color=color, linewidth=3,
         )
 
+    # Columns: small filled squares
+    for col in columns:
+        hx, hy = col.size_x / 2, col.size_y / 2
+        ax.fill(
+            [col.center_x - hx, col.center_x + hx, col.center_x + hx, col.center_x - hx],
+            [col.center_y - hy, col.center_y - hy, col.center_y + hy, col.center_y + hy],
+            color="#a48ee6", alpha=0.85,
+        )
+
+    # Stairs: hashed rectangles
+    for stair in stairs:
+        xs = list(stair.polygon_x)
+        ys = list(stair.polygon_y)
+        ax.fill(xs, ys, color="#e6a85a", alpha=0.3)
+        ax.plot(xs, ys, color="#e6a85a", linewidth=1, linestyle="--")
+
     ax.set_aspect("equal")
     ax.axis("off")
     handles = [
@@ -87,6 +105,8 @@ def render_floor_plan(
         mpatches.Patch(color="#aa6666", label="Platshållarvägg (10 cm)"),
         mpatches.Patch(color="#76c8e8", label="Fönster"),
         mpatches.Patch(color="#f5a623", label="Dörr"),
+        mpatches.Patch(color="#a48ee6", label="Pelare"),
+        mpatches.Patch(color="#e6a85a", label="Trappa"),
     ]
     ax.legend(
         handles=handles, loc="upper right",

@@ -172,10 +172,30 @@
       </div>
 
       <div class="section-label">Element att detektera</div>
-      <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px">
+      <div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:16px">
+        <label class="toggle-group">
+          <span class="toggle"><input type="checkbox" id="slabs-enabled" checked><span class="toggle-slider"></span></span>
+          Bjälklag (golv &amp; tak)
+        </label>
+        <label class="toggle-group">
+          <span class="toggle"><input type="checkbox" id="walls-enabled" checked><span class="toggle-slider"></span></span>
+          Väggar
+        </label>
+        <label class="toggle-group">
+          <span class="toggle"><input type="checkbox" id="openings-enabled" checked><span class="toggle-slider"></span></span>
+          Öppningar (fönster &amp; dörrar)
+        </label>
+        <label class="toggle-group">
+          <span class="toggle"><input type="checkbox" id="columns-enabled"><span class="toggle-slider"></span></span>
+          Pelare
+        </label>
+        <label class="toggle-group">
+          <span class="toggle"><input type="checkbox" id="stairs-enabled"><span class="toggle-slider"></span></span>
+          Trappor
+        </label>
         <label class="toggle-group">
           <span class="toggle"><input type="checkbox" id="roofs-enabled"><span class="toggle-slider"></span></span>
-          Sneda tak (RANSAC-planpassning)
+          Sneda tak (RANSAC)
         </label>
       </div>
 
@@ -355,11 +375,13 @@
         </div>
 
         <ol class="stage-list" id="wizard-stages">
-          <li data-stage="prepare"><span class="stage-tick">·</span> Förberedelse — läs in, gleslägg, centrera</li>
+          <li data-stage="prepare"><span class="stage-tick">·</span> Förberedelse — läs in, gleslägg, centrera, crop</li>
           <li data-stage="segment"><span class="stage-tick">·</span> ML-segmentering (eller passthrough)</li>
-          <li data-stage="slabs"><span class="stage-tick">·</span> Bjälklag — Z-histogram & golv/tak-detektion</li>
+          <li data-stage="slabs"><span class="stage-tick">·</span> Bjälklag — Z-histogram &amp; golv/tak-detektion</li>
           <li data-stage="walls"><span class="stage-tick">·</span> Väggar — horisontellt tvärsnitt per våning</li>
           <li data-stage="openings"><span class="stage-tick">·</span> Öppningar (fönster, dörrar)</li>
+          <li data-stage="columns"><span class="stage-tick">·</span> Pelare (om aktiverat)</li>
+          <li data-stage="stairs"><span class="stage-tick">·</span> Trappor (om aktiverat)</li>
           <li data-stage="roofs"><span class="stage-tick">·</span> Tak (om aktiverat)</li>
           <li data-stage="ifc"><span class="stage-tick">·</span> IFC-export + planlösningspreview</li>
         </ol>
