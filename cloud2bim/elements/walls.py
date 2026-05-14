@@ -25,7 +25,6 @@ from skimage.morphology import closing, footprint_rectangle
 from cloud2bim.config import WallConfig
 from cloud2bim.geometry.lines import line_intersection
 from cloud2bim.geometry.pca import dominant_angle, rotate_points_2d
-from cloud2bim.geometry.polygon import swell_polygon
 from cloud2bim.logging import get_logger
 from cloud2bim.segmentation.base import SemanticLabels
 
@@ -135,46 +134,45 @@ def detect_walls(
     segments = _merge_collinear(segments, cfg.min_thickness, cfg.max_thickness)
     log.info("Storey %d: %d segments after collinear merge", storey_idx, len(segments))
 
-    # 5. Strict pairing — v1 rules: parallel AND within max_thickness AND with
-    #    overlap along the wall length. Groups with <2 segments aren't walls;
-    #    they go to the facade-candidate pile, which is reconciled against
-    #    the swelled slab polygon below.
-    interior_groups, facade_candidates = _group_segments_strict(
-        segments, cfg.max_thickness,
-    )
-
-    exterior_groups: list = []
-    if not exterior_scan and slab_polygon_xy is not None and len(slab_polygon_xy) >= 3:
-        # Only segments that didn't find an interior partner get a chance to
-        # pair up with the building envelope — this avoids generating bogus
-        # "exterior walls" along every edge of the scan boundary.
-        swollen_segments = swell_polygon(slab_polygon_xy, cfg.exterior_thickness)
-        exterior_pool = list(facade_candidates) + list(swollen_segments)
-        exterior_groups, _ = _group_segments_strict(exterior_pool, cfg.max_thickness)
-
-    parallel_groups = interior_groups + exterior_groups
-    group_labels = ["interior"] * len(interior_groups) + ["exterior"] * len(exterior_groups)
+    # 5. Strict pairing — parallel + within max_thickness + overlap along the
+    #    wall length. Groups with 2+ segments are confident walls (both faces
+    #    scanned, measured thickness). Singletons that are long enough are
+    #    one-faced walls (typical for exterior walls scanned only from inside);
+    #    short singletons are dropped as fragment noise.
+    paired_groups, singletons = _group_segments_strict(segments, cfg.max_thickness)
     log.info(
-        "Storey %d: %d interior + %d exterior pairs (singletons dropped: %d)",
-        storey_idx, len(interior_groups), len(exterior_groups), len(facade_candidates),
+        "Storey %d: %d two-sided pairs + %d singletons (candidate one-sided walls)",
+        storey_idx, len(paired_groups), len(singletons),
     )
 
-    # 7. Compute wall axes from groups, drop NaN/degenerate
+    # 7. Compute wall axes — every wall is just a "wall"; interior/exterior
+    #    classification is deferred until detection is stable.
     wall_axes: list[list[list[float]]] = []
     wall_thicknesses: list[float] = []
     wall_labels: list[str] = []
-    for group, label in zip(parallel_groups, group_labels):
+
+    for group in paired_groups:
         axis, thickness = _calculate_wall_axis(group)
         if axis is None or _has_nan(axis):
             continue
-        # Length filter — drop axes shorter than min_length (collinear merge
-        # can occasionally produce a tiny axis from two near-coincident bits)
         seg_len = float(np.hypot(axis[1][0] - axis[0][0], axis[1][1] - axis[0][1]))
         if seg_len < cfg.min_length:
             continue
         wall_axes.append(axis)
-        wall_thicknesses.append(thickness)
-        wall_labels.append(label)
+        wall_thicknesses.append(max(thickness, cfg.min_thickness))
+        wall_labels.append("wall")
+
+    for seg in singletons:
+        a = np.array(seg[0], dtype=float)
+        b = np.array(seg[1], dtype=float)
+        length = float(np.linalg.norm(b - a))
+        if length < cfg.singleton_min_length:
+            continue
+        if _has_nan([a.tolist(), b.tolist()]):
+            continue
+        wall_axes.append([a.tolist(), b.tolist()])
+        wall_thicknesses.append(cfg.singleton_thickness)
+        wall_labels.append("wall")
 
     if not wall_axes:
         log.warning("Storey %d: no valid wall axes after filtering", storey_idx)

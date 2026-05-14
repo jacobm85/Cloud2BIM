@@ -103,6 +103,22 @@ class WallConfig(BaseModel):
     min_thickness: float = Field(default=0.05, gt=0, description="m")
     max_thickness: float = Field(default=0.75, gt=0, description="m")
     exterior_thickness: float = Field(default=0.30, gt=0, description="m")
+    singleton_min_length: float = Field(
+        default=0.50,
+        gt=0,
+        description=(
+            "m. Minimum length for a one-faced segment (no parallel partner) "
+            "to still count as a wall. Real exterior walls show up as long "
+            "singletons because the scan only sees the inside face — keep this "
+            "low enough to retain them but high enough to drop fragments from "
+            "furniture or partial scans."
+        ),
+    )
+    singleton_thickness: float = Field(
+        default=0.30,
+        gt=0,
+        description="m. Default thickness assigned to one-faced (singleton) walls.",
+    )
     use_ml_filter: bool = Field(
         default=True,
         description="Pre-filter pointcloud to wall_classes before histogram",
