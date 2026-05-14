@@ -135,6 +135,7 @@ def detect_walls(
     wall_axes: list[list[list[float]]] = []
     wall_thicknesses: list[float] = []
     wall_labels: list[str] = []
+    kept_groups: list = []
     for group, label in zip(parallel_groups, group_labels):
         axis, thickness = _calculate_wall_axis(group)
         if axis is None or _has_nan(axis):
@@ -142,19 +143,20 @@ def detect_walls(
         wall_axes.append(axis)
         wall_thicknesses.append(thickness)
         wall_labels.append(label)
+        kept_groups.append(group)
 
     if not wall_axes:
         log.warning("Storey %d: no valid wall axes after filtering", storey_idx)
         return []
 
     # 8. Height validation — keep only axes that have points spanning at
-    #    least 50% of the expected storey height. Singletons from furniture
+    #    least 40% of the expected storey height. Singletons from furniture
     #    or clutter are typically short in Z even if they appear in the
     #    cross-section band.
     storey_height = z_ceiling - z_floor
     min_span = max(0.3, storey_height * 0.4)  # at least 40% of storey or 30 cm
     valid_axes, valid_thicknesses, valid_groups, valid_labels = [], [], [], []
-    for ax, th, grp, lbl in zip(wall_axes, wall_thicknesses, valid_parallel_groups, wall_labels):
+    for ax, th, grp, lbl in zip(wall_axes, wall_thicknesses, kept_groups, wall_labels):
         # Collect points near this axis in full storey height
         near = pts_for_walls[
             distance_points_to_line(pts_for_walls[:, :2],
@@ -172,7 +174,7 @@ def detect_walls(
         valid_labels.append(lbl)
 
     wall_axes, wall_thicknesses = valid_axes, valid_thicknesses
-    valid_parallel_groups, wall_labels = valid_groups, valid_labels
+    kept_groups, wall_labels = valid_groups, valid_labels
     log.info("Storey %d: %d axes survive height validation", storey_idx, len(wall_axes))
 
     if not wall_axes:
