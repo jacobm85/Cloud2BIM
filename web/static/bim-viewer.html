@@ -22,9 +22,28 @@
     @keyframes spin { to { transform: rotate(360deg); } }
     #legend { position: absolute; top: 12px; right: 12px; background: rgba(26,29,39,.88);
               border: 1px solid #2e3350; border-radius: 8px; padding: 10px 14px;
-              font-size: 11px; display: flex; flex-direction: column; gap: 5px; backdrop-filter: blur(4px); }
-    .leg { display: flex; align-items: center; gap: 7px; }
+              font-size: 11px; display: flex; flex-direction: column; gap: 2px; backdrop-filter: blur(4px); }
+    .leg { display: flex; align-items: center; gap: 7px; cursor: pointer;
+           padding: 4px 6px; margin: 0 -6px; border-radius: 4px; user-select: none;
+           transition: background .12s, opacity .12s; }
+    .leg:hover { background: rgba(255,255,255,0.05); }
+    .leg.off { opacity: 0.35; }
+    .leg.off .dot { background: #444 !important; }
+    .leg .count { color: #7b82a0; font-size: 10px; margin-left: auto; padding-left: 12px; }
     .dot { width: 11px; height: 11px; border-radius: 3px; flex-shrink: 0; }
+    #legend-actions { display: flex; gap: 6px; margin-top: 6px; padding-top: 6px;
+                      border-top: 1px solid #2e3350; }
+    #legend-actions button { background: transparent; border: 1px solid #2e3350;
+        color: #7b82a0; font-size: 10px; padding: 3px 7px; border-radius: 4px;
+        cursor: pointer; flex: 1; font-family: inherit; }
+    #legend-actions button:hover { color: #e2e4f0; border-color: #4f8ef7; }
+    #pc-toggle { position: absolute; bottom: 12px; right: 12px;
+                 background: rgba(26,29,39,.88); border: 1px solid #2e3350;
+                 color: #e2e4f0; padding: 8px 14px; border-radius: 7px; font-size: 12px;
+                 cursor: pointer; backdrop-filter: blur(4px); font-family: inherit;
+                 transition: border-color .12s; }
+    #pc-toggle:hover { border-color: #4f8ef7; }
+    #pc-toggle.on { border-color: #4f8ef7; color: #4f8ef7; }
     #stats { position: absolute; bottom: 12px; left: 12px; font-size: 11px;
              color: #4f5580; }
   </style>
@@ -40,11 +59,22 @@
   <canvas id="c"></canvas>
   <div id="overlay"><div class="spinner"></div><div id="status">Laddar…</div></div>
   <div id="legend" style="display:none">
-    <div class="leg"><div class="dot" style="background:#7fa8cc"></div>Vägg</div>
-    <div class="leg"><div class="dot" style="background:#8c8c9e"></div>Bjälklag</div>
-    <div class="leg"><div class="dot" style="background:#8dd3ff"></div>Fönster</div>
-    <div class="leg"><div class="dot" style="background:#c79e80"></div>Dörr</div>
-    <div class="leg"><div class="dot" style="background:#a6a6a6"></div>Övrigt</div>
+    <div class="leg" data-types="IfcWall,IfcWallStandardCase">
+      <div class="dot" style="background:#7fa8cc"></div>Vägg<span class="count"></span></div>
+    <div class="leg" data-types="IfcSlab">
+      <div class="dot" style="background:#8c8c9e"></div>Bjälklag<span class="count"></span></div>
+    <div class="leg" data-types="IfcWindow">
+      <div class="dot" style="background:#8dd3ff"></div>Fönster<span class="count"></span></div>
+    <div class="leg" data-types="IfcDoor">
+      <div class="dot" style="background:#c79e80"></div>Dörr<span class="count"></span></div>
+    <div class="leg" data-types="IfcColumn,IfcBeam,IfcStair,IfcStairFlight,IfcRoof,IfcSpace,IfcOpeningElement">
+      <div class="dot" style="background:#a6a6a6"></div>Övrigt<span class="count"></span></div>
+    <div class="leg" data-types="__pointcloud__">
+      <div class="dot" style="background:#76c8e8"></div>Punktmoln<span class="count"></span></div>
+    <div id="legend-actions">
+      <button id="leg-all">Visa alla</button>
+      <button id="leg-none">Dölj alla</button>
+    </div>
   </div>
   <div id="stats"></div>
 </div>
@@ -136,6 +166,7 @@ root.rotation.x = -Math.PI / 2;
 scene.add(root);
 
 let totalFaces = 0;
+const meshesByType = new Map();  // ifc type → Mesh[]
 
 data.objects.forEach(obj => {
   if (!obj.v.length || !obj.f.length) return;
@@ -159,8 +190,12 @@ data.objects.forEach(obj => {
   const mesh = new THREE.Mesh(geom, mat);
   mesh.castShadow = !isWindow;
   mesh.receiveShadow = true;
+  mesh.userData.ifcType = obj.t;
   root.add(mesh);
   totalFaces += obj.f.length / 3;
+
+  if (!meshesByType.has(obj.t)) meshesByType.set(obj.t, []);
+  meshesByType.get(obj.t).push(mesh);
 });
 
 // Fit camera to model (compute bbox in world space after rotation)
@@ -186,6 +221,88 @@ document.getElementById('stats').textContent =
   `${data.objects.length} objekt · ${totalFaces.toLocaleString()} trianglar`;
 document.getElementById('legend').style.display = 'flex';
 document.getElementById('hdr').textContent = '3D Viewer — ' + data.objects.length + ' objekt';
+
+// ── Legend: counts + click-to-toggle visibility ────────────────────────────
+function legendRows() { return Array.from(document.querySelectorAll('#legend .leg')); }
+
+function applyRowVisibility(row) {
+  const off = row.classList.contains('off');
+  const types = (row.dataset.types || '').split(',').filter(Boolean);
+  for (const t of types) {
+    if (t === '__pointcloud__') {
+      if (pointCloud) pointCloud.visible = !off;
+      continue;
+    }
+    (meshesByType.get(t) || []).forEach(m => m.visible = !off);
+  }
+}
+
+function refreshLegendCounts() {
+  for (const row of legendRows()) {
+    const types = (row.dataset.types || '').split(',').filter(Boolean);
+    const countEl = row.querySelector('.count');
+    if (!countEl) continue;
+    if (types.includes('__pointcloud__')) {
+      countEl.textContent = pointCloud ? `${pointCloudCount.toLocaleString()} pts` : '—';
+      continue;
+    }
+    const n = types.reduce((acc, t) => acc + ((meshesByType.get(t) || []).length), 0);
+    countEl.textContent = n;
+    row.style.display = (n === 0 && !types.includes('__pointcloud__')) ? 'none' : '';
+  }
+}
+
+document.getElementById('legend').addEventListener('click', e => {
+  const leg = e.target.closest('.leg');
+  if (!leg) return;
+  // Ignore the action buttons (they handle their own click)
+  if (e.target.closest('#legend-actions')) return;
+  leg.classList.toggle('off');
+  applyRowVisibility(leg);
+});
+
+document.getElementById('leg-all').addEventListener('click', () => {
+  for (const row of legendRows()) { row.classList.remove('off'); applyRowVisibility(row); }
+});
+document.getElementById('leg-none').addEventListener('click', () => {
+  for (const row of legendRows()) { row.classList.add('off'); applyRowVisibility(row); }
+});
+
+let pointCloud = null;
+let pointCloudCount = 0;
+refreshLegendCounts();
+
+// Hide point-cloud row until it's loaded (Feature 3)
+const pcRow = legendRows().find(r => (r.dataset.types || '') === '__pointcloud__');
+if (pcRow) {
+  pcRow.classList.add('off');  // start hidden
+  pcRow.style.display = 'none'; // until point cloud is fetched
+}
+
+// ── Point cloud overlay (Feature 3) ────────────────────────────────────────
+async function loadPointCloud() {
+  try {
+    const res = await fetch(`/api/jobs/${jobId}/pointcloud.bin?max_points=80000`);
+    if (!res.ok) return;  // silently skip — viewer still works
+    const buf = await res.arrayBuffer();
+    const arr = new Float32Array(buf);
+    pointCloudCount = arr.length / 3;
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+    const mat = new THREE.PointsMaterial({
+      color: 0x76c8e8, size: 0.025, sizeAttenuation: true,
+      transparent: true, opacity: 0.65, depthWrite: false,
+    });
+    pointCloud = new THREE.Points(geom, mat);
+    pointCloud.visible = false;
+    root.add(pointCloud);
+    if (pcRow) {
+      pcRow.style.display = '';
+      refreshLegendCounts();
+    }
+  } catch (e) { /* point cloud is optional */ }
+}
+loadPointCloud();
 
 // Hide overlay
 overlay.style.display = 'none';

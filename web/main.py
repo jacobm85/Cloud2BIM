@@ -536,6 +536,33 @@ async def get_geometry(job_id: str):
     return FileResponse(str(geo_path), media_type="application/json")
 
 
+@app.get("/api/jobs/{job_id}/pointcloud.bin")
+async def pointcloud_binary(job_id: str, max_points: int = 80000):
+    """Return a decimated point cloud as raw Float32Array bytes (XYZ triplets).
+
+    Used by the 3D viewer to overlay the prepared point cloud on top of the
+    IFC mesh for visual verification. Decimated to keep WebGL happy and the
+    network payload bounded — points.npz can be millions of points.
+    """
+    from fastapi.responses import Response
+    pts_path = JOBS_DIR / job_id / "points.npz"
+    if not pts_path.exists():
+        raise HTTPException(404, "points.npz not found — run prepare stage first")
+
+    def _load():
+        import numpy as _np
+        data = _np.load(str(pts_path))
+        xyz = data["xyz"]
+        n = len(xyz)
+        if n > max_points and max_points > 0:
+            stride = max(1, n // max_points)
+            xyz = xyz[::stride]
+        return xyz.astype(_np.float32, copy=False).tobytes()
+
+    payload = await asyncio.to_thread(_load)
+    return Response(content=payload, media_type="application/octet-stream")
+
+
 @app.get("/api/jobs/{job_id}/preview")
 async def get_preview(job_id: str):
     job = job_manager.get_job(job_id)
