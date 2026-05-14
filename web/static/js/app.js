@@ -496,8 +496,8 @@ const WIZARD_STAGES = ['prepare', 'segment', 'slabs', 'walls', 'openings', 'roof
 
 const STAGE_INFO = {
   prepare: {
-    title: 'Förberedelse',
-    desc: 'Läser punktmolnet, glesar och centrerar koordinater. Inga val att granska — fortsätt direkt.',
+    title: 'Förberedelse + crop',
+    desc: 'Läser punktmolnet, glesar och centrerar koordinater. Här kan du också rita en polygon i planöversikten för att beskära punktmolnet — bara punkter inom polygonen följer med till resten av pipelinen.',
   },
   segment: {
     title: 'Semantisk segmentering',
@@ -666,9 +666,137 @@ function renderWizardStageReview(stage, failed) {
   document.getElementById('btn-stage-redo').onclick = () => wizardOpenStageOverrides(stage);
 
   // Stage-specific extras
-  if (stage === 'slabs') renderSlabsReview();
+  if (stage === 'prepare') renderPrepareReview();
+  else if (stage === 'slabs') renderSlabsReview();
   else if (stage === 'walls') renderWallsReview();
   else if (stage === 'ifc') renderIfcReview();
+}
+
+async function renderPrepareReview() {
+  const extra = document.getElementById('stage-extra');
+  extra.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim)">Renderar planöversikt…</div>';
+  let meta;
+  try {
+    const res = await fetch('/api/jobs/' + wizard.jobId + '/topdown');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    meta = await res.json();
+  } catch (e) {
+    extra.innerHTML = '<div class="alert alert-danger">Kunde inte rendera översikt: ' + e.message + '</div>';
+    return;
+  }
+  extra.innerHTML = `
+    <div style="margin-bottom:14px">
+      <div style="font-weight:600;margin-bottom:4px">Beskär punktmoln (valfritt)</div>
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
+        ${meta.point_count.toLocaleString()} punkter just nu. Klicka i bilden för att lägga
+        till polygonpunkter; dubbelklicka eller "Tillämpa crop" för att stänga polygonen och
+        bara behålla punkter innanför. Hoppa över helt om hela skanningen ska bearbetas.
+      </div>
+      <div id="crop-wrap" style="position:relative;display:inline-block;background:#0f1117;border:1px solid var(--border);border-radius:8px;overflow:hidden;max-width:100%">
+        <img id="topdown-img" src="${meta.image_url}" alt="Top-down" style="display:block;max-width:100%;user-select:none;-webkit-user-drag:none">
+        <canvas id="topdown-canvas" style="position:absolute;left:0;top:0;cursor:crosshair"></canvas>
+      </div>
+      <div class="btn-row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-outline" id="btn-crop-undo">Ångra punkt</button>
+        <button class="btn btn-outline" id="btn-crop-clear">Rensa</button>
+        <button class="btn btn-primary" id="btn-crop-apply" disabled>Tillämpa crop</button>
+        <span id="crop-status" style="font-size:12px;color:var(--text-dim);align-self:center;margin-left:6px"></span>
+      </div>
+    </div>`;
+  setupCropTool(meta.bounds);
+}
+
+function setupCropTool(bounds) {
+  const img = document.getElementById('topdown-img');
+  const canvas = document.getElementById('topdown-canvas');
+  const status = document.getElementById('crop-status');
+  const pts = [];
+
+  function sync() {
+    canvas.width = img.naturalWidth || img.clientWidth;
+    canvas.height = img.naturalHeight || img.clientHeight;
+    canvas.style.width = img.clientWidth + 'px';
+    canvas.style.height = img.clientHeight + 'px';
+    redraw();
+  }
+  img.addEventListener('load', sync);
+  if (img.complete) sync();
+  window.addEventListener('resize', sync);
+
+  function pixelToWorld(px, py) {
+    const [xmin, ymin, xmax, ymax] = bounds;
+    const wx = xmin + (px / canvas.width) * (xmax - xmin);
+    // PNG y is top-down; world y is bottom-up
+    const wy = ymax - (py / canvas.height) * (ymax - ymin);
+    return [wx, wy];
+  }
+
+  function redraw() {
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const applyBtn = document.getElementById('btn-crop-apply');
+    if (applyBtn) applyBtn.disabled = pts.length < 3;
+    if (status) status.textContent = pts.length + ' punkt' + (pts.length === 1 ? '' : 'er');
+    if (pts.length === 0) return;
+    ctx.strokeStyle = '#4f8ef7';
+    ctx.fillStyle = 'rgba(79,142,247,0.18)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    if (pts.length >= 3) { ctx.closePath(); ctx.fill(); }
+    ctx.stroke();
+    for (const p of pts) {
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], 4, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff';
+      ctx.fill();
+      ctx.strokeStyle = '#4f8ef7';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+
+  canvas.addEventListener('click', e => {
+    const rect = canvas.getBoundingClientRect();
+    const px = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const py = (e.clientY - rect.top) * (canvas.height / rect.height);
+    pts.push([px, py]);
+    redraw();
+  });
+  canvas.addEventListener('dblclick', e => {
+    e.preventDefault();
+    if (pts.length >= 3) applyCrop();
+  });
+
+  document.getElementById('btn-crop-clear').onclick = () => { pts.length = 0; redraw(); };
+  document.getElementById('btn-crop-undo').onclick = () => { pts.pop(); redraw(); };
+  document.getElementById('btn-crop-apply').onclick = applyCrop;
+
+  async function applyCrop() {
+    if (pts.length < 3) return;
+    const polygon = pts.map(p => pixelToWorld(p[0], p[1]));
+    status.style.color = 'var(--text-dim)';
+    status.textContent = 'Beskär…';
+    try {
+      const res = await fetch('/api/jobs/' + wizard.jobId + '/crop', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ polygon }),
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(txt || ('HTTP ' + res.status));
+      }
+      const r = await res.json();
+      status.style.color = 'var(--success)';
+      status.textContent = `✓ ${r.after.toLocaleString()} av ${r.before.toLocaleString()} punkter kvar (${Math.round(r.kept_fraction * 100)}%)`;
+      // Re-render with fresh top-down so the user sees the cropped cloud
+      setTimeout(renderPrepareReview, 400);
+    } catch (e) {
+      status.style.color = 'var(--danger)';
+      status.textContent = '✗ ' + e.message;
+    }
+  }
 }
 
 async function renderSlabsReview() {

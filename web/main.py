@@ -413,11 +413,12 @@ async def create_job(request: CreateJobRequest):
     job_manager.create_job(job_id, input_path, mode=request.mode)
 
     if request.mode == "stepwise":
-        # Run prepare + segment automatically; pause before slabs so the
-        # user can review the Z-histogram and adjust slab params.
+        # Run only `prepare` automatically; pause so the user can crop the
+        # point cloud with a polygon on the top-down preview before the rest
+        # of the pipeline runs.
         thread = threading.Thread(
             target=job_manager.run_stages_async,
-            args=(job_id, str(config_path), ["prepare", "segment"]),
+            args=(job_id, str(config_path), ["prepare"]),
             daemon=True,
         )
     else:
@@ -534,6 +535,122 @@ async def get_geometry(job_id: str):
     if not geo_path.exists():
         await asyncio.to_thread(_generate_geometry_json, str(ifc_path), str(geo_path))
     return FileResponse(str(geo_path), media_type="application/json")
+
+
+@app.get("/api/jobs/{job_id}/topdown")
+async def topdown_preview(job_id: str):
+    """Render a top-down density preview of the prepared point cloud.
+
+    Returns the image URL plus the world-coordinate bounds so the frontend
+    can map pixel clicks → world XY for the polygon-crop tool.
+    """
+    job_dir = JOBS_DIR / job_id
+    pts_path = job_dir / "points.npz"
+    if not pts_path.exists():
+        raise HTTPException(404, "points.npz missing — run prepare stage first")
+
+    out_png = job_dir / "topdown.png"
+    out_meta = job_dir / "topdown.json"
+
+    def _render():
+        import numpy as _np
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as _plt
+        data = _np.load(str(pts_path))
+        xy = data["xyz"][:, :2]
+        if len(xy) > 250_000:
+            xy = xy[:: len(xy) // 250_000]
+        x_min, y_min = float(xy[:, 0].min()), float(xy[:, 1].min())
+        x_max, y_max = float(xy[:, 0].max()), float(xy[:, 1].max())
+        # Fixed aspect, no tight bbox — so PNG pixels map linearly to world XY
+        dpi = 100
+        size_in = (8, 8 * (y_max - y_min) / max(1e-6, x_max - x_min))
+        fig, ax = _plt.subplots(figsize=size_in, dpi=dpi)
+        fig.patch.set_facecolor("#1a1d27")
+        ax.set_facecolor("#0f1117")
+        ax.scatter(xy[:, 0], xy[:, 1], s=0.3, c="#76c8e8", alpha=0.45)
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+        ax.set_aspect("equal")
+        ax.axis("off")
+        fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+        fig.savefig(out_png, dpi=dpi, pad_inches=0)
+        _plt.close(fig)
+        meta = {
+            "bounds": [x_min, y_min, x_max, y_max],
+            "point_count": int(len(data["xyz"])),
+        }
+        out_meta.write_text(json.dumps(meta))
+        return meta
+
+    meta = await asyncio.to_thread(_render)
+    return {
+        "image_url": f"/api/jobs/{job_id}/topdown.png?t={int(meta['point_count'])}",
+        "bounds": meta["bounds"],
+        "point_count": meta["point_count"],
+    }
+
+
+@app.get("/api/jobs/{job_id}/topdown.png")
+async def topdown_image(job_id: str):
+    out_png = JOBS_DIR / job_id / "topdown.png"
+    if not out_png.exists():
+        raise HTTPException(404, "Top-down preview not yet generated; call /topdown first")
+    return FileResponse(str(out_png), media_type="image/png")
+
+
+class CropRequest(BaseModel):
+    """Polygon in world XY coords (m). At least 3 vertices required."""
+    polygon: List[List[float]]
+
+
+@app.post("/api/jobs/{job_id}/crop")
+async def crop_points(job_id: str, req: CropRequest):
+    """Filter points.npz to points inside the given XY polygon.
+
+    Downstream stages (slabs/walls/openings/roofs/ifc) re-read points.npz,
+    so cropping here automatically tightens everything that follows. The
+    user runs this from the prepare-stage review screen before letting the
+    rest of the pipeline through.
+    """
+    job_dir = JOBS_DIR / job_id
+    pts_path = job_dir / "points.npz"
+    if not pts_path.exists():
+        raise HTTPException(404, "points.npz missing — run prepare stage first")
+    if len(req.polygon) < 3:
+        raise HTTPException(400, "polygon must have at least 3 vertices")
+
+    def _crop():
+        import numpy as _np
+        from matplotlib.path import Path as _MPath
+        data = _np.load(str(pts_path))
+        xyz = data["xyz"]
+        offset = data["offset"]
+        polygon = _np.array(req.polygon, dtype=_np.float64)
+        path = _MPath(polygon)
+        mask = path.contains_points(xyz[:, :2])
+        kept = xyz[mask]
+        if len(kept) == 0:
+            return {"error": "polygon contains no points"}
+        _np.savez(str(pts_path), xyz=kept.astype(_np.float32), offset=offset)
+        return {
+            "before": int(len(xyz)),
+            "after": int(len(kept)),
+            "kept_fraction": float(len(kept) / len(xyz)),
+        }
+
+    result = await asyncio.to_thread(_crop)
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+
+    # Invalidate cached top-down preview so the next /topdown call re-renders
+    try:
+        (job_dir / "topdown.png").unlink()
+        (job_dir / "topdown.json").unlink()
+    except FileNotFoundError:
+        pass
+    return result
 
 
 @app.get("/api/jobs/{job_id}/pointcloud.bin")
