@@ -562,6 +562,7 @@ class RunStageRequest(BaseModel):
     min_wall_thickness: Optional[float] = None
     max_wall_thickness: Optional[float] = None
     exterior_walls_thickness: Optional[float] = None
+    max_walls_per_storey: Optional[int] = None
     # Cross-section bands as a flat list of [z_min, z_max, z_min, z_max, ...]
     # one pair per storey. None entries (passed as [null, null]) keep the
     # default 30-130 cm above-floor band.
@@ -612,6 +613,8 @@ def _apply_overrides_to_config(config_path: Path, req: RunStageRequest) -> None:
         walls["max_thickness"] = req.max_wall_thickness
     if req.exterior_walls_thickness is not None:
         walls["exterior_thickness"] = req.exterior_walls_thickness
+    if req.max_walls_per_storey is not None:
+        walls["max_walls_per_storey"] = req.max_walls_per_storey
     if req.cross_section_bands is not None:
         walls["cross_section_bands"] = req.cross_section_bands
 
@@ -706,6 +709,38 @@ async def get_slabs_data(job_id: str):
             for s in slabs
         ],
         "peak_z": z_peaks,
+    }
+
+
+class SlabSelectRequest(BaseModel):
+    keep_indices: List[int]
+
+
+@app.post("/api/jobs/{job_id}/slabs/select")
+async def select_slabs(job_id: str, req: SlabSelectRequest):
+    """Filter slabs.pkl to only the indices the user wants to keep.
+
+    This is how the wizard supports "I see 3 slabs but only 1 is real" —
+    after running the slabs stage, the user ticks the ones to keep and we
+    overwrite slabs.pkl with that subset before the walls stage runs.
+    """
+    import pickle
+    job_dir = JOBS_DIR / job_id
+    slabs_path = job_dir / "slabs.pkl"
+    if not slabs_path.exists():
+        raise HTTPException(404, "Slabs not yet computed")
+    with open(slabs_path, "rb") as fh:
+        slabs = pickle.load(fh)
+    keep = sorted(set(req.keep_indices))
+    if not all(0 <= i < len(slabs) for i in keep):
+        raise HTTPException(400, "keep_indices contain out-of-range entries")
+    filtered = [slabs[i] for i in keep]
+    with open(slabs_path, "wb") as fh:
+        pickle.dump(filtered, fh)
+    return {
+        "kept": keep,
+        "total_before": len(slabs),
+        "total_after": len(filtered),
     }
 
 

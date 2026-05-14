@@ -684,25 +684,69 @@ async function renderSlabsReview() {
       const floor = data.slabs[i].top_z;
       wizard.bands.push({ z_min: floor + 0.30, z_max: floor + 1.30 });
     }
+    const rows = data.slabs.map((s, i) => `
+      <tr>
+        <td><input type="checkbox" class="slab-keep" data-idx="${i}" checked></td>
+        <td>${i}</td>
+        <td align="right">${s.bottom_z.toFixed(3)}</td>
+        <td align="right">${s.top_z.toFixed(3)}</td>
+        <td align="right">${Math.round(s.thickness*1000)} mm</td>
+      </tr>`).join('');
     extra.innerHTML = `
       <div class="stage-preview-row">
         <div>
-          <img src="/api/jobs/${wizard.jobId}/z_histogram.png?t=${Date.now()}" alt="Z-histogram">
+          <img id="slabs-z-hist" src="/api/jobs/${wizard.jobId}/z_histogram.png?t=${Date.now()}" alt="Z-histogram">
         </div>
         <div style="padding:12px">
           <div style="font-weight:600;margin-bottom:8px">Identifierade bjälklag (${data.slabs.length})</div>
           <table style="width:100%;font-size:12px;border-collapse:collapse">
-            <thead><tr style="color:var(--text-dim)"><th align="left">#</th><th align="right">Botten (m)</th><th align="right">Topp (m)</th><th align="right">Tjocklek</th></tr></thead>
-            <tbody>${data.slabs.map((s, i) => `<tr><td>${i}</td><td align="right">${s.bottom_z.toFixed(3)}</td><td align="right">${s.top_z.toFixed(3)}</td><td align="right">${Math.round(s.thickness*1000)} mm</td></tr>`).join('')}</tbody>
+            <thead><tr style="color:var(--text-dim)"><th align="left">Behåll</th><th align="left">#</th><th align="right">Botten (m)</th><th align="right">Topp (m)</th><th align="right">Tjocklek</th></tr></thead>
+            <tbody>${rows}</tbody>
           </table>
           <div style="margin-top:10px;font-size:11px;color:var(--text-dim)">
-            ${data.peak_z.length} Z-toppar hittades. Justera <code>max_slab_thickness</code> eller
-            <code>peak_height_ratio</code> via "Kör om" om resultatet ser fel ut.
+            ${data.peak_z.length} Z-toppar hittades. Avmarkera bjälklag som inte ska räknas
+            (t.ex. falsk topp som tolkades som en extra våning) och klicka "Tillämpa urval".
+            Du måste behålla minst 2 bjälklag (golv + tak) för att väggdetekteringen ska kunna köra.
+          </div>
+          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-outline" id="btn-apply-slab-select">Tillämpa urval</button>
+            <span id="slab-select-status" style="font-size:12px;color:var(--text-dim);align-self:center"></span>
           </div>
         </div>
       </div>`;
+    document.getElementById('btn-apply-slab-select').onclick = applySlabSelection;
   } catch (e) {
     extra.innerHTML = '<div class="alert alert-danger">Kunde inte ladda bjälklagsdata: ' + e.message + '</div>';
+  }
+}
+
+async function applySlabSelection() {
+  const checks = document.querySelectorAll('.slab-keep');
+  const keep = Array.from(checks).filter(c => c.checked).map(c => parseInt(c.dataset.idx, 10));
+  const status = document.getElementById('slab-select-status');
+  if (keep.length < 2) {
+    status.style.color = 'var(--danger)';
+    status.textContent = '✗ Behåll minst 2 bjälklag.';
+    return;
+  }
+  status.style.color = 'var(--text-dim)';
+  status.textContent = 'Uppdaterar…';
+  try {
+    const res = await fetch('/api/jobs/' + wizard.jobId + '/slabs/select', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keep_indices: keep }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const r = await res.json();
+    status.style.color = 'var(--success)';
+    status.textContent = `✓ ${r.total_after} av ${r.total_before} bjälklag kvar.`;
+    // Re-render review so the table + histogram + bands reflect the new state
+    wizard.slabsData = null;
+    wizard.bands = [];
+    setTimeout(renderSlabsReview, 300);
+  } catch (e) {
+    status.style.color = 'var(--danger)';
+    status.textContent = '✗ ' + e.message;
   }
 }
 
@@ -854,9 +898,11 @@ function wizardOpenStageOverrides(stage) {
         <div class="form-group"><label>Min väggtjocklek (m)</label><input type="number" id="ovr-min-wt" value="0.05" step="0.01"></div>
         <div class="form-group"><label>Max väggtjocklek (m)</label><input type="number" id="ovr-max-wt" value="0.75" step="0.05"></div>
         <div class="form-group"><label>Yttervägg-tjocklek (m)</label><input type="number" id="ovr-ext-wt" value="0.3" step="0.05"></div>
+        <div class="form-group"><label>Max väggar per våning (cap)</label><input type="number" id="ovr-max-walls" value="300" min="1"></div>
       </div>
       <div style="font-size:11px;color:var(--text-dim);margin-top:8px">
-        Eventuella Z-band du satt ovan inkluderas automatiskt vid rerun.
+        Eventuella Z-band du satt ovan inkluderas automatiskt vid rerun. Höj
+        "Max väggar per våning" om planlösningen har många rumsindelningar.
       </div>`;
   } else {
     formHtml = '<div class="alert alert-info">Inga parametrar att justera för det här steget. Klicka "Kör om" för att köra det igen som det är.</div>';
@@ -893,6 +939,7 @@ async function wizardRunStage(stage) {
   const wMinT = num('ovr-min-wt'); if (wMinT !== null) overrides.min_wall_thickness = wMinT;
   const wMaxT = num('ovr-max-wt'); if (wMaxT !== null) overrides.max_wall_thickness = wMaxT;
   const wExtT = num('ovr-ext-wt'); if (wExtT !== null) overrides.exterior_walls_thickness = wExtT;
+  const wMaxN = num('ovr-max-walls'); if (wMaxN !== null) overrides.max_walls_per_storey = Math.round(wMaxN);
   // Cross-section bands (for walls stage)
   if (stage === 'walls' && wizard.bands.length > 0) {
     overrides.cross_section_bands = wizard.bands.map(b => b ? [b.z_min, b.z_max] : null);

@@ -10,7 +10,8 @@
       "Bash(git commit -m 'Wrap IfcAPI in plain object for xeokit compatibility *)",
       "Bash(git rm *)",
       "Bash(git checkout *)",
-      "Bash(python *)"
+      "Bash(python *)",
+      "Bash(node -e \"new Function\\(require\\('fs'\\).readFileSync\\('web/static/js/app.js','utf8'\\)\\); console.log\\('JS OK'\\);\")"
     ]
   }
 }

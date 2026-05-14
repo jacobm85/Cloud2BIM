@@ -123,11 +123,14 @@ class IfcBuilder:
         self._assign_representation(opening_el, rep)
 
         # void.add_opening API was removed in ifcopenshell 0.8 — use direct
-        # entity creation which works across all versions.
+        # entity creation which works across all versions. In IFC2X3
+        # IfcRoot.OwnerHistory is NOT optional, so we reuse the project's
+        # one (initialised in _init_owner_history).
+        oh = self._owner_history()
         self.model.create_entity(
             "IfcRelVoidsElement",
             GlobalId=ifcopenshell.guid.new(),
-            OwnerHistory=None,
+            OwnerHistory=oh,
             RelatingBuildingElement=host_wall_ifc,
             RelatedOpeningElement=opening_el,
         )
@@ -142,7 +145,7 @@ class IfcBuilder:
         self.model.create_entity(
             "IfcRelFillsElement",
             GlobalId=ifcopenshell.guid.new(),
-            OwnerHistory=None,
+            OwnerHistory=oh,
             RelatingOpeningElement=opening_el,
             RelatedBuildingElement=fill,
         )
@@ -171,6 +174,25 @@ class IfcBuilder:
         log.info("IFC written: %s", path)
 
     # ── internal ────────────────────────────────────────────────────────
+
+    def _owner_history(self) -> ifcopenshell.entity_instance:
+        """Owner history shared by every IfcRoot subtype.
+
+        IFC2X3 requires OwnerHistory on IfcRelVoidsElement / IfcRelFillsElement
+        / etc. ifcopenshell.api populates it on root.create_entity calls; for
+        bare create_entity calls we need to pass it ourselves. The project
+        already has one, so reuse it.
+        """
+        if hasattr(self, "_oh_cache") and self._oh_cache is not None:
+            return self._oh_cache
+        oh = getattr(self._project, "OwnerHistory", None)
+        if oh is None:
+            # Fall back to whichever entity in the file has one
+            for inst in self.model.by_type("IfcOwnerHistory"):
+                oh = inst
+                break
+        self._oh_cache = oh
+        return oh
 
     def _init_owner_history(self) -> None:
         """Create person + organisation + application so OwnerHistory works."""
