@@ -40,6 +40,13 @@ function goTo(n) {
     el.classList.toggle('done', s < n);
   });
 
+  if (n === 3) {
+    // Show the right run panel depending on selected mode
+    const mode = (document.querySelector('input[name="run-mode"]:checked') || {}).value || 'full';
+    document.getElementById('run-full-panel').style.display = mode === 'full' ? 'block' : 'none';
+    document.getElementById('run-wizard-panel').style.display = mode === 'stepwise' ? 'block' : 'none';
+  }
+
   if (n === 4) setupResults();
 }
 window.goTo = goTo; // used by inline onclick in HTML
@@ -454,11 +461,13 @@ function collectConfig() {
   const v = id => (document.getElementById(id) || {}).value || '';
   const n = id => parseFloat(v(id)) || 0;
   const b = id => !!(document.getElementById(id) || {}).checked;
+  const mode = (document.querySelector('input[name="run-mode"]:checked') || {}).value || 'full';
   return {
     upload_id: state.sourceType === 'upload' ? state.uploadId : null,
     network_path: state.sourceType === 'network' ? state.networkPath : null,
     source_job_id: state.sourceType === 'reuse' ? state.sourceJobId : null,
     e57_input: false,  // auto-detected on backend from file extension
+    mode,
     seg_enabled: b('seg-enabled'),
     seg_backend: v('seg-backend') || 'ptv3',
     seg_weights: v('seg-weights') || null,
@@ -478,6 +487,394 @@ function collectConfig() {
     ifc_site_elevation: n('ifc-elevation'), material_for_objects: v('material'),
   };
 }
+
+// ── Wizard mode (stepwise pipeline) ───────────────────────────────────────
+const WIZARD_STAGES = ['prepare', 'segment', 'slabs', 'walls', 'openings', 'roofs', 'ifc'];
+
+const STAGE_INFO = {
+  prepare: {
+    title: 'Förberedelse',
+    desc: 'Läser punktmolnet, glesar och centrerar koordinater. Inga val att granska — fortsätt direkt.',
+  },
+  segment: {
+    title: 'Semantisk segmentering',
+    desc: 'Klassificerar varje punkt (golv, vägg, tak, möbler, …). Om ML-segmentering är avstängd märks alla punkter som "unknown" och påverkar inte vägg/öppningsdetekteringen.',
+  },
+  slabs: {
+    title: 'Bjälklag',
+    desc: 'Bygger ett Z-histogram över punktmolnet och hittar horisontella ytor som toppar. Toppar inom max_slab_thickness paras som botten+topp; övriga blir egna bjälklag.',
+  },
+  walls: {
+    title: 'Väggar',
+    desc: 'För varje våning tas ett horisontellt snitt 30–130 cm över golvet och 2D-histogrammet ger väggsegment. Du kan välja Z-snittet manuellt här om bjälklagsdetektionen blev fel.',
+  },
+  openings: {
+    title: 'Öppningar',
+    desc: 'Hittar fönster och dörrar i varje vägg baserat på lokala håligheter och semantiska etiketter.',
+  },
+  roofs: {
+    title: 'Tak',
+    desc: 'RANSAC-planpassning för sneda tak. Hoppas över om "Sneda tak" är avstängt.',
+  },
+  ifc: {
+    title: 'IFC-export',
+    desc: 'Bygger IFC-modellen och genererar planlösningspreview.',
+  },
+};
+
+const wizard = {
+  jobId: null,
+  pollTimer: null,
+  sse: null,
+  slabsData: null,
+  slabCount: 0,
+  bands: [],  // [{z_min, z_max} | null] per storey
+};
+
+function wizardLog(text) {
+  const el = document.getElementById('wizard-log');
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  if (/error|exception/i.test(text)) line.classList.add('error');
+  else if (/saved|complete|done/i.test(text)) line.classList.add('success');
+  line.textContent = text;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function wizardSetBadge(status) {
+  const badge = document.getElementById('wizard-status-badge');
+  badge.className = 'status-badge ' + status;
+  badge.textContent = { pending: 'Väntar', running: 'Kör…', completed: 'Klar', failed: 'Misslyckad', awaiting: 'Väntar på dig' }[status] || status;
+}
+
+function wizardUpdateStageList(completed, current, failed) {
+  const items = document.querySelectorAll('#wizard-stages li');
+  items.forEach(li => {
+    const s = li.dataset.stage;
+    li.classList.remove('active', 'done', 'failed');
+    const tick = li.querySelector('.stage-tick');
+    if (completed.includes(s)) {
+      li.classList.add('done');
+      tick.textContent = '✓';
+    } else if (s === current) {
+      li.classList.add('active');
+      tick.textContent = '⋯';
+    } else if (s === failed) {
+      li.classList.add('failed');
+      tick.textContent = '✗';
+    } else {
+      tick.textContent = '·';
+    }
+  });
+}
+
+async function wizardStart() {
+  document.getElementById('btn-wizard-start').disabled = true;
+  document.getElementById('btn-back-3-wiz').disabled = true;
+  document.getElementById('wizard-log').innerHTML = '';
+  wizardSetBadge('running');
+
+  const cfg = collectConfig();
+  cfg.mode = 'stepwise';
+  const res = await fetch('/api/jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(cfg),
+  });
+  if (!res.ok) {
+    wizardLog('[ERROR] Kunde inte starta jobb');
+    wizardSetBadge('failed');
+    return;
+  }
+  const data = await res.json();
+  wizard.jobId = data.job_id;
+  state.jobId = data.job_id;
+  wizardLog(`[Job ${data.job_id.slice(0, 8)}] Wizard startad`);
+
+  wizardStreamLogs();
+  wizardPollState();
+}
+
+function wizardStreamLogs() {
+  if (wizard.sse) { try { wizard.sse.close(); } catch (e) {} }
+  const sse = new EventSource('/api/jobs/' + wizard.jobId + '/logs');
+  sse.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.line !== undefined) wizardLog(msg.line);
+    if (msg.done) {
+      sse.close();
+      wizard.sse = null;
+    }
+  };
+  sse.onerror = () => { try { sse.close(); } catch (e) {} wizard.sse = null; };
+  wizard.sse = sse;
+}
+
+async function wizardPollState() {
+  if (wizard.pollTimer) clearInterval(wizard.pollTimer);
+  let lastStatus = null;
+  let lastStage = null;
+
+  const tick = async () => {
+    try {
+      const res = await fetch('/api/jobs/' + wizard.jobId + '/state');
+      if (!res.ok) return;
+      const st = await res.json();
+      const completed = st.completed_stages || [];
+      wizardUpdateStageList(completed, st.current_stage, null);
+      wizardSetBadge(st.status === 'running' ? 'running' : (st.status === 'failed' ? 'failed' : (st.status === 'completed' ? 'awaiting' : st.status)));
+
+      // Detect a stage finishing so we can render its review screen
+      const justFinished = lastStatus === 'running' && st.status !== 'running';
+      if (justFinished) {
+        // Re-attach logs in case the stream closed
+        if (!wizard.sse) wizardStreamLogs();
+        const nextReview = completed[completed.length - 1];
+        if (st.status === 'failed') {
+          renderWizardStageReview(nextReview || lastStage, true);
+        } else {
+          renderWizardStageReview(nextReview, false);
+        }
+      }
+      lastStatus = st.status;
+      lastStage = st.current_stage;
+    } catch (e) { /* keep polling */ }
+  };
+  wizard.pollTimer = setInterval(tick, 1500);
+  tick();
+}
+
+function renderWizardStageReview(stage, failed) {
+  const detail = document.getElementById('wizard-stage-detail');
+  const info = STAGE_INFO[stage] || { title: stage, desc: '' };
+  detail.innerHTML = `
+    <div class="stage-panel">
+      <h3>${failed ? '✗' : '✓'} ${info.title}</h3>
+      <div class="stage-help">${info.desc}</div>
+      <div id="stage-extra"></div>
+      <div class="btn-row">
+        <button class="btn btn-outline" id="btn-stage-redo">Kör om detta steg</button>
+        <button class="btn btn-primary" id="btn-stage-continue" ${failed ? 'disabled' : ''}>Fortsätt →</button>
+      </div>
+    </div>`;
+  const next = WIZARD_STAGES[WIZARD_STAGES.indexOf(stage) + 1];
+  document.getElementById('btn-stage-continue').onclick = () => wizardRunStage(next || stage);
+  document.getElementById('btn-stage-redo').onclick = () => wizardOpenStageOverrides(stage);
+
+  // Stage-specific extras
+  if (stage === 'slabs') renderSlabsReview();
+  else if (stage === 'walls') renderWallsReview();
+  else if (stage === 'ifc') renderIfcReview();
+}
+
+async function renderSlabsReview() {
+  const extra = document.getElementById('stage-extra');
+  extra.innerHTML = '<div class="stage-preview-row"><div style="text-align:center;padding:40px;color:var(--text-dim)">Laddar Z-histogram…</div></div>';
+  try {
+    const data = await fetch('/api/jobs/' + wizard.jobId + '/slabs').then(r => r.json());
+    wizard.slabsData = data;
+    wizard.slabCount = data.slabs.length;
+    // Initialize default bands: floor+0.30 to floor+1.30 per storey
+    wizard.bands = [];
+    for (let i = 0; i < data.slabs.length - 1; i++) {
+      const floor = data.slabs[i].top_z;
+      wizard.bands.push({ z_min: floor + 0.30, z_max: floor + 1.30 });
+    }
+    extra.innerHTML = `
+      <div class="stage-preview-row">
+        <div>
+          <img src="/api/jobs/${wizard.jobId}/z_histogram.png?t=${Date.now()}" alt="Z-histogram">
+        </div>
+        <div style="padding:12px">
+          <div style="font-weight:600;margin-bottom:8px">Identifierade bjälklag (${data.slabs.length})</div>
+          <table style="width:100%;font-size:12px;border-collapse:collapse">
+            <thead><tr style="color:var(--text-dim)"><th align="left">#</th><th align="right">Botten (m)</th><th align="right">Topp (m)</th><th align="right">Tjocklek</th></tr></thead>
+            <tbody>${data.slabs.map((s, i) => `<tr><td>${i}</td><td align="right">${s.bottom_z.toFixed(3)}</td><td align="right">${s.top_z.toFixed(3)}</td><td align="right">${Math.round(s.thickness*1000)} mm</td></tr>`).join('')}</tbody>
+          </table>
+          <div style="margin-top:10px;font-size:11px;color:var(--text-dim)">
+            ${data.peak_z.length} Z-toppar hittades. Justera <code>max_slab_thickness</code> eller
+            <code>peak_height_ratio</code> via "Kör om" om resultatet ser fel ut.
+          </div>
+        </div>
+      </div>`;
+  } catch (e) {
+    extra.innerHTML = '<div class="alert alert-danger">Kunde inte ladda bjälklagsdata: ' + e.message + '</div>';
+  }
+}
+
+async function renderWallsReview() {
+  const extra = document.getElementById('stage-extra');
+  extra.innerHTML = `
+    <div style="margin-bottom:14px">
+      <div style="font-weight:600;margin-bottom:4px">Horisontella tvärsnitt</div>
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">
+        Ett snitt per våning. Förslaget är 30–130 cm över golvet. Ändra om bjälklagsdetektionen
+        gjorde fel — då kan du istället plocka ett band direkt från Z-histogrammet.
+      </div>
+      <div id="storey-bands"></div>
+    </div>`;
+  const list = document.getElementById('storey-bands');
+  const numStoreys = Math.max(0, wizard.slabCount - 1);
+  for (let i = 0; i < numStoreys; i++) {
+    const band = wizard.bands[i] || { z_min: 0, z_max: 1 };
+    const row = document.createElement('div');
+    row.className = 'storey-band';
+    row.innerHTML = `
+      <label>Våning ${i}</label>
+      <div><label style="display:block;font-size:11px">Z min (m)</label>
+        <input type="number" step="0.05" class="band-min" value="${band.z_min.toFixed(2)}" data-storey="${i}"></div>
+      <div><label style="display:block;font-size:11px">Z max (m)</label>
+        <input type="number" step="0.05" class="band-max" value="${band.z_max.toFixed(2)}" data-storey="${i}"></div>
+      <button class="btn btn-outline" data-storey="${i}" data-action="preview">Visa snitt</button>`;
+    list.appendChild(row);
+  }
+  list.addEventListener('input', e => {
+    const storey = parseInt(e.target.dataset.storey, 10);
+    if (Number.isNaN(storey)) return;
+    if (e.target.classList.contains('band-min')) wizard.bands[storey].z_min = parseFloat(e.target.value);
+    if (e.target.classList.contains('band-max')) wizard.bands[storey].z_max = parseFloat(e.target.value);
+  });
+  list.addEventListener('click', async e => {
+    if (e.target.dataset.action !== 'preview') return;
+    const storey = parseInt(e.target.dataset.storey, 10);
+    const band = wizard.bands[storey];
+    await renderCrossSection(storey, band.z_min, band.z_max);
+  });
+}
+
+async function renderCrossSection(storey, zMin, zMax) {
+  let preview = document.getElementById('cross-section-preview-' + storey);
+  if (!preview) {
+    preview = document.createElement('div');
+    preview.id = 'cross-section-preview-' + storey;
+    preview.className = 'stage-preview-row';
+    document.getElementById('storey-bands').appendChild(preview);
+  }
+  preview.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-dim)">Renderar…</div>';
+  const res = await fetch('/api/jobs/' + wizard.jobId + '/cross_section_preview', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ storey_idx: storey, z_min: zMin, z_max: zMax }),
+  });
+  if (!res.ok) {
+    preview.innerHTML = '<div class="alert alert-danger">Kunde inte rendera snittet</div>';
+    return;
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  preview.innerHTML = `<div><img src="${url}" alt="Snitt våning ${storey}"></div>`;
+}
+
+function renderIfcReview() {
+  const extra = document.getElementById('stage-extra');
+  extra.innerHTML = `
+    <div class="alert alert-success">IFC och planlösningspreview genererade. Klicka "Fortsätt →" för att gå till resultat-sidan.</div>
+    <div class="stage-preview-row">
+      <div><img src="/api/jobs/${wizard.jobId}/preview?t=${Date.now()}" alt="Planlösning"></div>
+    </div>`;
+  document.getElementById('btn-stage-continue').textContent = 'Visa resultat →';
+  document.getElementById('btn-stage-continue').onclick = () => goTo(4);
+}
+
+function wizardOpenStageOverrides(stage) {
+  const extra = document.getElementById('stage-extra');
+  let formHtml = '';
+  if (stage === 'slabs') {
+    const v = id => (document.getElementById(id) || {}).value || '';
+    formHtml = `
+      <div class="form-grid" style="margin-top:12px">
+        <div class="form-group">
+          <label>Max slab-tjocklek (m) — toppar närmare än detta paras</label>
+          <input type="number" id="ovr-max-slab" value="0.5" step="0.05">
+        </div>
+        <div class="form-group">
+          <label>Peak höjd-tröskel (0–1)</label>
+          <input type="number" id="ovr-peak-ratio" value="0.25" step="0.05" min="0.05" max="1">
+        </div>
+        <div class="form-group">
+          <label>Z-steg i histogram (m)</label>
+          <input type="number" id="ovr-z-step" value="0.15" step="0.05" min="0.05">
+        </div>
+        <div class="form-group">
+          <label>Golvbjälklag-tjocklek (m, default)</label>
+          <input type="number" id="ovr-bfs" value="${v('bfs-thickness') || '0.3'}" step="0.05">
+        </div>
+        <div class="form-group">
+          <label>Takbjälklag-tjocklek (m, default)</label>
+          <input type="number" id="ovr-tfs" value="${v('tfs-thickness') || '0.4'}" step="0.05">
+        </div>
+      </div>`;
+  } else if (stage === 'walls') {
+    formHtml = `
+      <div class="form-grid" style="margin-top:12px">
+        <div class="form-group"><label>Min vägglängd (m)</label><input type="number" id="ovr-min-wl" value="0.10" step="0.05"></div>
+        <div class="form-group"><label>Min väggtjocklek (m)</label><input type="number" id="ovr-min-wt" value="0.05" step="0.01"></div>
+        <div class="form-group"><label>Max väggtjocklek (m)</label><input type="number" id="ovr-max-wt" value="0.75" step="0.05"></div>
+        <div class="form-group"><label>Yttervägg-tjocklek (m)</label><input type="number" id="ovr-ext-wt" value="0.3" step="0.05"></div>
+      </div>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:8px">
+        Eventuella Z-band du satt ovan inkluderas automatiskt vid rerun.
+      </div>`;
+  } else {
+    formHtml = '<div class="alert alert-info">Inga parametrar att justera för det här steget. Klicka "Kör om" för att köra det igen som det är.</div>';
+  }
+  extra.innerHTML = `
+    <div style="background:var(--surface2);padding:14px;border-radius:8px;margin-bottom:12px">
+      <div style="font-weight:600;margin-bottom:6px">Nya inställningar för "${STAGE_INFO[stage].title}"</div>
+      ${formHtml}
+      <div class="btn-row" style="margin-top:14px">
+        <button class="btn btn-outline" id="btn-cancel-ovr">Avbryt</button>
+        <button class="btn btn-primary" id="btn-confirm-ovr">▶ Kör om med dessa inställningar</button>
+      </div>
+    </div>`;
+  document.getElementById('btn-cancel-ovr').onclick = () => renderWizardStageReview(stage, false);
+  document.getElementById('btn-confirm-ovr').onclick = () => wizardRunStage(stage);
+}
+
+async function wizardRunStage(stage) {
+  const overrides = { stage };
+  const num = id => {
+    const el = document.getElementById(id);
+    if (!el || el.value === '') return null;
+    const v = parseFloat(el.value);
+    return Number.isNaN(v) ? null : v;
+  };
+  // Slab overrides
+  const sBfs = num('ovr-bfs'); if (sBfs !== null) overrides.bfs_thickness = sBfs;
+  const sTfs = num('ovr-tfs'); if (sTfs !== null) overrides.tfs_thickness = sTfs;
+  const sMax = num('ovr-max-slab'); if (sMax !== null) overrides.max_slab_thickness = sMax;
+  const sPeak = num('ovr-peak-ratio'); if (sPeak !== null) overrides.slab_peak_height_ratio = sPeak;
+  const sZ = num('ovr-z-step'); if (sZ !== null) overrides.slab_z_step = sZ;
+  // Wall overrides
+  const wMinL = num('ovr-min-wl'); if (wMinL !== null) overrides.min_wall_length = wMinL;
+  const wMinT = num('ovr-min-wt'); if (wMinT !== null) overrides.min_wall_thickness = wMinT;
+  const wMaxT = num('ovr-max-wt'); if (wMaxT !== null) overrides.max_wall_thickness = wMaxT;
+  const wExtT = num('ovr-ext-wt'); if (wExtT !== null) overrides.exterior_walls_thickness = wExtT;
+  // Cross-section bands (for walls stage)
+  if (stage === 'walls' && wizard.bands.length > 0) {
+    overrides.cross_section_bands = wizard.bands.map(b => b ? [b.z_min, b.z_max] : null);
+  }
+
+  document.getElementById('wizard-stage-detail').innerHTML =
+    '<div class="alert alert-info">Kör steg "' + STAGE_INFO[stage].title + '"…</div>';
+  wizardSetBadge('running');
+
+  const res = await fetch('/api/jobs/' + wizard.jobId + '/run_stage', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(overrides),
+  });
+  if (!res.ok) {
+    wizardLog('[ERROR] Kunde inte starta steget');
+    return;
+  }
+  if (!wizard.sse) wizardStreamLogs();
+}
+
+document.getElementById('btn-wizard-start').addEventListener('click', wizardStart);
+document.getElementById('wizard-log-toggle').addEventListener('click', () => {
+  document.getElementById('wizard-log-toggle').classList.toggle('open');
+  document.getElementById('wizard-log-body').classList.toggle('open');
+});
 
 // ── Init ──────────────────────────────────────────────────────────────────
 goTo(1);

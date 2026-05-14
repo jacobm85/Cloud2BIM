@@ -170,6 +170,10 @@ class CreateJobRequest(BaseModel):
     e57_input: bool = False
     exterior_scan: bool = False
 
+    # Run mode: "full" runs the whole pipeline at once; "stepwise" pauses
+    # between stages so the user can inspect previews and tweak params.
+    mode: str = "full"
+
     # Point cloud options
     dilute: bool = True
     dilution_factor: int = 10
@@ -184,9 +188,12 @@ class CreateJobRequest(BaseModel):
     # Roofs
     roofs_enabled: bool = False
 
-    # Slab thicknesses
+    # Slab thicknesses + peak detection
     bfs_thickness: float = 0.3
     tfs_thickness: float = 0.4
+    max_slab_thickness: float = 0.5
+    slab_peak_height_ratio: float = 0.25
+    slab_z_step: float = 0.15
 
     # Wall options
     min_wall_length: float = 0.10
@@ -358,6 +365,9 @@ async def create_job(request: CreateJobRequest):
             "top_floor_thickness": request.tfs_thickness,
             "pc_resolution": request.pc_resolution,
             "grid_coefficient": request.grid_coefficient,
+            "z_step": request.slab_z_step,
+            "max_slab_thickness": request.max_slab_thickness,
+            "peak_height_ratio": request.slab_peak_height_ratio,
         },
         "walls": {
             "min_length": request.min_wall_length,
@@ -400,16 +410,25 @@ async def create_job(request: CreateJobRequest):
     with open(config_path, "w") as fh:
         yaml.dump(config, fh, allow_unicode=True)
 
-    job_manager.create_job(job_id, input_path)
+    job_manager.create_job(job_id, input_path, mode=request.mode)
 
-    thread = threading.Thread(
-        target=job_manager.run_job,
-        args=(job_id, str(config_path), preprocess_fn),
-        daemon=True,
-    )
+    if request.mode == "stepwise":
+        # Run prepare + segment automatically; pause before slabs so the
+        # user can review the Z-histogram and adjust slab params.
+        thread = threading.Thread(
+            target=job_manager.run_stages_async,
+            args=(job_id, str(config_path), ["prepare", "segment"]),
+            daemon=True,
+        )
+    else:
+        thread = threading.Thread(
+            target=job_manager.run_job,
+            args=(job_id, str(config_path), preprocess_fn),
+            daemon=True,
+        )
     thread.start()
 
-    return {"job_id": job_id}
+    return {"job_id": job_id, "mode": request.mode}
 
 
 @app.get("/api/jobs")
@@ -526,6 +545,202 @@ async def get_preview(job_id: str):
     if not preview_path.exists():
         raise HTTPException(404, "Preview not available")
     return FileResponse(str(preview_path), media_type="image/png")
+
+
+# ── Stepwise wizard endpoints ────────────────────────────────────────────────
+
+class RunStageRequest(BaseModel):
+    """Re-run a single stage, optionally with config overrides."""
+    stage: str
+    # Slab / wall overrides applied to the job's config.yaml before running.
+    bfs_thickness: Optional[float] = None
+    tfs_thickness: Optional[float] = None
+    max_slab_thickness: Optional[float] = None
+    slab_peak_height_ratio: Optional[float] = None
+    slab_z_step: Optional[float] = None
+    min_wall_length: Optional[float] = None
+    min_wall_thickness: Optional[float] = None
+    max_wall_thickness: Optional[float] = None
+    exterior_walls_thickness: Optional[float] = None
+    # Cross-section bands as a flat list of [z_min, z_max, z_min, z_max, ...]
+    # one pair per storey. None entries (passed as [null, null]) keep the
+    # default 30-130 cm above-floor band.
+    cross_section_bands: Optional[List[Optional[List[float]]]] = None
+
+
+@app.get("/api/jobs/{job_id}/state")
+async def get_job_state(job_id: str):
+    """Wizard state: which stages are done, current stage, and stage-aware status."""
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    state_path = JOBS_DIR / job_id / "state.json"
+    completed = json.loads(state_path.read_text()) if state_path.exists() else {}
+    from cloud2bim.stepwise import STAGES
+    return {
+        "job_id": job_id,
+        "mode": job.get("mode", "full"),
+        "status": job["status"],
+        "current_stage": job.get("current_stage"),
+        "completed_stages": list(completed.keys()),
+        "all_stages": list(STAGES),
+    }
+
+
+def _apply_overrides_to_config(config_path: Path, req: RunStageRequest) -> None:
+    """Merge user overrides into the job's config.yaml in-place."""
+    with open(config_path) as fh:
+        cfg = yaml.safe_load(fh) or {}
+    slabs = cfg.setdefault("slabs", {})
+    if req.bfs_thickness is not None:
+        slabs["bottom_floor_thickness"] = req.bfs_thickness
+    if req.tfs_thickness is not None:
+        slabs["top_floor_thickness"] = req.tfs_thickness
+    if req.max_slab_thickness is not None:
+        slabs["max_slab_thickness"] = req.max_slab_thickness
+    if req.slab_peak_height_ratio is not None:
+        slabs["peak_height_ratio"] = req.slab_peak_height_ratio
+    if req.slab_z_step is not None:
+        slabs["z_step"] = req.slab_z_step
+
+    walls = cfg.setdefault("walls", {})
+    if req.min_wall_length is not None:
+        walls["min_length"] = req.min_wall_length
+    if req.min_wall_thickness is not None:
+        walls["min_thickness"] = req.min_wall_thickness
+    if req.max_wall_thickness is not None:
+        walls["max_thickness"] = req.max_wall_thickness
+    if req.exterior_walls_thickness is not None:
+        walls["exterior_thickness"] = req.exterior_walls_thickness
+    if req.cross_section_bands is not None:
+        walls["cross_section_bands"] = req.cross_section_bands
+
+    with open(config_path, "w") as fh:
+        yaml.dump(cfg, fh, allow_unicode=True)
+
+
+@app.post("/api/jobs/{job_id}/run_stage")
+async def run_stage(job_id: str, req: RunStageRequest):
+    """Run a single stage. If overrides are provided they're written to
+    the job's config.yaml first so re-runs use the new values."""
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    config_path = JOBS_DIR / job_id / "config.yaml"
+    if not config_path.exists():
+        raise HTTPException(404, "Job config not found")
+
+    from cloud2bim.stepwise import STAGES
+    if req.stage not in STAGES:
+        raise HTTPException(400, f"Unknown stage: {req.stage}")
+
+    _apply_overrides_to_config(config_path, req)
+
+    thread = threading.Thread(
+        target=job_manager.run_stages_async,
+        args=(job_id, str(config_path), [req.stage]),
+        daemon=True,
+    )
+    thread.start()
+    return {"ok": True, "stage": req.stage}
+
+
+@app.get("/api/jobs/{job_id}/z_histogram.png")
+async def z_histogram_image(job_id: str):
+    """Render the Z-histogram PNG on demand using saved state."""
+    job_dir = JOBS_DIR / job_id
+    zh_path = job_dir / "z_histogram.pkl"
+    if not zh_path.exists():
+        raise HTTPException(404, "Z-histogram not yet computed — run 'slabs' stage first")
+
+    out = job_dir / "z_histogram.png"
+
+    def _render():
+        import pickle
+        from cloud2bim.preview import render_z_histogram
+        with open(zh_path, "rb") as fh:
+            zh = pickle.load(fh)
+        slabs_path = job_dir / "slabs.pkl"
+        slabs = None
+        if slabs_path.exists():
+            with open(slabs_path, "rb") as fh:
+                slabs = pickle.load(fh)
+        # Read cross-section bands from current config
+        cfg_path = job_dir / "config.yaml"
+        bands = None
+        if cfg_path.exists():
+            with open(cfg_path) as fh:
+                cfg = yaml.safe_load(fh) or {}
+            raw = (cfg.get("walls") or {}).get("cross_section_bands") or []
+            bands = [tuple(b) if b else None for b in raw]
+        render_z_histogram(out, zh.bin_centers, zh.counts, zh.peak_z,
+                           slabs=slabs, cross_section_bands=bands)
+
+    await asyncio.to_thread(_render)
+    return FileResponse(str(out), media_type="image/png")
+
+
+@app.get("/api/jobs/{job_id}/slabs")
+async def get_slabs_data(job_id: str):
+    """JSON dump of detected slabs (bottom_z, thickness, peak metadata)."""
+    job_dir = JOBS_DIR / job_id
+    slabs_path = job_dir / "slabs.pkl"
+    zh_path = job_dir / "z_histogram.pkl"
+    if not slabs_path.exists():
+        raise HTTPException(404, "Slabs not yet computed")
+    import pickle
+    with open(slabs_path, "rb") as fh:
+        slabs = pickle.load(fh)
+    z_peaks = []
+    if zh_path.exists():
+        with open(zh_path, "rb") as fh:
+            zh = pickle.load(fh)
+        z_peaks = list(zh.peak_z)
+    return {
+        "slabs": [
+            {
+                "bottom_z": float(s.bottom_z),
+                "thickness": float(s.thickness),
+                "top_z": float(s.bottom_z + s.thickness),
+            }
+            for s in slabs
+        ],
+        "peak_z": z_peaks,
+    }
+
+
+class CrossSectionRequest(BaseModel):
+    z_min: float
+    z_max: float
+    storey_idx: int = 0
+
+
+@app.post("/api/jobs/{job_id}/cross_section_preview")
+async def cross_section_preview(job_id: str, req: CrossSectionRequest):
+    """Render an XY-occupancy PNG of points within [z_min, z_max]."""
+    job_dir = JOBS_DIR / job_id
+    pts_path = job_dir / "points.npz"
+    if not pts_path.exists():
+        raise HTTPException(404, "points.npz missing — run prepare stage first")
+
+    out = job_dir / f"cross_section_{req.storey_idx}.png"
+
+    def _render():
+        import numpy as _np
+        from cloud2bim.preview import render_cross_section
+        data = _np.load(str(pts_path))
+        xyz = data["xyz"]
+        mask = (xyz[:, 2] >= req.z_min) & (xyz[:, 2] <= req.z_max)
+        xy = xyz[mask, :2]
+        # Subsample if huge to keep PNG render fast
+        if len(xy) > 200_000:
+            stride = len(xy) // 200_000
+            xy = xy[::stride]
+        title = f"Snitt Z={req.z_min:.2f}–{req.z_max:.2f} m  ({mask.sum():,} pts)"
+        render_cross_section(out, xy, title=title)
+
+    await asyncio.to_thread(_render)
+    return FileResponse(str(out), media_type="image/png")
 
 
 @app.get("/api/jobs/{job_id}/download")

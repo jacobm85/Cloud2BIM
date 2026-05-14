@@ -103,6 +103,27 @@
         centreras automatiskt så att SWEREF/RT90 hanteras korrekt.
       </div>
 
+      <div class="section-label">Körläge</div>
+      <div class="mode-picker" style="margin-bottom:20px">
+        <label class="mode-option">
+          <input type="radio" name="run-mode" value="full" checked>
+          <div class="mode-card">
+            <div class="mode-title">⚡ Hela pipelinen</div>
+            <div class="mode-desc">Kör alla steg automatiskt. Snabbast — använd när du
+              vet att inställningarna är rätt.</div>
+          </div>
+        </label>
+        <label class="mode-option">
+          <input type="radio" name="run-mode" value="stepwise">
+          <div class="mode-card">
+            <div class="mode-title">🧭 Stegvis (wizard)</div>
+            <div class="mode-desc">Pausa mellan varje steg, granska resultatet, justera
+              parametrar eller kör om med andra inställningar. Histogram + Z-snitt för
+              väggdetektering.</div>
+          </div>
+        </label>
+      </div>
+
       <div class="section-label">Skanning</div>
       <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:16px">
         <label class="toggle-group">
@@ -287,27 +308,69 @@
 
   <!-- ── Step 3: Run ────────────────────────────────────────────────────── -->
   <div class="step-panel" id="step-3" style="display:none">
-    <div class="card">
-      <div class="card-title" style="justify-content:space-between">
-        <span><span class="icon">▶</span> Kör pipeline</span>
-        <span id="status-badge" class="status-badge pending">Väntar</span>
+
+    <!-- Full-mode panel (default) -->
+    <div id="run-full-panel">
+      <div class="card">
+        <div class="card-title" style="justify-content:space-between">
+          <span><span class="icon">▶</span> Kör pipeline</span>
+          <span id="status-badge" class="status-badge pending">Väntar</span>
+        </div>
+
+        <div class="alert alert-info" style="margin-bottom:16px">
+          ℹ️ Processen kan ta flera minuter för stora filer. Stäng inte fönstret.
+        </div>
+
+        <div id="log-console" class="log-console">
+          <div class="log-line" style="color:var(--text-dim)">Loggar visas här när processen startar…</div>
+        </div>
       </div>
 
-      <div class="alert alert-info" style="margin-bottom:16px">
-        ℹ️ Processen kan ta flera minuter för stora filer. Stäng inte fönstret.
-      </div>
-
-      <div id="log-console" class="log-console">
-        <div class="log-line" style="color:var(--text-dim)">Loggar visas här när processen startar…</div>
+      <div class="btn-row">
+        <button type="button" class="btn btn-outline" id="btn-back-3" onclick="window.goTo(2)">← Tillbaka</button>
+        <button class="btn btn-primary btn-lg" id="btn-run">
+          ▶&nbsp; Starta Cloud2BIM
+        </button>
       </div>
     </div>
 
-    <div class="btn-row">
-      <button type="button" class="btn btn-outline" id="btn-back-3" onclick="window.goTo(2)">← Tillbaka</button>
-      <button class="btn btn-primary btn-lg" id="btn-run">
-        ▶&nbsp; Starta Cloud2BIM
-      </button>
+    <!-- Stepwise/wizard panel -->
+    <div id="run-wizard-panel" style="display:none">
+      <div class="card">
+        <div class="card-title" style="justify-content:space-between">
+          <span><span class="icon">🧭</span> Wizard — stegvis körning</span>
+          <span id="wizard-status-badge" class="status-badge pending">Väntar</span>
+        </div>
+
+        <ol class="stage-list" id="wizard-stages">
+          <li data-stage="prepare"><span class="stage-tick">·</span> Förberedelse — läs in, gleslägg, centrera</li>
+          <li data-stage="segment"><span class="stage-tick">·</span> ML-segmentering (eller passthrough)</li>
+          <li data-stage="slabs"><span class="stage-tick">·</span> Bjälklag — Z-histogram & golv/tak-detektion</li>
+          <li data-stage="walls"><span class="stage-tick">·</span> Väggar — horisontellt tvärsnitt per våning</li>
+          <li data-stage="openings"><span class="stage-tick">·</span> Öppningar (fönster, dörrar)</li>
+          <li data-stage="roofs"><span class="stage-tick">·</span> Tak (om aktiverat)</li>
+          <li data-stage="ifc"><span class="stage-tick">·</span> IFC-export + planlösningspreview</li>
+        </ol>
+
+        <div id="wizard-stage-detail" style="margin-top:16px"></div>
+
+        <div class="collapsible-header" id="wizard-log-toggle">
+          Loggar
+          <span class="collapsible-arrow">▾</span>
+        </div>
+        <div class="collapsible-body" id="wizard-log-body">
+          <div id="wizard-log" class="log-console" style="margin-top:8px"></div>
+        </div>
+      </div>
+
+      <div class="btn-row">
+        <button type="button" class="btn btn-outline" id="btn-back-3-wiz" onclick="window.goTo(2)">← Tillbaka</button>
+        <button class="btn btn-primary btn-lg" id="btn-wizard-start">
+          ▶&nbsp; Starta wizard
+        </button>
+      </div>
     </div>
+
   </div>
 
   <!-- ── Step 4: Results ────────────────────────────────────────────────── -->

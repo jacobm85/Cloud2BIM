@@ -18,14 +18,16 @@ class JobManager:
         self._jobs: dict = {}
         self._lock = threading.Lock()
 
-    def create_job(self, job_id: str, input_path: str) -> dict:
+    def create_job(self, job_id: str, input_path: str, mode: str = "full") -> dict:
         self._evict_old_jobs()
         with self._lock:
             job = {
                 "job_id": job_id,
                 "status": "pending",
+                "mode": mode,
                 "input_path": input_path,
                 "log_lines": [],
+                "current_stage": None,
                 "created_at": datetime.now().isoformat(),
                 "finished_at": None,
             }
@@ -45,7 +47,7 @@ class JobManager:
             ]
 
     def run_job(self, job_id: str, config_path: str, preprocess_fn=None):
-        """Blocking — run in a daemon thread."""
+        """Blocking — run the full pipeline. Used for ``mode='full'`` jobs."""
         project_root = Path(__file__).parent.parent
         self._set_status(job_id, "running")
         process = None
@@ -64,32 +66,7 @@ class JobManager:
                 cwd=str(project_root),
                 env={**os.environ, "PYTHONUNBUFFERED": "1"},
             )
-
-            # Read output with a watchdog timer
-            _timeout_hit = [False]
-
-            def _kill_after_timeout():
-                if process.poll() is None:
-                    _timeout_hit[0] = True
-                    process.kill()
-
-            timer = threading.Timer(_JOB_TIMEOUT_SECONDS, _kill_after_timeout)
-            timer.daemon = True
-            timer.start()
-            try:
-                for line in process.stdout:
-                    self._append_log(job_id, line.rstrip())
-                process.wait()
-            finally:
-                timer.cancel()
-
-            if _timeout_hit[0]:
-                self._append_log(job_id,
-                    "[ERROR] Jobb avbröts — överskred tidsgränsen (%d min)." % (_JOB_TIMEOUT_SECONDS // 60))
-                status = "failed"
-            else:
-                status = "completed" if process.returncode == 0 else "failed"
-
+            status = self._stream_subprocess(job_id, process)
         except Exception as exc:
             self._append_log(job_id, f"[ERROR] {exc}")
             if process is not None and process.poll() is None:
@@ -97,6 +74,68 @@ class JobManager:
             status = "failed"
 
         self._set_status(job_id, status)
+
+    def run_stages_async(self, job_id: str, config_path: str, stages: list[str]):
+        """Run one or more named stages in sequence (used by wizard mode)."""
+        project_root = Path(__file__).parent.parent
+        self._set_status(job_id, "running")
+
+        last_status = "completed"
+        for stage in stages:
+            self._set_current_stage(job_id, stage)
+            self._append_log(job_id, f"[INFO] ── stage: {stage} ──")
+            process = None
+            try:
+                process = subprocess.Popen(
+                    [sys.executable, "-m", "cloud2bim", "step", config_path, stage],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    cwd=str(project_root),
+                    env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                )
+                stage_status = self._stream_subprocess(job_id, process)
+            except Exception as exc:
+                self._append_log(job_id, f"[ERROR] {exc}")
+                if process is not None and process.poll() is None:
+                    process.kill()
+                stage_status = "failed"
+
+            if stage_status != "completed":
+                last_status = "failed"
+                break
+
+        self._set_current_stage(job_id, None)
+        self._set_status(job_id, last_status if last_status == "completed" else "failed")
+
+    def _stream_subprocess(self, job_id: str, process: subprocess.Popen) -> str:
+        """Drain a subprocess into the job log and return a job status."""
+        _timeout_hit = [False]
+
+        def _kill_after_timeout():
+            if process.poll() is None:
+                _timeout_hit[0] = True
+                process.kill()
+
+        timer = threading.Timer(_JOB_TIMEOUT_SECONDS, _kill_after_timeout)
+        timer.daemon = True
+        timer.start()
+        try:
+            for line in process.stdout:
+                self._append_log(job_id, line.rstrip())
+            process.wait()
+        finally:
+            timer.cancel()
+
+        if _timeout_hit[0]:
+            self._append_log(
+                job_id,
+                "[ERROR] Jobb avbröts — överskred tidsgränsen (%d min)."
+                % (_JOB_TIMEOUT_SECONDS // 60),
+            )
+            return "failed"
+        return "completed" if process.returncode == 0 else "failed"
 
     # ── internal helpers ────────────────────────────────────────────────────
 
@@ -106,6 +145,11 @@ class JobManager:
                 self._jobs[job_id]["status"] = status
                 if status in ("completed", "failed"):
                     self._jobs[job_id]["finished_at"] = datetime.now().isoformat()
+
+    def _set_current_stage(self, job_id: str, stage: Optional[str]):
+        with self._lock:
+            if job_id in self._jobs:
+                self._jobs[job_id]["current_stage"] = stage
 
     def _append_log(self, job_id: str, line: str):
         with self._lock:

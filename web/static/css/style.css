@@ -399,6 +399,119 @@ main { max-width: 960px; margin: 0 auto; padding: 32px 24px 80px; }
 .alert-success { background: rgba(62,207,142,0.1); border: 1px solid rgba(62,207,142,0.25); }
 .alert-danger { background: rgba(232,72,85,0.1); border: 1px solid rgba(232,72,85,0.25); color: var(--danger); }
 
+/* ── Mode picker (full vs stepwise) ──────────────────────────────────────── */
+.mode-picker {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.mode-option { cursor: pointer; }
+.mode-option input { display: none; }
+.mode-option .mode-card {
+  border: 1.5px solid var(--border);
+  border-radius: 9px;
+  padding: 14px 16px;
+  background: var(--surface2);
+  transition: border-color var(--transition), background var(--transition);
+  height: 100%;
+}
+.mode-option input:checked + .mode-card {
+  border-color: var(--accent);
+  background: rgba(79,142,247,0.10);
+}
+.mode-option .mode-title {
+  font-weight: 600; font-size: 14px; margin-bottom: 4px;
+}
+.mode-option .mode-desc {
+  font-size: 12px; color: var(--text-dim); line-height: 1.45;
+}
+
+/* ── Wizard stage list ────────────────────────────────────────────────────── */
+.stage-list {
+  list-style: none;
+  padding: 0; margin: 0 0 12px 0;
+  border-radius: 8px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+}
+.stage-list li {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 14px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.stage-list li:last-child { border-bottom: none; }
+.stage-list li.active {
+  background: rgba(79,142,247,0.10);
+  color: var(--text);
+  font-weight: 600;
+}
+.stage-list li.done { color: var(--text); }
+.stage-list li.failed { color: var(--danger); }
+.stage-tick {
+  display: inline-flex;
+  align-items: center; justify-content: center;
+  width: 18px; height: 18px; border-radius: 50%;
+  font-size: 11px; line-height: 1;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.stage-list li.active .stage-tick {
+  background: var(--accent); color: white; border-color: var(--accent);
+}
+.stage-list li.done .stage-tick {
+  background: var(--success); color: white; border-color: var(--success);
+}
+.stage-list li.failed .stage-tick {
+  background: var(--danger); color: white; border-color: var(--danger);
+}
+
+/* Stage detail panel */
+.stage-panel {
+  padding: 14px 0 0 0;
+}
+.stage-panel h3 {
+  font-size: 15px; margin-bottom: 6px;
+}
+.stage-panel .stage-help {
+  color: var(--text-dim); font-size: 12px; margin-bottom: 14px;
+}
+.stage-preview-row {
+  display: flex; gap: 12px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+.stage-preview-row > div {
+  flex: 1; min-width: 240px;
+  background: #0f1117;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.stage-preview-row img { display: block; width: 100%; height: auto; }
+
+.storey-band {
+  display: grid;
+  grid-template-columns: 80px 1fr 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  margin-bottom: 6px;
+}
+.storey-band label { font-size: 12px; color: var(--text-dim); }
+.storey-band input[type="number"] {
+  width: 100%; padding: 5px 7px; font-size: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+}
+
 /* ── Responsive ──────────────────────────────────────────────────────────── */
 @media (max-width: 640px) {
   .form-grid { grid-template-columns: 1fr; }
