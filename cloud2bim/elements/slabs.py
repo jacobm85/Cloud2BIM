@@ -34,6 +34,41 @@ class Slab:
     points: np.ndarray = field(default_factory=lambda: np.empty((0, 3)))
 
 
+@dataclass
+class ZHistogram:
+    """Z-density histogram + detected peak positions.
+
+    Exposed so the UI can render the histogram alongside slab markers and
+    cross-section bands.
+    """
+    bin_centers: np.ndarray   # m
+    counts: np.ndarray        # per bin
+    peak_z: list[float]       # m — detected horizontal-surface peaks
+    threshold: float          # density cut-off used for peak selection
+
+
+def compute_z_histogram(
+    points_xyz: np.ndarray,
+    z_step: float,
+    peak_height_ratio: float = 0.25,
+) -> ZHistogram:
+    """Compute the Z-density histogram and pick horizontal-surface peaks."""
+    if len(points_xyz) == 0:
+        return ZHistogram(np.empty(0), np.empty(0), [], 0.0)
+    z = points_xyz[:, 2]
+    z_min, z_max = float(z.min()), float(z.max())
+    bin_edges = np.arange(z_min, z_max + z_step, z_step)
+    hist, _ = np.histogram(z, bins=bin_edges)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    if hist.max() == 0:
+        return ZHistogram(bin_centers, hist, [], 0.0)
+    threshold = peak_height_ratio * hist.max()
+    min_separation = max(2, int(0.5 / z_step))
+    peak_idx, _ = find_peaks(hist, height=threshold, distance=min_separation)
+    peak_z = [float(bin_centers[p]) for p in peak_idx]
+    return ZHistogram(bin_centers, hist, peak_z, float(threshold))
+
+
 def detect_slabs(
     points_xyz: np.ndarray,
     cfg: SlabConfig,
@@ -43,8 +78,15 @@ def detect_slabs(
 ) -> List[Slab]:
     """Detect horizontal slabs from a point cloud.
 
+    Each Z-density peak is one horizontal surface. Two adjacent peaks are
+    only paired as bottom+top of the same slab when they sit within
+    ``max_slab_thickness`` of each other — typical RC slabs are 15–35 cm.
+    Anything wider apart is two different storeys and each peak becomes a
+    standalone slab (treated as a floor surface, with the default thickness
+    used to derive its bottom).
+
     ``bottom_floor_thickness`` / ``top_floor_thickness`` override config when
-    they're known from external data (e.g. drawings).
+    known from external data (e.g. drawings).
     """
     bfs_t = bottom_floor_thickness or cfg.bottom_floor_thickness
     tfs_t = top_floor_thickness or cfg.top_floor_thickness
@@ -54,64 +96,69 @@ def detect_slabs(
         return []
 
     z = points_xyz[:, 2]
-    z_min, z_max = float(z.min()), float(z.max())
-    log.info("Slab Z-range: %.2f .. %.2f m", z_min, z_max)
+    log.info("Slab Z-range: %.2f .. %.2f m", float(z.min()), float(z.max()))
 
-    # 1D Z histogram with z_step bins
-    bin_edges = np.arange(z_min, z_max + cfg.z_step, cfg.z_step)
-    hist, _ = np.histogram(z, bins=bin_edges)
-    if hist.max() == 0:
-        log.warning("Empty Z-histogram — no slabs detected")
-        return []
+    zh = compute_z_histogram(points_xyz, cfg.z_step, cfg.peak_height_ratio)
+    log.info("Found %d horizontal-surface peaks", len(zh.peak_z))
 
-    # Peaks above 25 % of max density (more permissive than v1 — many real
-    # scans have dense floor + sparser ceiling that miss a 0.6× cut-off).
-    threshold = 0.25 * hist.max()
-    min_separation = max(2, int(0.5 / cfg.z_step))
-    peaks, _ = find_peaks(hist, height=threshold, distance=min_separation)
-    log.info("Found %d horizontal-surface peaks", len(peaks))
-
-    if len(peaks) < 2:
+    if not zh.peak_z:
         log.warning(
-            "Fewer than 2 peaks (%d) — need a floor and a ceiling. "
-            "Try lowering z_step or check Z coverage.",
-            len(peaks),
+            "No Z-peaks above %.0f%% of max density — try lowering "
+            "peak_height_ratio or check Z coverage.",
+            cfg.peak_height_ratio * 100,
         )
         return []
 
-    # Pair peaks into (bottom, top) slabs
-    horiz_z = [bin_edges[p] for p in peaks]
-    n_slab_candidates = len(horiz_z) // 2 + (len(horiz_z) % 2)
+    # Group peaks into slab candidates: a "slab candidate" is either a
+    # paired (bottom, top) or a single surface peak.
+    candidates: list[tuple[float, float | None]] = []  # (bottom_z, top_z or None)
+    i = 0
+    while i < len(zh.peak_z):
+        z_here = zh.peak_z[i]
+        z_next = zh.peak_z[i + 1] if i + 1 < len(zh.peak_z) else None
+        if z_next is not None and (z_next - z_here) <= cfg.max_slab_thickness:
+            # Paired bottom + top of one slab
+            candidates.append((z_here, z_next))
+            i += 2
+        else:
+            # Standalone surface — treat as a floor (top of slab)
+            candidates.append((z_here, None))
+            i += 1
 
     slabs: List[Slab] = []
-    for i in range(n_slab_candidates):
-        if i == 0:
-            slab_top_z = float(np.median(_slice_points(points_xyz, horiz_z[0], cfg.z_step)[:, 2]))
-            slab_bottom_z = slab_top_z - bfs_t
-            thickness = bfs_t
-            slice_pts = _slice_points(points_xyz, horiz_z[0], cfg.z_step)
-        elif i == n_slab_candidates - 1 and len(horiz_z) % 2 == 1:
-            slab_bottom_z = float(np.median(_slice_points(points_xyz, horiz_z[-1], cfg.z_step)[:, 2]))
-            thickness = tfs_t
-            slice_pts = _slice_points(points_xyz, horiz_z[-1], cfg.z_step)
-        else:
-            idx_bot, idx_top = 2 * i - 1, 2 * i
-            if idx_top >= len(horiz_z):
-                break
-            bottom_pts = _slice_points(points_xyz, horiz_z[idx_bot], cfg.z_step)
-            top_pts = _slice_points(points_xyz, horiz_z[idx_top], cfg.z_step)
-            slab_bottom_z = float(np.median(bottom_pts[:, 2]))
-            slab_top_z = float(np.median(top_pts[:, 2]))
+    n_cand = len(candidates)
+    for idx, (z_a, z_b) in enumerate(candidates):
+        if z_b is not None:
+            # Paired: measure thickness from peak positions
+            bot_pts = _slice_points(points_xyz, z_a, cfg.z_step)
+            top_pts = _slice_points(points_xyz, z_b, cfg.z_step)
+            slab_bottom_z = float(np.median(bot_pts[:, 2])) if len(bot_pts) else z_a
+            slab_top_z = float(np.median(top_pts[:, 2])) if len(top_pts) else z_b
             thickness = max(0.05, slab_top_z - slab_bottom_z)
-            slice_pts = np.vstack([bottom_pts, top_pts])
+            slice_pts = np.vstack([bot_pts, top_pts]) if len(bot_pts) and len(top_pts) else (
+                bot_pts if len(bot_pts) else top_pts
+            )
+        else:
+            # Standalone: peak is the top surface (floor). Pick a sensible
+            # default thickness — bfs_t for the bottom-most slab, tfs_t for
+            # the top-most one, bfs_t for intermediates.
+            slice_pts = _slice_points(points_xyz, z_a, cfg.z_step)
+            slab_top_z = float(np.median(slice_pts[:, 2])) if len(slice_pts) else z_a
+            if idx == 0:
+                thickness = bfs_t
+            elif idx == n_cand - 1:
+                thickness = tfs_t
+            else:
+                thickness = bfs_t
+            slab_bottom_z = slab_top_z - thickness
 
         if len(slice_pts) < 100:
-            log.warning("Slab %d: too few points (%d) — skipping", i, len(slice_pts))
+            log.warning("Slab %d: too few points (%d) — skipping", idx, len(slice_pts))
             continue
 
         x, y = _hull_from_points(slice_pts, cfg.pc_resolution, cfg.grid_coefficient)
         if x is None or len(x) < 3:
-            log.warning("Slab %d: failed to build polygon — skipping", i)
+            log.warning("Slab %d: failed to build polygon — skipping", idx)
             continue
 
         slabs.append(
@@ -124,8 +171,9 @@ def detect_slabs(
             )
         )
         log.info(
-            "Slab %d: bottom=%.3f m, thickness=%.0f mm, hull pts=%d",
-            i, slab_bottom_z, thickness * 1000, len(x),
+            "Slab %d: bottom=%.3f m, thickness=%.0f mm, hull pts=%d%s",
+            idx, slab_bottom_z, thickness * 1000, len(x),
+            " (paired peaks)" if z_b is not None else " (single peak)",
         )
 
     return slabs

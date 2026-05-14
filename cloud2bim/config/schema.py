@@ -76,6 +76,24 @@ class SlabConfig(BaseModel):
     pc_resolution: float = Field(default=0.002, gt=0, description="Expected point spacing (m)")
     grid_coefficient: int = Field(default=5, ge=1, description="Pixel = pc_resolution × this")
     z_step: float = Field(default=0.15, gt=0, description="Histogram bin width along Z (m)")
+    max_slab_thickness: float = Field(
+        default=0.5,
+        gt=0,
+        description=(
+            "m. Adjacent Z-peaks closer than this are paired as bottom+top of one "
+            "slab; peaks further apart become separate slabs (each treated as a "
+            "floor surface). 50 cm covers typical RC slabs + finishes."
+        ),
+    )
+    peak_height_ratio: float = Field(
+        default=0.25,
+        gt=0,
+        le=1.0,
+        description=(
+            "Z-histogram peaks below this fraction of the max bin are ignored. "
+            "Lower = pick up sparser ceilings; higher = avoid spurious peaks."
+        ),
+    )
 
 
 # ─── Walls ────────────────────────────────────────────────────────────────────
