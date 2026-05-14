@@ -11,7 +11,9 @@ End-to-end flow:
     8. IFC export with Revit-compatible structure
 
 Each stage logs its timing and is fault-tolerant: a failure in walls for
-one storey does not kill the whole job.
+one storey does not kill the whole job. ``run_pipeline`` runs the lot in
+one go; the web UI's wizard mode calls the same stages individually via
+``cloud2bim.stepwise``.
 """
 from __future__ import annotations
 
@@ -39,6 +41,7 @@ log = get_logger(__name__)
 def run_pipeline(cfg: Config) -> int:
     """Run the full pipeline. Returns process exit code (0 = success)."""
     t_total = time.time()
+    bands = list(cfg.walls.cross_section_bands or [])
 
     # ── 1. Read & combine inputs ────────────────────────────────────────
     points_xyz = _load_inputs(cfg)
@@ -96,6 +99,7 @@ def run_pipeline(cfg: Config) -> int:
         )
         slab_polygon_xy = np.column_stack([slabs[i + 1].polygon_x, slabs[i + 1].polygon_y])
 
+        band_override = bands[i] if i < len(bands) and bands[i] is not None else None
         try:
             t0 = time.time()
             walls = detect_walls(
@@ -109,6 +113,7 @@ def run_pipeline(cfg: Config) -> int:
                 slab_polygon_xy=slab_polygon_xy,
                 semantic_labels=storey_labels,
                 exterior_scan=cfg.exterior_scan,
+                cross_section_band=band_override,
             )
             if is_placeholder:
                 for w in walls:

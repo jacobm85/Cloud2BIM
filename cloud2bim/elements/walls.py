@@ -56,11 +56,16 @@ def detect_walls(
     slab_polygon_xy: Optional[np.ndarray] = None,
     semantic_labels: Optional[SemanticLabels] = None,
     exterior_scan: bool = False,
+    cross_section_band: Optional[tuple[float, float]] = None,
 ) -> List[Wall]:
     """Extract wall axes from a single storey's points.
 
     ``semantic_labels`` is per-point — if provided and ``cfg.use_ml_filter``
     is true, only wall-classified points feed the histogram.
+
+    ``cross_section_band`` overrides the default 30–130 cm above-floor band.
+    When set, the tuple is interpreted as absolute world Z (m) — useful when
+    the user has hand-picked a band from the Z-histogram in the UI.
     """
     if len(storey_points) == 0:
         log.warning("Storey %d: empty point cloud — no walls", storey_idx)
@@ -82,24 +87,30 @@ def detect_walls(
         else:
             log.warning("Storey %d: no wall-labelled points; using all", storey_idx)
 
-    # 2. Horizontal cross-section 30–130 cm above the floor.
-    #    This height contains wall faces but mostly misses furniture tops and
-    #    open spaces between floors. Using a fixed absolute height avoids the
-    #    85-120% relative-band problem that collapsed when storey height varied.
-    BAND_BOTTOM = 0.30   # m above floor
-    BAND_TOP    = 1.30   # m above floor
-    band_mask = (
-        (pts_for_walls[:, 2] >= z_floor + BAND_BOTTOM) &
-        (pts_for_walls[:, 2] <= z_floor + BAND_TOP)
-    )
+    # 2. Horizontal cross-section.
+    #    Default is 30–130 cm above the floor — that height contains wall
+    #    faces but mostly misses furniture tops. The caller can override via
+    #    ``cross_section_band`` after picking it from the Z-histogram in the
+    #    UI; that's important when slabs were misdetected and z_floor is off.
+    if cross_section_band is not None:
+        band_lo, band_hi = float(cross_section_band[0]), float(cross_section_band[1])
+        band_label = "absolute Z"
+    else:
+        band_lo = z_floor + 0.30
+        band_hi = z_floor + 1.30
+        band_label = "floor-relative"
+    band_mask = (pts_for_walls[:, 2] >= band_lo) & (pts_for_walls[:, 2] <= band_hi)
     if not band_mask.any():
-        log.warning("Storey %d: no points in cross-section band [%.2f, %.2f]",
-                    storey_idx, z_floor + BAND_BOTTOM, z_floor + BAND_TOP)
+        log.warning(
+            "Storey %d: no points in cross-section band [%.2f, %.2f]",
+            storey_idx, band_lo, band_hi,
+        )
         return []
     points_2d = pts_for_walls[band_mask, :2]
-    log.info("Storey %d: cross-section band %.2f–%.2f m, %s points",
-             storey_idx, z_floor + BAND_BOTTOM, z_floor + BAND_TOP,
-             f"{band_mask.sum():,}")
+    log.info(
+        "Storey %d: cross-section band %.2f–%.2f m (%s), %s points",
+        storey_idx, band_lo, band_hi, band_label, f"{band_mask.sum():,}",
+    )
 
     # 3. PCA rotation
     pca_angle = dominant_angle(points_2d)

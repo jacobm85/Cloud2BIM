@@ -34,6 +34,25 @@ def cmd_run(args: argparse.Namespace) -> int:
     return run_pipeline(cfg)
 
 
+def cmd_step(args: argparse.Namespace) -> int:
+    """Run one named pipeline stage; the rest of the wizard calls this again later."""
+    configure(level=args.log_level)
+    log = get_logger("cloud2bim.cli")
+    log.info("Cloud2BIM %s — stage %s", __version__, args.stage)
+
+    cfg = load_config(args.config)
+    log.info("Loaded config: %s", args.config)
+
+    from cloud2bim.stepwise import run_stage
+
+    try:
+        run_stage(cfg, args.stage)
+    except Exception:
+        log.exception("Stage %s failed", args.stage)
+        return 1
+    return 0
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     configure(level=args.log_level)
     log = get_logger("cloud2bim.cli")
@@ -62,6 +81,12 @@ def main(argv: list[str] | None = None) -> int:
     p_run = sub.add_parser("run", help="Run full pipeline")
     p_run.add_argument("config", type=Path, help="YAML config file")
     p_run.set_defaults(func=cmd_run)
+
+    from cloud2bim.stepwise import STAGES as _STEP_STAGES
+    p_step = sub.add_parser("step", help="Run a single pipeline stage (stepwise mode)")
+    p_step.add_argument("config", type=Path, help="YAML config file")
+    p_step.add_argument("stage", choices=_STEP_STAGES, help="Stage to run")
+    p_step.set_defaults(func=cmd_step)
 
     p_val = sub.add_parser("validate", help="Sanity-check a point cloud")
     p_val.add_argument("input", type=Path, help="E57/LAS/LAZ/XYZ file")

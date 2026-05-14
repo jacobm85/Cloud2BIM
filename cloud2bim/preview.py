@@ -97,3 +97,124 @@ def render_floor_plan(
     fig.savefig(output_path, dpi=100, bbox_inches="tight")
     plt.close(fig)
     log.info("Floor-plan preview saved: %s", output_path)
+
+
+# ── Wizard-mode previews ────────────────────────────────────────────────────
+
+def render_z_histogram(
+    output_path: Path,
+    bin_centers: np.ndarray,
+    counts: np.ndarray,
+    peak_z: list[float],
+    slabs: List[Slab] | None = None,
+    cross_section_bands: list[tuple[float, float] | None] | None = None,
+) -> None:
+    """Horizontal Z-histogram with peak/slab/band markers.
+
+    Y-axis is Z (m); X-axis is point count. Detected peaks are dots,
+    slabs are shaded grey bands, user-picked cross-section bands are
+    coloured rectangles.
+    """
+    fig, ax = plt.subplots(figsize=(6, 10))
+    fig.patch.set_facecolor("#1a1d27")
+    ax.set_facecolor("#0f1117")
+
+    ax.barh(bin_centers, counts, height=(bin_centers[1] - bin_centers[0]) if len(bin_centers) > 1 else 0.1,
+            color="#3a4a72", edgecolor="none")
+
+    if peak_z:
+        ax.scatter([counts.max() * 1.02] * len(peak_z), peak_z,
+                   color="#ffcc66", s=40, zorder=5, label="Topp (yta)")
+        for z in peak_z:
+            ax.axhline(z, color="#ffcc66", linewidth=0.5, alpha=0.4)
+
+    if slabs:
+        for slab in slabs:
+            ax.axhspan(slab.bottom_z, slab.bottom_z + slab.thickness,
+                       color="#888888", alpha=0.35, zorder=2)
+        # legend
+        ax.fill_betweenx([0, 0], 0, 0, color="#888888", alpha=0.35, label="Slab")
+
+    if cross_section_bands:
+        palette = ["#76c8e8", "#f5a623", "#a3e635", "#e88adf"]
+        for i, band in enumerate(cross_section_bands):
+            if band is None:
+                continue
+            ax.axhspan(band[0], band[1], color=palette[i % len(palette)],
+                       alpha=0.45, zorder=4, label=f"Snitt våning {i}" if i < 4 else None)
+
+    ax.set_xlabel("Antal punkter", color="white", fontsize=10)
+    ax.set_ylabel("Z (m)", color="white", fontsize=10)
+    ax.tick_params(colors="#aaaaaa")
+    for spine in ax.spines.values():
+        spine.set_color("#2e3350")
+    if peak_z or slabs or cross_section_bands:
+        leg = ax.legend(facecolor="#1a1d27", labelcolor="white",
+                        edgecolor="#2e3350", fontsize=9, loc="upper right")
+        if leg:
+            leg.get_frame().set_alpha(0.9)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=100, bbox_inches="tight")
+    plt.close(fig)
+    log.info("Z-histogram preview saved: %s", output_path)
+
+
+def render_cross_section(
+    output_path: Path,
+    points_xy: np.ndarray,
+    title: str = "",
+) -> None:
+    """2D occupancy map of points in a Z-band — the floor-plan-like view
+    the user uses to validate the band before wall detection runs."""
+    fig, ax = plt.subplots(figsize=(10, 10))
+    fig.patch.set_facecolor("#1a1d27")
+    ax.set_facecolor("#0f1117")
+
+    if len(points_xy) > 0:
+        ax.scatter(points_xy[:, 0], points_xy[:, 1], s=0.4,
+                   color="#76c8e8", alpha=0.6)
+    else:
+        ax.text(0.5, 0.5, "Inga punkter i bandet", ha="center", va="center",
+                color="#aaaaaa", transform=ax.transAxes, fontsize=14)
+
+    ax.set_aspect("equal")
+    ax.tick_params(colors="#aaaaaa")
+    for spine in ax.spines.values():
+        spine.set_color("#2e3350")
+    if title:
+        ax.set_title(title, color="white", fontsize=11)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=100, bbox_inches="tight")
+    plt.close(fig)
+    log.info("Cross-section preview saved: %s", output_path)
+
+
+def render_storey_walls(
+    output_path: Path,
+    walls: Iterable[Wall],
+    title: str = "",
+) -> None:
+    """Lightweight floor-plan preview for a single storey (used between
+    walls and openings stages in wizard mode)."""
+    fig, ax = plt.subplots(figsize=(10, 10))
+    fig.patch.set_facecolor("#1a1d27")
+    ax.set_facecolor("#0f1117")
+
+    for w in walls:
+        sp, ep = w.start, w.end
+        is_ext = w.label.startswith("exterior")
+        color = "#6699cc" if is_ext else "#99aacc"
+        lw = max(1.5, w.thickness * 40)
+        ax.plot([sp[0], ep[0]], [sp[1], ep[1]], color=color, linewidth=lw,
+                solid_capstyle="round")
+
+    ax.set_aspect("equal")
+    ax.axis("off")
+    if title:
+        ax.set_title(title, color="white", fontsize=11)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=100, bbox_inches="tight")
+    plt.close(fig)
