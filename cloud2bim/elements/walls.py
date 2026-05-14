@@ -23,7 +23,7 @@ import numpy as np
 from skimage.morphology import closing, footprint_rectangle
 
 from cloud2bim.config import WallConfig
-from cloud2bim.geometry.lines import distance_points_to_line, line_intersection
+from cloud2bim.geometry.lines import line_intersection
 from cloud2bim.geometry.pca import dominant_angle, rotate_points_2d
 from cloud2bim.geometry.polygon import swell_polygon
 from cloud2bim.logging import get_logger
@@ -129,70 +129,58 @@ def detect_walls(
         return []
     log.info("Storey %d: %d raw wall segments", storey_idx, len(segments))
 
-    # 5. Group parallel/collinear segments into wall axes
-    parallel_groups, group_labels = _group_segments(segments, cfg.max_thickness)
+    # 4b. Merge collinear fragments before pairing — the contour-tracer often
+    #     emits a wall as several short collinear pieces; merging gives the
+    #     pairing step a clean view of "one wall = one segment".
+    segments = _merge_collinear(segments, cfg.min_thickness, cfg.max_thickness)
+    log.info("Storey %d: %d segments after collinear merge", storey_idx, len(segments))
 
-    # 6. Add facade candidates from the swollen slab polygon
+    # 5. Strict pairing — v1 rules: parallel AND within max_thickness AND with
+    #    overlap along the wall length. Groups with <2 segments aren't walls;
+    #    they go to the facade-candidate pile, which is reconciled against
+    #    the swelled slab polygon below.
+    interior_groups, facade_candidates = _group_segments_strict(
+        segments, cfg.max_thickness,
+    )
+
+    exterior_groups: list = []
     if not exterior_scan and slab_polygon_xy is not None and len(slab_polygon_xy) >= 3:
-        facade_segments = swell_polygon(slab_polygon_xy, cfg.exterior_thickness)
-        facade_groups, facade_labels = _group_segments(facade_segments, cfg.max_thickness)
-        for g in facade_groups:
-            parallel_groups.append(g)
-            group_labels.append("exterior")
+        # Only segments that didn't find an interior partner get a chance to
+        # pair up with the building envelope — this avoids generating bogus
+        # "exterior walls" along every edge of the scan boundary.
+        swollen_segments = swell_polygon(slab_polygon_xy, cfg.exterior_thickness)
+        exterior_pool = list(facade_candidates) + list(swollen_segments)
+        exterior_groups, _ = _group_segments_strict(exterior_pool, cfg.max_thickness)
 
-    log.info("Storey %d: %d parallel wall groups", storey_idx, len(parallel_groups))
+    parallel_groups = interior_groups + exterior_groups
+    group_labels = ["interior"] * len(interior_groups) + ["exterior"] * len(exterior_groups)
+    log.info(
+        "Storey %d: %d interior + %d exterior pairs (singletons dropped: %d)",
+        storey_idx, len(interior_groups), len(exterior_groups), len(facade_candidates),
+    )
 
     # 7. Compute wall axes from groups, drop NaN/degenerate
     wall_axes: list[list[list[float]]] = []
     wall_thicknesses: list[float] = []
     wall_labels: list[str] = []
-    kept_groups: list = []
     for group, label in zip(parallel_groups, group_labels):
         axis, thickness = _calculate_wall_axis(group)
         if axis is None or _has_nan(axis):
             continue
+        # Length filter — drop axes shorter than min_length (collinear merge
+        # can occasionally produce a tiny axis from two near-coincident bits)
+        seg_len = float(np.hypot(axis[1][0] - axis[0][0], axis[1][1] - axis[0][1]))
+        if seg_len < cfg.min_length:
+            continue
         wall_axes.append(axis)
         wall_thicknesses.append(thickness)
         wall_labels.append(label)
-        kept_groups.append(group)
 
     if not wall_axes:
         log.warning("Storey %d: no valid wall axes after filtering", storey_idx)
         return []
 
-    # 8. Height validation — keep only axes that have points spanning at
-    #    least 40% of the expected storey height. Singletons from furniture
-    #    or clutter are typically short in Z even if they appear in the
-    #    cross-section band.
-    storey_height = z_ceiling - z_floor
-    min_span = max(0.3, storey_height * 0.4)  # at least 40% of storey or 30 cm
-    valid_axes, valid_thicknesses, valid_groups, valid_labels = [], [], [], []
-    for ax, th, grp, lbl in zip(wall_axes, wall_thicknesses, kept_groups, wall_labels):
-        # Collect points near this axis in full storey height
-        near = pts_for_walls[
-            distance_points_to_line(pts_for_walls[:, :2],
-                                    np.array(ax[0]), np.array(ax[1])) < max(th, cfg.min_thickness) * 2
-        ]
-        if len(near) == 0:
-            continue
-        z_span = float(near[:, 2].max() - near[:, 2].min())
-        if z_span < min_span:
-            log.debug("Storey %d: discarding axis (z_span=%.2f < %.2f)", storey_idx, z_span, min_span)
-            continue
-        valid_axes.append(ax)
-        valid_thicknesses.append(th)
-        valid_groups.append(grp)
-        valid_labels.append(lbl)
-
-    wall_axes, wall_thicknesses = valid_axes, valid_thicknesses
-    kept_groups, wall_labels = valid_groups, valid_labels
-    log.info("Storey %d: %d axes survive height validation", storey_idx, len(wall_axes))
-
-    if not wall_axes:
-        log.warning("Storey %d: no walls after height validation", storey_idx)
-        return []
-
-    # 9. Snap intersections (NaN-safe)
+    # 8. Snap intersections (NaN-safe)
     wall_axes = _adjust_intersections(wall_axes, cfg.max_thickness)
 
     # 9. Inverse PCA rotation
@@ -265,32 +253,6 @@ def _extract_2d_segments(points_2d: np.ndarray, pixel_size: float, min_length: f
     return segments
 
 
-def _group_segments(segments, max_thickness: float):
-    """Group parallel segments within ``max_thickness`` distance.
-
-    Singletons are kept too — an unpaired segment usually still represents a
-    real wall (one side scanned, the other obscured). Caller can tell them
-    apart by group length.
-    """
-    grouped = []
-    labels = []
-    remaining = list(segments)
-    while remaining:
-        current = remaining.pop(0)
-        group = [current]
-        i = 0
-        while i < len(remaining):
-            other = remaining[i]
-            if _segments_parallel(current, other) and _segments_close(current, other, max_thickness):
-                group.append(other)
-                remaining.pop(i)
-            else:
-                i += 1
-        grouped.append(group)
-        labels.append("interior")
-    return grouped, labels
-
-
 def _segments_parallel(s1, s2, angle_tol_deg: float = 5.0) -> bool:
     v1 = np.array(s1[1]) - np.array(s1[0])
     v2 = np.array(s2[1]) - np.array(s2[0])
@@ -309,15 +271,137 @@ def _segments_close(s1, s2, max_dist: float) -> bool:
     )
 
 
-def _calculate_wall_axis(group, default_thickness: float = 0.10):
-    """Find wall axis from a group of parallel segments.
+def _perpendicular_distance(s1, s2) -> float:
+    """Perpendicular distance from s2[0] to the infinite line through s1."""
+    a = np.array(s1[0], dtype=float)
+    b = np.array(s1[1], dtype=float)
+    p = np.array(s2[0], dtype=float)
+    ab = b - a
+    n = np.linalg.norm(ab)
+    if n == 0:
+        return float("inf")
+    return float(abs(np.cross(ab, p - a)) / n)
 
-    Singleton groups: use the segment itself as the axis with a default
-    thickness (the other face wasn't scanned, but the wall is still real).
 
-    Returns ``(None, 0)`` only for truly degenerate (zero-length) groups.
+def _segments_overlap(s1, s2, min_overlap: float) -> bool:
+    """True if s2 projected onto s1's direction overlaps s1 by ≥ min_overlap.
+
+    Port of v1's check_overlap_parallel_segments: rotates s1 to lie on the
+    x-axis, projects s2 the same way, and measures x-axis overlap. Pairs
+    that sit side-by-side along the wall length pass; pairs that are
+    parallel but offset past each other don't.
     """
-    if len(group) == 0:
+    a = np.array(s1[0], dtype=float)
+    b = np.array(s1[1], dtype=float)
+    angle = np.arctan2(b[1] - a[1], b[0] - a[0])
+    c, s = np.cos(-angle), np.sin(-angle)
+    R = np.array([[c, -s], [s, c]])
+    p1 = R @ np.array(s1[0], dtype=float)
+    p2 = R @ np.array(s1[1], dtype=float)
+    q1 = R @ np.array(s2[0], dtype=float)
+    q2 = R @ np.array(s2[1], dtype=float)
+    x1a, x1b = sorted([float(p1[0]), float(p2[0])])
+    x2a, x2b = sorted([float(q1[0]), float(q2[0])])
+    start = max(x1a, x2a)
+    end = min(x1b, x2b)
+    return (end - start) >= min_overlap
+
+
+def _merge_collinear(segments, min_thickness: float, max_distance: float):
+    """Merge segments that are collinear (parallel + perpendicular distance
+    below ``min_thickness``) and reasonably close to each other.
+
+    Walls show up in the contour-tracer as several short collinear pieces;
+    merging gives the pairing step a single segment per face. Mirrors the
+    v1 approach but with iteration cap to avoid pathological inputs.
+    """
+    work = [list(s) for s in segments]
+    out: list = []
+    safety = 0
+    while work and safety < 5 * (len(work) + 1):
+        safety += 1
+        base = work.pop(0)
+        to_merge = [base]
+        i = 0
+        while i < len(work):
+            other = work[i]
+            if (_segments_parallel(base, other, angle_tol_deg=3)
+                    and _perpendicular_distance(base, other) <= min_thickness
+                    and _segments_close(base, other, max_distance)):
+                to_merge.append(other)
+                work.pop(i)
+            else:
+                i += 1
+        if len(to_merge) == 1:
+            out.append(base)
+            continue
+        # Find the two furthest endpoints among all merged-segment endpoints
+        pts = [p for seg in to_merge for p in seg]
+        merged = _furthest_pair(pts)
+        # Re-feed the merged segment so it can pick up more collinear pieces
+        work.append(merged)
+    out.extend(work)
+    return out
+
+
+def _furthest_pair(points):
+    """Return the two points with the greatest pairwise distance."""
+    arr = np.asarray(points, dtype=float)
+    best = (arr[0], arr[1])
+    best_d = -1.0
+    n = len(arr)
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = float(np.linalg.norm(arr[i] - arr[j]))
+            if d > best_d:
+                best_d = d
+                best = (arr[i], arr[j])
+    return [list(map(float, best[0])), list(map(float, best[1]))]
+
+
+def _group_segments_strict(segments, max_thickness: float):
+    """v1-style pair grouping.
+
+    Two segments only form a pair when they are parallel, within
+    ``max_thickness`` of each other AND overlap along their length by
+    at least ``max_thickness`` (so a real wall's two faces line up,
+    not just sit near each other in different rooms).
+
+    Singletons are dropped from the wall list and returned separately so
+    the caller can try to pair them against the building envelope.
+    """
+    grouped: list = []
+    unpaired: list = []
+    min_overlap = max_thickness
+    work = [list(s) for s in segments]
+    while work:
+        current = work.pop(0)
+        group = [current]
+        i = 0
+        while i < len(work):
+            other = work[i]
+            if (_segments_parallel(current, other)
+                    and _segments_close(current, other, max_thickness)
+                    and _segments_overlap(current, other, min_overlap)):
+                group.append(other)
+                work.pop(i)
+            else:
+                i += 1
+        if len(group) >= 2:
+            grouped.append(group)
+        else:
+            unpaired.append(current)
+    return grouped, unpaired
+
+
+def _calculate_wall_axis(group):
+    """Wall axis = midline between the two scanned faces.
+
+    Caller guarantees the group has ≥2 segments (singletons handled
+    separately as facade candidates). Returns ``(None, 0)`` only for
+    degenerate zero-length groups.
+    """
+    if len(group) < 2:
         return None, 0.0
 
     lengths = [np.linalg.norm(np.array(s[1]) - np.array(s[0])) for s in group]
@@ -326,25 +410,26 @@ def _calculate_wall_axis(group, default_thickness: float = 0.10):
     norm = float(np.linalg.norm(direction))
     if norm == 0:
         return None, 0.0
-
-    if len(group) == 1:
-        # Single-face wall — axis IS the segment, thickness is a guess
-        return [list(longest[0]), list(longest[1])], default_thickness
-
-    direction /= norm
-    # Pick the second-longest segment (any partner that isn't the longest)
-    other_idx = int(np.argsort(lengths)[-2])
-    shorter = group[other_idx]
-    mid_long = (np.array(longest[0]) + np.array(longest[1])) / 2
-    mid_short = (np.array(shorter[0]) + np.array(shorter[1])) / 2
-    mean_dist = float(np.linalg.norm(mid_long - mid_short))
-    half = mean_dist / 2
+    direction = direction / norm
     perp = np.array([-direction[1], direction[0]])
+
+    # Project each midpoint onto the perpendicular axis to find the two
+    # extreme offsets. The wall midline sits halfway between them.
+    base_mid = (np.array(longest[0]) + np.array(longest[1])) / 2
+    offsets = []
+    for seg in group:
+        m = (np.array(seg[0]) + np.array(seg[1])) / 2
+        offsets.append(float(np.dot(m - base_mid, perp)))
+    o_min, o_max = min(offsets), max(offsets)
+    thickness = float(abs(o_max - o_min))
+    if thickness <= 0:
+        return None, 0.0
+    centre_offset = (o_min + o_max) / 2
     axis = [
-        list(np.array(longest[0]) - half * perp),
-        list(np.array(longest[1]) - half * perp),
+        list(np.array(longest[0]) + centre_offset * perp),
+        list(np.array(longest[1]) + centre_offset * perp),
     ]
-    return axis, mean_dist
+    return axis, thickness
 
 
 def _has_nan(axis) -> bool:

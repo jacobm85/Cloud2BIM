@@ -11,7 +11,9 @@
       "Bash(git rm *)",
       "Bash(git checkout *)",
       "Bash(python *)",
-      "Bash(node -e \"new Function\\(require\\('fs'\\).readFileSync\\('web/static/js/app.js','utf8'\\)\\); console.log\\('JS OK'\\);\")"
+      "Bash(node -e \"new Function\\(require\\('fs'\\).readFileSync\\('web/static/js/app.js','utf8'\\)\\); console.log\\('JS OK'\\);\")",
+      "Bash(git show *)",
+      "Read(//c/Users/jacob_000/AppData/Local/Temp/**)"
     ]
   }
 }
