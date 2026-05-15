@@ -119,10 +119,8 @@ renderer.shadowMap.enabled = true;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0f1117);
-// Mild fog so distant geometry fades but points still come through at
-// typical scan ranges (30-60 m). Earlier density of 0.008 wiped the
-// peripheral point cloud out.
-scene.fog = new THREE.FogExp2(0x0f1117, 0.0025);
+// No fog — fog hides distant scan points which lives in the same scene
+// and breaks the user's sense of scale.
 
 const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 5000);
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -302,12 +300,11 @@ async function loadPointCloud() {
     pointCloudCount = arr.length / 3;
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(arr, 3));
-    // Screen-space points (sizeAttenuation false): consistent ~3 px size
-    // regardless of camera distance. With sizeAttenuation on, points at
-    // 30 m+ shrank to sub-pixel and looked invisible.
+    // World-space points so they scale with zoom alongside the IFC mesh.
+    // 4 cm is the smallest size where typical scan resolution (1–2 cm
+    // post-dilution) still reads as a dot at typical view distances.
     const mat = new THREE.PointsMaterial({
-      color: 0x9dd4ee, size: 3, sizeAttenuation: false,
-      fog: false,  // don't let scene fog erase peripheral scan points
+      color: 0x9dd4ee, size: 0.04, sizeAttenuation: true,
     });
     pointCloud = new THREE.Points(geom, mat);
     pointCloud.visible = true;  // on by default so the user sees it

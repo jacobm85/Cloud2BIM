@@ -539,6 +539,14 @@ def stage_ifc(cfg: Config) -> None:
         log.exception("Failed to write IFC")
         raise  # writing IFC is the *output* of this stage — if it fails, fail loudly
 
+    # Invalidate cached viewer geometry so the next /geometry call re-extracts
+    # from the new IFC. Without this, the viewer kept showing an old model.
+    geo_cache = Path(str(cfg.io.output_ifc)).parent / "geometry.json"
+    try:
+        geo_cache.unlink()
+    except FileNotFoundError:
+        pass
+
     write_state(cfg, "ifc")
     log.info("ifc: %.1fs", time.time() - t0)
 

@@ -700,6 +700,105 @@ async def get_preview(job_id: str):
     return FileResponse(str(preview_path), media_type="image/png")
 
 
+@app.get("/api/jobs/{job_id}/debug/bbox")
+async def debug_bbox(job_id: str):
+    """Return bounding boxes of points.npz and the IFC geometry, side by side.
+
+    Lets the user verify the two are actually in the same coordinate system.
+    If the IFC bbox is, say, 30x smaller than the points bbox, that's a real
+    coordinate bug and this endpoint surfaces it directly.
+    """
+    job_dir = JOBS_DIR / job_id
+    out: dict = {}
+
+    def _summary():
+        import numpy as _np
+        # Points
+        pts_path = job_dir / "points.npz"
+        if pts_path.exists():
+            data = _np.load(str(pts_path))
+            xyz = data["xyz"]
+            offset = data["offset"].tolist() if "offset" in data.files else None
+            out["points"] = {
+                "n": int(len(xyz)),
+                "min": [float(v) for v in xyz.min(axis=0)],
+                "max": [float(v) for v in xyz.max(axis=0)],
+                "size": [float(v) for v in (xyz.max(axis=0) - xyz.min(axis=0))],
+                "offset": offset,
+            }
+        # IFC
+        ifc_path = job_dir / "output.ifc"
+        if ifc_path.exists():
+            try:
+                import ifcopenshell
+                import ifcopenshell.geom
+                ifc = ifcopenshell.open(str(ifc_path))
+                settings = ifcopenshell.geom.settings()
+                settings.set(settings.USE_WORLD_COORDS, True)
+                it = ifcopenshell.geom.iterator(settings, ifc)
+                mins = [float("inf")] * 3
+                maxs = [float("-inf")] * 3
+                count = 0
+                if it.initialize():
+                    while True:
+                        try:
+                            shape = it.get()
+                            v = _np.asarray(shape.geometry.verts).reshape(-1, 3)
+                            if len(v):
+                                mins = [min(mins[k], float(v[:, k].min())) for k in range(3)]
+                                maxs = [max(maxs[k], float(v[:, k].max())) for k in range(3)]
+                                count += 1
+                        except Exception:
+                            pass
+                        if not it.next():
+                            break
+                if count:
+                    out["ifc"] = {
+                        "objects": count,
+                        "min": mins,
+                        "max": maxs,
+                        "size": [maxs[k] - mins[k] for k in range(3)],
+                    }
+            except Exception as exc:
+                out["ifc_error"] = str(exc)
+        # Slabs and walls in their stored form
+        slabs_path = job_dir / "slabs.pkl"
+        if slabs_path.exists():
+            import pickle
+            with slabs_path.open("rb") as fh:
+                slabs = pickle.load(fh)
+            out["slabs"] = [
+                {
+                    "idx": i, "bottom_z": float(s.bottom_z), "thickness": float(s.thickness),
+                    "poly_min": [float(s.polygon_x.min()), float(s.polygon_y.min())],
+                    "poly_max": [float(s.polygon_x.max()), float(s.polygon_y.max())],
+                }
+                for i, s in enumerate(slabs)
+            ]
+        walls_path = job_dir / "walls.pkl"
+        if walls_path.exists():
+            import pickle
+            with walls_path.open("rb") as fh:
+                walls = pickle.load(fh)
+            out["walls_per_storey"] = []
+            for storey_idx, ws in enumerate(walls):
+                if not ws:
+                    out["walls_per_storey"].append({"storey": storey_idx, "n": 0})
+                    continue
+                xs = [c for w in ws for c in (w.start[0], w.end[0])]
+                ys = [c for w in ws for c in (w.start[1], w.end[1])]
+                out["walls_per_storey"].append({
+                    "storey": storey_idx, "n": len(ws),
+                    "x_range": [float(min(xs)), float(max(xs))],
+                    "y_range": [float(min(ys)), float(max(ys))],
+                    "z_placement": float(ws[0].z_placement),
+                    "z_top": float(ws[0].z_placement + ws[0].height),
+                })
+
+    await asyncio.to_thread(_summary)
+    return out
+
+
 # ── DXF export ───────────────────────────────────────────────────────────────
 
 def _load_storey_data(job_dir: Path) -> dict:

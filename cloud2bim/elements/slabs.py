@@ -241,8 +241,8 @@ def _hull_from_points(
     points: np.ndarray,
     pc_resolution: float,
     grid_coefficient: int,
-    dilation_m: float = 1.0,
-    erosion_m: float = 1.0,
+    dilation_m: float = 0.20,
+    erosion_m: float = 0.20,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """Build a 2D occupancy mask and extract the largest contour as a polygon."""
     pixel_size = pc_resolution * grid_coefficient

@@ -265,6 +265,11 @@ def run_pipeline(cfg: Config) -> int:
     for rp in roof_planes:
         builder.add_roof_plane(rp, storey_idx=len(slabs) - 1)
     builder.write(cfg.io.output_ifc)
+    # Invalidate cached viewer geometry so the viewer re-extracts.
+    try:
+        Path(str(cfg.io.output_ifc)).parent.joinpath("geometry.json").unlink()
+    except FileNotFoundError:
+        pass
     log.info("IFC export: %.1fs", time.time() - t0)
 
     # ── 9. Floor-plan preview ───────────────────────────────────────────
