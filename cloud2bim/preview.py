@@ -128,6 +128,7 @@ def render_z_histogram(
     peak_z: list[float],
     slabs: List[Slab] | None = None,
     cross_section_bands: list[tuple[float, float] | None] | None = None,
+    cross_section_bands_lower: list[tuple[float, float] | None] | None = None,
 ) -> None:
     """Horizontal Z-histogram with peak/slab/band markers.
 
@@ -169,7 +170,16 @@ def render_z_histogram(
             if band is None:
                 continue
             ax.axhspan(band[0], band[1], color=palette[i % len(palette)],
-                       alpha=0.45, zorder=4, label=f"Snitt våning {i}" if i < 4 else None)
+                       alpha=0.45, zorder=4,
+                       label=f"Väggsnitt v{i}" if i < 4 else None)
+
+    if cross_section_bands_lower:
+        for i, band in enumerate(cross_section_bands_lower):
+            if band is None:
+                continue
+            ax.axhspan(band[0], band[1], color="#c084fc",
+                       alpha=0.50, zorder=4,
+                       label="Lågsnitt (fönsterkoll)" if i == 0 else None)
 
     ax.set_xlabel("Antal punkter", color="white", fontsize=10)
     ax.set_ylabel("Z (m)", color="white", fontsize=10)

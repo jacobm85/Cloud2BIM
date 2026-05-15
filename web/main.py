@@ -1038,7 +1038,7 @@ async def run_stage(job_id: str, req: RunStageRequest):
     return {"ok": True, "stage": req.stage}
 
 
-def _render_z_histogram(job_dir: Path, bands_override=None) -> Path:
+def _render_z_histogram(job_dir: Path, bands_override=None, bands_lower=None) -> Path:
     """Render the Z-histogram PNG. Returns the path."""
     import pickle
     from cloud2bim.preview import render_z_histogram
@@ -1062,7 +1062,8 @@ def _render_z_histogram(job_dir: Path, bands_override=None) -> Path:
     else:
         bands = bands_override
     render_z_histogram(out, zh.bin_centers, zh.counts, zh.peak_z,
-                       slabs=slabs, cross_section_bands=bands)
+                       slabs=slabs, cross_section_bands=bands,
+                       cross_section_bands_lower=bands_lower)
     return out
 
 
@@ -1073,14 +1074,17 @@ async def z_histogram_image(job_id: str):
     zh_path = job_dir / "z_histogram.pkl"
     if not zh_path.exists():
         raise HTTPException(404, "Z-histogram not yet computed — run 'slabs' stage first")
-    out = await asyncio.to_thread(_render_z_histogram, job_dir, None)
+    out = await asyncio.to_thread(_render_z_histogram, job_dir, None, None)
     return FileResponse(str(out), media_type="image/png")
 
 
 class BandsRequest(BaseModel):
     """Live-preview bands for the Z-histogram. Each entry is [z_min, z_max]
-    or null to use the default for that storey."""
+    or null to use the default for that storey. ``bands_lower`` is an
+    optional second band per storey shown alongside (e.g., a low-section
+    used to spot windows misinterpreted as walls)."""
     bands: List[Optional[List[float]]]
+    bands_lower: Optional[List[Optional[List[float]]]] = None
 
 
 @app.post("/api/jobs/{job_id}/z_histogram.png")
@@ -1092,7 +1096,10 @@ async def z_histogram_image_with_bands(job_id: str, req: BandsRequest):
     if not zh_path.exists():
         raise HTTPException(404, "Z-histogram not yet computed — run 'slabs' stage first")
     bands = [tuple(b) if b and len(b) == 2 else None for b in (req.bands or [])]
-    out = await asyncio.to_thread(_render_z_histogram, job_dir, bands)
+    bands_lower = None
+    if req.bands_lower:
+        bands_lower = [tuple(b) if b and len(b) == 2 else None for b in req.bands_lower]
+    out = await asyncio.to_thread(_render_z_histogram, job_dir, bands, bands_lower)
     return FileResponse(str(out), media_type="image/png")
 
 

@@ -551,7 +551,8 @@ const wizard = {
   sse: null,
   slabsData: null,
   slabCount: 0,
-  bands: [],  // [{z_min, z_max} | null] per storey
+  bands: [],        // [{z_min, z_max} | null] per storey — used for wall detection
+  bands_lower: [],  // [{z_min, z_max} | null] per storey — low diagnostic preview
 };
 
 function wizardLog(text) {
@@ -826,11 +827,14 @@ async function renderSlabsReview() {
     const data = await fetch('/api/jobs/' + wizard.jobId + '/slabs').then(r => r.json());
     wizard.slabsData = data;
     wizard.slabCount = data.slabs.length;
-    // Initialize default bands: floor+1.30 to floor+1.60 per storey
+    // Initialize default bands: floor+1.30 to floor+1.60 per storey (walls)
+    // and floor+0.30 to floor+0.35 per storey (low diagnostic preview).
     wizard.bands = [];
+    wizard.bands_lower = [];
     for (let i = 0; i < data.slabs.length - 1; i++) {
       const floor = data.slabs[i].top_z;
       wizard.bands.push({ z_min: floor + 1.30, z_max: floor + 1.60 });
+      wizard.bands_lower.push({ z_min: floor + 0.30, z_max: floor + 0.35 });
     }
     const rows = data.slabs.map((s, i) => `
       <tr>
@@ -940,9 +944,17 @@ async function renderWallsReview() {
         for (let i = 0; i < wizard.slabsData.slabs.length - 1; i++) {
           const floor = wizard.slabsData.slabs[i].top_z;
           wizard.bands.push({ z_min: floor + 1.30, z_max: floor + 1.60 });
+          wizard.bands_lower.push({ z_min: floor + 0.30, z_max: floor + 0.35 });
         }
       }
     } catch (e) { /* ignore — handled below */ }
+  }
+  // Backfill lower bands if the user advanced through slabs before this
+  // feature existed.
+  while (wizard.bands_lower.length < wizard.bands.length) {
+    const i = wizard.bands_lower.length;
+    const floor = wizard.slabsData ? wizard.slabsData.slabs[i].top_z : (wizard.bands[i].z_min - 1.30);
+    wizard.bands_lower.push({ z_min: floor + 0.30, z_max: floor + 0.35 });
   }
   const numStoreys = Math.max(0, wizard.slabCount - 1);
   extra.innerHTML = `
@@ -951,11 +963,11 @@ async function renderWallsReview() {
         <img id="walls-z-hist" src="/api/jobs/${wizard.jobId}/z_histogram.png?t=${Date.now()}" alt="Z-histogram">
       </div>
       <div style="padding:12px;font-size:12px;line-height:1.55">
-        <div style="font-weight:600;font-size:13px;margin-bottom:6px">Horisontellt tvärsnitt per våning</div>
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px">Två horisontella tvärsnitt per våning</div>
         <p style="color:var(--text-dim);margin-bottom:8px">
-          Förslag: 130–160 cm över golvet. Om bjälklagsdetektionen gjorde fel —
-          ändra Z min/max manuellt nedan. Snittet ritas automatiskt så du ser
-          planlösningen direkt.
+          <strong>Vägg-snitt:</strong> ca 130–160 cm över golvet — används för väggdetektering.<br>
+          <strong>Lågsnitt:</strong> 30–35 cm över golvet — under fönsterhöjd, hjälper dig
+          se vilka "väggar" som egentligen är fönster (fönster försvinner i lågsnittet).
         </p>
         <div style="color:var(--text-dim)">${numStoreys} våning${numStoreys === 1 ? '' : 'ar'} hittade.</div>
       </div>
@@ -970,35 +982,55 @@ async function renderWallsReview() {
   }
   for (let i = 0; i < numStoreys; i++) {
     const band = wizard.bands[i] || { z_min: 0, z_max: 1 };
+    const bandLo = wizard.bands_lower[i] || { z_min: 0, z_max: 0.05 };
     const row = document.createElement('div');
     row.className = 'storey-band';
     row.innerHTML = `
       <label>Våning ${i}</label>
-      <div><label style="display:block;font-size:11px">Z min (m)</label>
-        <input type="number" step="0.05" class="band-min" value="${band.z_min.toFixed(2)}" data-storey="${i}"></div>
-      <div><label style="display:block;font-size:11px">Z max (m)</label>
-        <input type="number" step="0.05" class="band-max" value="${band.z_max.toFixed(2)}" data-storey="${i}"></div>
-      <button class="btn btn-outline" data-storey="${i}" data-action="preview">Uppdatera</button>`;
+      <div style="display:grid;grid-template-columns:auto auto auto auto auto auto;gap:8px;align-items:end;flex:1">
+        <div style="grid-column:1 / span 2;font-size:11px;color:var(--text-dim);font-weight:600;margin-top:2px">Vägg-snitt</div>
+        <div style="grid-column:3 / span 2;font-size:11px;color:var(--text-dim);font-weight:600;margin-top:2px">Lågsnitt (fönsterkoll)</div>
+        <div></div>
+        <div><label style="display:block;font-size:11px">Z min</label>
+          <input type="number" step="0.05" class="band-min" value="${band.z_min.toFixed(2)}" data-storey="${i}" style="width:70px"></div>
+        <div><label style="display:block;font-size:11px">Z max</label>
+          <input type="number" step="0.05" class="band-max" value="${band.z_max.toFixed(2)}" data-storey="${i}" style="width:70px"></div>
+        <div><label style="display:block;font-size:11px">Z min</label>
+          <input type="number" step="0.05" class="band-lo-min" value="${bandLo.z_min.toFixed(2)}" data-storey="${i}" style="width:70px"></div>
+        <div><label style="display:block;font-size:11px">Z max</label>
+          <input type="number" step="0.05" class="band-lo-max" value="${bandLo.z_max.toFixed(2)}" data-storey="${i}" style="width:70px"></div>
+        <button class="btn btn-outline" data-storey="${i}" data-action="preview">Uppdatera</button>
+      </div>`;
     list.appendChild(row);
-    // Auto-render preview for this storey
+    // Two preview images side by side per storey
     const previewBox = document.createElement('div');
-    previewBox.id = 'cross-section-preview-' + i;
-    previewBox.className = 'stage-preview-row';
+    previewBox.id = 'cross-section-preview-row-' + i;
+    previewBox.style.display = 'grid';
+    previewBox.style.gridTemplateColumns = '1fr 1fr';
+    previewBox.style.gap = '8px';
     previewBox.style.marginTop = '4px';
+    previewBox.innerHTML = `
+      <div id="cross-section-preview-${i}-upper"></div>
+      <div id="cross-section-preview-${i}-lower"></div>`;
     list.appendChild(previewBox);
-    renderCrossSection(i, band.z_min, band.z_max);
+    renderCrossSection(i, band.z_min, band.z_max, 'upper');
+    renderCrossSection(i, bandLo.z_min, bandLo.z_max, 'lower');
   }
   const debouncers = {};
   let histDebouncer = null;
   list.addEventListener('input', e => {
     const storey = parseInt(e.target.dataset.storey, 10);
     if (Number.isNaN(storey)) return;
-    if (e.target.classList.contains('band-min')) wizard.bands[storey].z_min = parseFloat(e.target.value);
-    if (e.target.classList.contains('band-max')) wizard.bands[storey].z_max = parseFloat(e.target.value);
-    if (debouncers[storey]) clearTimeout(debouncers[storey]);
-    debouncers[storey] = setTimeout(() => {
-      const b = wizard.bands[storey];
-      renderCrossSection(storey, b.z_min, b.z_max);
+    let touched = null;
+    if (e.target.classList.contains('band-min')) { wizard.bands[storey].z_min = parseFloat(e.target.value); touched = 'upper'; }
+    else if (e.target.classList.contains('band-max')) { wizard.bands[storey].z_max = parseFloat(e.target.value); touched = 'upper'; }
+    else if (e.target.classList.contains('band-lo-min')) { wizard.bands_lower[storey].z_min = parseFloat(e.target.value); touched = 'lower'; }
+    else if (e.target.classList.contains('band-lo-max')) { wizard.bands_lower[storey].z_max = parseFloat(e.target.value); touched = 'lower'; }
+    const key = `${storey}-${touched}`;
+    if (debouncers[key]) clearTimeout(debouncers[key]);
+    debouncers[key] = setTimeout(() => {
+      const src = touched === 'lower' ? wizard.bands_lower[storey] : wizard.bands[storey];
+      renderCrossSection(storey, src.z_min, src.z_max, touched);
     }, 600);
     if (histDebouncer) clearTimeout(histDebouncer);
     histDebouncer = setTimeout(refreshHistogramWithBands, 500);
@@ -1007,7 +1039,11 @@ async function renderWallsReview() {
     if (e.target.dataset.action !== 'preview') return;
     const storey = parseInt(e.target.dataset.storey, 10);
     const band = wizard.bands[storey];
-    await renderCrossSection(storey, band.z_min, band.z_max);
+    const bandLo = wizard.bands_lower[storey];
+    await Promise.all([
+      renderCrossSection(storey, band.z_min, band.z_max, 'upper'),
+      renderCrossSection(storey, bandLo.z_min, bandLo.z_max, 'lower'),
+    ]);
     refreshHistogramWithBands();
   });
 }
@@ -1040,9 +1076,10 @@ async function refreshHistogramWithBands() {
   if (!img) return;
   try {
     const bands = wizard.bands.map(b => b ? [b.z_min, b.z_max] : null);
+    const bands_lower = wizard.bands_lower.map(b => b ? [b.z_min, b.z_max] : null);
     const res = await fetch('/api/jobs/' + wizard.jobId + '/z_histogram.png', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bands }),
+      body: JSON.stringify({ bands, bands_lower }),
     });
     if (!res.ok) return;
     const blob = await res.blob();
@@ -1050,10 +1087,14 @@ async function refreshHistogramWithBands() {
   } catch (e) { /* histogram update is cosmetic */ }
 }
 
-async function renderCrossSection(storey, zMin, zMax) {
-  const preview = document.getElementById('cross-section-preview-' + storey);
+async function renderCrossSection(storey, zMin, zMax, kind) {
+  // kind = 'upper' (wall section) or 'lower' (window-check section).
+  // Backward compat: when omitted, falls back to the legacy element id.
+  const id = kind ? `cross-section-preview-${storey}-${kind}` : `cross-section-preview-${storey}`;
+  const preview = document.getElementById(id);
   if (!preview) return;
-  preview.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim);font-size:12px">Renderar snitt…</div>';
+  const label = kind === 'lower' ? 'Lågsnitt' : (kind === 'upper' ? 'Vägg-snitt' : 'Snitt');
+  preview.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim);font-size:12px">Renderar ' + label.toLowerCase() + '…</div>';
   try {
     const res = await fetch('/api/jobs/' + wizard.jobId + '/cross_section_preview', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1065,9 +1106,9 @@ async function renderCrossSection(storey, zMin, zMax) {
     preview.innerHTML = `
       <div>
         <div style="padding:6px 10px;background:var(--surface2);border-bottom:1px solid var(--border);font-size:11px;color:var(--text-dim)">
-          Våning ${storey}: Z = ${zMin.toFixed(2)}–${zMax.toFixed(2)} m
+          ${label} våning ${storey}: Z = ${zMin.toFixed(2)}–${zMax.toFixed(2)} m
         </div>
-        <img src="${url}" alt="Snitt våning ${storey}">
+        <img src="${url}" alt="${label} våning ${storey}" style="width:100%">
       </div>`;
   } catch (e) {
     preview.innerHTML = '<div class="alert alert-danger">Kunde inte rendera snittet: ' + e.message + '</div>';
