@@ -312,6 +312,16 @@ class Config(BaseModel):
 
     exterior_scan: bool = False
 
+    algorithm: Literal["v1", "v2"] = Field(
+        default="v1",
+        description=(
+            "Wall + slab detection variant. 'v1' = original Cloud2BIM "
+            "(VaclavNezerka/Cloud2BIM), kept as known-good baseline. "
+            "'v2' = current rewrite with experimental geometric tweaks; "
+            "use only after verifying it beats v1 on your data."
+        ),
+    )
+
 
 def load_config(path: str | Path) -> Config:
     """Load and validate a YAML config file."""

@@ -215,9 +215,10 @@ def load_pca_angle(cfg: Config) -> float:
 
 
 def stage_slabs(cfg: Config) -> None:
-    """Z-histogram → slab detection. Also persists the shared PCA angle."""
+    """Z-histogram → slab detection. Also persists the shared PCA angle (v2 only)."""
     from cloud2bim.elements.slabs import compute_building_pca
-    log.info("─── slabs ───")
+    from cloud2bim.legacy import detect_slabs_v1
+    log.info("─── slabs (%s) ───", cfg.algorithm)
     t0 = time.time()
     if not cfg.slabs.enabled:
         _save_pickle(Path(cfg.io.work_dir) / "slabs.pkl", [])
@@ -228,9 +229,16 @@ def stage_slabs(cfg: Config) -> None:
         log.info("slabs: disabled (skipping)")
         return
     pts, _ = load_points(cfg)
+    # Z-histogram is needed for the wizard preview regardless of algorithm.
     zh = compute_z_histogram(pts, cfg.slabs.z_step, cfg.slabs.peak_height_ratio)
-    pca_angle = compute_building_pca(pts, zh.peak_z)
-    slabs = detect_slabs(pts, cfg.slabs, pca_angle=pca_angle)
+
+    if cfg.algorithm == "v1":
+        slabs = detect_slabs_v1(pts, cfg.slabs)
+        pca_angle = 0.0
+    else:
+        pca_angle = compute_building_pca(pts, zh.peak_z)
+        slabs = detect_slabs(pts, cfg.slabs, pca_angle=pca_angle)
+
     work = Path(cfg.io.work_dir)
     _save_pickle(work / "slabs.pkl", slabs)
     _save_pickle(work / "z_histogram.pkl", zh)
@@ -286,9 +294,11 @@ def stage_walls(cfg: Config) -> None:
         band_override = bands[i] if i < len(bands) and bands[i] is not None else None
         band_lower = bands_lower[i] if i < len(bands_lower) and bands_lower[i] is not None else None
         contours_out: list = []
+        from cloud2bim.legacy import detect_walls_v1
+        wall_fn = detect_walls_v1 if cfg.algorithm == "v1" else detect_walls
 
         try:
-            walls = detect_walls(
+            walls = wall_fn(
                 storey_points=storey_pts,
                 z_floor=z_floor,
                 z_ceiling=z_ceiling,

@@ -103,6 +103,27 @@
         centreras automatiskt så att SWEREF/RT90 hanteras korrekt.
       </div>
 
+      <div class="section-label">Detekteringsalgoritm</div>
+      <div class="mode-picker" style="margin-bottom:20px">
+        <label class="mode-option">
+          <input type="radio" name="algorithm" value="v1" checked>
+          <div class="mode-card">
+            <div class="mode-title">📐 Original (v1)</div>
+            <div class="mode-desc">Algoritm från ursprungliga Cloud2BIM. Beprövad
+              baseline — använd som referens.</div>
+          </div>
+        </label>
+        <label class="mode-option">
+          <input type="radio" name="algorithm" value="v2">
+          <div class="mode-card">
+            <div class="mode-title">🧪 Förbättrad (v2)</div>
+            <div class="mode-desc">Pågående omarbetning med geometriska finjusteringar.
+              Använd när du vill testa men v1 är fortfarande default tills v2 mätbart
+              överträffar.</div>
+          </div>
+        </label>
+      </div>
+
       <div class="section-label">Körläge</div>
       <div class="mode-picker" style="margin-bottom:20px">
         <label class="mode-option">

@@ -27,6 +27,7 @@ from cloud2bim.elements.openings import detect_openings
 from cloud2bim.elements.roofs import detect_roofs
 from cloud2bim.elements.slabs import Slab, compute_building_pca, compute_z_histogram, detect_slabs
 from cloud2bim.elements.walls import detect_walls
+from cloud2bim.legacy import detect_slabs_v1, detect_walls_v1
 from cloud2bim.ifc import IfcBuilder
 from cloud2bim.io import center_xy, read_pointcloud
 from cloud2bim.io.coordinates import CoordinateOffset
@@ -79,11 +80,15 @@ def run_pipeline(cfg: Config) -> int:
     labels = _run_segmentation(cfg, points_xyz)
 
     # ── 5. Slab detection ───────────────────────────────────────────────
-    log.info("─── Slab segmentation ───")
+    log.info("─── Slab segmentation (%s) ───", cfg.algorithm)
     t0 = time.time()
-    zh = compute_z_histogram(points_xyz, cfg.slabs.z_step, cfg.slabs.peak_height_ratio)
-    building_pca_angle = compute_building_pca(points_xyz, zh.peak_z)
-    slabs = detect_slabs(points_xyz, cfg.slabs, pca_angle=building_pca_angle)
+    if cfg.algorithm == "v1":
+        slabs = detect_slabs_v1(points_xyz, cfg.slabs)
+        building_pca_angle = 0.0  # v1 doesn't share PCA across stages
+    else:
+        zh = compute_z_histogram(points_xyz, cfg.slabs.z_step, cfg.slabs.peak_height_ratio)
+        building_pca_angle = compute_building_pca(points_xyz, zh.peak_z)
+        slabs = detect_slabs(points_xyz, cfg.slabs, pca_angle=building_pca_angle)
     log.info("Slabs: %d in %.1fs", len(slabs), time.time() - t0)
 
     # Synthesize missing floor/ceiling so we can still emit placeholder walls
@@ -118,9 +123,10 @@ def run_pipeline(cfg: Config) -> int:
         band_override = bands[i] if i < len(bands) and bands[i] is not None else None
         band_lower = bands_lower[i] if i < len(bands_lower) and bands_lower[i] is not None else None
         contours_out: list = []
+        wall_fn = detect_walls_v1 if cfg.algorithm == "v1" else detect_walls
         try:
             t0 = time.time()
-            walls = detect_walls(
+            walls = wall_fn(
                 storey_points=storey_pts,
                 z_floor=z_floor,
                 z_ceiling=z_ceiling,

@@ -469,12 +469,14 @@ function collectConfig() {
   const n = id => parseFloat(v(id)) || 0;
   const b = id => !!(document.getElementById(id) || {}).checked;
   const mode = (document.querySelector('input[name="run-mode"]:checked') || {}).value || 'full';
+  const algorithm = (document.querySelector('input[name="algorithm"]:checked') || {}).value || 'v1';
   return {
     upload_id: state.sourceType === 'upload' ? state.uploadId : null,
     network_path: state.sourceType === 'network' ? state.networkPath : null,
     source_job_id: state.sourceType === 'reuse' ? state.sourceJobId : null,
     e57_input: false,  // auto-detected on backend from file extension
     mode,
+    algorithm,
     seg_enabled: b('seg-enabled'),
     seg_backend: v('seg-backend') || 'ptv3',
     seg_weights: v('seg-weights') || null,

@@ -174,6 +174,10 @@ class CreateJobRequest(BaseModel):
     # between stages so the user can inspect previews and tweak params.
     mode: str = "full"
 
+    # Detection algorithm: "v1" (original Cloud2BIM, default) or "v2"
+    # (current rewrite, experimental).
+    algorithm: str = "v1"
+
     # Point cloud options
     dilute: bool = True
     dilution_factor: int = 10
@@ -413,6 +417,7 @@ async def create_job(request: CreateJobRequest):
             "revit_compatible": True,
         },
         "exterior_scan": request.exterior_scan,
+        "algorithm": request.algorithm if request.algorithm in ("v1", "v2") else "v1",
     }
 
     config_path = job_dir / "config.yaml"
