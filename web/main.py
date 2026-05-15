@@ -784,8 +784,18 @@ async def export_storey_dxf(job_id: str, storey_idx: int):
     if not (job_dir / "walls.pkl").exists():
         raise HTTPException(404, "walls.pkl not found — run the walls stage first")
 
-    def _write():
+    try:
         from cloud2bim.exporters.dxf import write_storey_dxf
+    except ImportError as exc:
+        raise HTTPException(
+            500,
+            f"DXF export requires the 'ezdxf' Python package. "
+            f"Install with: pip install ezdxf>=1.3.0 (in the docker image, "
+            f"rebuild after adding ezdxf to requirements-docker.txt). "
+            f"Underlying error: {exc}",
+        )
+
+    def _write():
         d = _load_storey_data(job_dir)
         if storey_idx < 0 or storey_idx >= len(d["walls"]):
             return None
@@ -798,7 +808,12 @@ async def export_storey_dxf(job_id: str, storey_idx: int):
                          openings, columns, stairs, slab)
         return out
 
-    path = await asyncio.to_thread(_write)
+    try:
+        path = await asyncio.to_thread(_write)
+    except Exception as exc:
+        import traceback
+        tb = traceback.format_exc()
+        raise HTTPException(500, f"DXF generation failed: {exc}\n\n{tb}")
     if path is None:
         raise HTTPException(404, f"Storey {storey_idx} not found")
     return FileResponse(

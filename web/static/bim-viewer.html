@@ -310,22 +310,10 @@ async function loadPointCloud() {
     pointCloud.visible = true;  // on by default so the user sees it
     root.add(pointCloud);
 
-    // Re-fit camera to include points + IFC together (points may extend
-    // past the IFC bbox, e.g. cropped scan with leftover periphery).
-    const both = new THREE.Box3().setFromObject(root);
-    if (!both.isEmpty()) {
-      const center = both.getCenter(new THREE.Vector3());
-      const size   = both.getSize(new THREE.Vector3());
-      const maxDim = Math.max(size.x, size.y, size.z);
-      const dist   = maxDim * 1.8;
-      camera.position.set(center.x + dist * 0.6, center.y + dist * 0.5, center.z + dist);
-      camera.near = dist * 0.001;
-      camera.far  = dist * 10;
-      camera.updateProjectionMatrix();
-      controls.target.copy(center);
-      controls.update();
-    }
-
+    // Don't re-fit the camera — that pushed it out to include far-away
+    // peripheral points and the IFC became invisible. The IFC fit done
+    // above is the right framing; the user can orbit out to see more of
+    // the point cloud if they need to.
     if (pcRow) {
       pcRow.style.display = '';
       pcRow.classList.remove('off');
