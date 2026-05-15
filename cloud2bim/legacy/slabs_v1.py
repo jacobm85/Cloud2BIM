@@ -1,12 +1,12 @@
-"""V1 slab detection ported from master:aux_functions.py.
+"""V1 slab detection ported from aronfothi/Cloud2BIM master:app/core/aux_functions.py.
 
 Mirrors ``identify_slabs`` + ``create_hull_from_histogram`` +
 ``smooth_contour``. Differences from v2:
 
-  * Detection by **density-threshold scan** (40% of max bin density)
-    instead of scipy ``find_peaks``. Walks the Z-histogram and emits
-    every contiguous run of bins above the threshold as one horizontal
-    surface candidate.
+  * Detection by **density-threshold scan** (60% of max bin density,
+    aronfothi default) instead of scipy ``find_peaks``. Walks the
+    Z-histogram and emits every contiguous run of bins above the
+    threshold as one horizontal surface candidate.
   * Slab definition: consecutive surface candidates are paired
     (bottom + top). The very first standalone surface gets the
     bottom-floor default thickness; an odd-final surface gets the
@@ -140,8 +140,8 @@ def detect_slabs_v1(
     if n_arr.max() <= 0:
         log.warning("V1 slabs: empty density histogram")
         return []
-    # 40% of peak density (v1 master default)
-    density_threshold = 0.4 * float(n_arr.max())
+    # 60% of peak density — aronfothi/Cloud2BIM master default
+    density_threshold = 0.6 * float(n_arr.max())
 
     # Walk runs above threshold → horizontal-surface intervals
     candidates: list[list[float]] = []
