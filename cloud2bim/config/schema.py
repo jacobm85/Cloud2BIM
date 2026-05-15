@@ -151,6 +151,35 @@ class WallConfig(BaseModel):
             "the user set these via the histogram slider."
         ),
     )
+    cross_section_bands_lower: List[Optional[List[float]]] = Field(
+        default_factory=list,
+        description=(
+            "Per-storey low-section Z-bands (default 30-35 cm above floor). "
+            "Only used when require_lower_support is true: each detected "
+            "wall must also have point support in this band, otherwise it "
+            "is dropped — filters out window-as-wall confusions."
+        ),
+    )
+    require_lower_support: bool = Field(
+        default=False,
+        description=(
+            "If true, drop walls that don't also show up in the low "
+            "cross-section band (cross_section_bands_lower). Real walls go "
+            "from floor to ceiling, windows don't — so the low band sees "
+            "walls but not windows, and walls without that support are "
+            "likely misclassified windows or other tall narrow features."
+        ),
+    )
+    lower_support_fraction: float = Field(
+        default=0.30,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Fraction of a detected wall's length that must overlap with "
+            "low-section points for the wall to be kept. Tighter (0.5+) "
+            "drops more walls; looser (0.1) keeps almost everything."
+        ),
+    )
 
 
 # ─── Openings ─────────────────────────────────────────────────────────────────

@@ -58,6 +58,7 @@ def detect_walls(
     cross_section_band: Optional[tuple[float, float]] = None,
     pca_angle: Optional[float] = None,
     out_contours: Optional[list] = None,
+    lower_section_band: Optional[tuple[float, float]] = None,
 ) -> List[Wall]:
     """Extract wall axes from a single storey's points.
 
@@ -224,6 +225,22 @@ def detect_walls(
 
     if out_contours is not None:
         out_contours.extend(raw_contours)
+
+    # 9b. Low-section support filter (optional). For each detected wall axis,
+    #     check that there's also a point footprint in the low band (below
+    #     window sills). Walls without that support are likely windows —
+    #     in the wall band the window glass plus framing reads as wall, but
+    #     at 30 cm there's only floor / no wall.
+    if cfg.require_lower_support and lower_section_band is not None:
+        pixel_size = pc_resolution * grid_coefficient
+        before = len(wall_axes)
+        wall_axes, wall_thicknesses, wall_labels = _filter_by_lower_support(
+            wall_axes, wall_thicknesses, wall_labels,
+            storey_points, lower_section_band, pixel_size,
+            min_support=cfg.lower_support_fraction,
+        )
+        log.info("Storey %d: low-section filter kept %d / %d walls",
+                 storey_idx, len(wall_axes), before)
 
     # 10. Cap to safety limit
     if len(wall_axes) > cfg.max_walls_per_storey:
@@ -484,6 +501,83 @@ def _calculate_wall_axis(group):
 
 def _has_nan(axis) -> bool:
     return any(not np.isfinite(c) for pt in axis for c in pt)
+
+
+def _filter_by_lower_support(
+    wall_axes: list,
+    wall_thicknesses: list,
+    wall_labels: list,
+    storey_points: np.ndarray,
+    band: tuple[float, float],
+    pixel_size: float,
+    min_support: float = 0.30,
+):
+    """Drop walls that don't have point support in ``band`` (low Z slice).
+
+    Builds a 2D occupancy mask from points in [band[0], band[1]] and counts
+    how much of each wall's centreline crosses occupied cells. Returns the
+    (axes, thicknesses, labels) triple with unsupported walls removed.
+    """
+    z = storey_points[:, 2]
+    mask_z = (z >= float(band[0])) & (z <= float(band[1]))
+    pts_lo = storey_points[mask_z, :2]
+    if len(pts_lo) < 100:
+        log.warning(
+            "Low-section filter: only %d points in band [%.2f, %.2f] — "
+            "skipping (would drop everything).",
+            len(pts_lo), float(band[0]), float(band[1]),
+        )
+        return wall_axes, wall_thicknesses, wall_labels
+
+    x_min, y_min = float(pts_lo[:, 0].min()), float(pts_lo[:, 1].min())
+    x_max, y_max = float(pts_lo[:, 0].max()), float(pts_lo[:, 1].max())
+    xs = np.arange(x_min, x_max + pixel_size, pixel_size)
+    ys = np.arange(y_min, y_max + pixel_size, pixel_size)
+    if len(xs) < 2 or len(ys) < 2:
+        return wall_axes, wall_thicknesses, wall_labels
+    grid, _, _ = np.histogram2d(pts_lo[:, 0], pts_lo[:, 1], bins=[xs, ys])
+    grid = grid.T
+    occ = (grid > 0).astype(np.uint8) * 255
+    occ = closing(occ, footprint_rectangle((5, 5)))
+    occ = occ > 0  # bool
+
+    h, w = occ.shape
+    kept_axes, kept_thick, kept_labels = [], [], []
+    for ax, t, lbl in zip(wall_axes, wall_thicknesses, wall_labels):
+        a = np.array(ax[0], dtype=float)
+        b = np.array(ax[1], dtype=float)
+        length = float(np.linalg.norm(b - a))
+        if length < 1e-6:
+            continue
+        # Sample one point per pixel along the centreline, plus a perpendicular
+        # half-window of thickness/2 on either side so we catch the wall's
+        # actual cell footprint (not just the maths line).
+        n = max(8, int(length / max(pixel_size, 1e-3)))
+        u = np.linspace(0, 1, n)
+        line = a[None, :] + u[:, None] * (b - a)[None, :]
+        half_t_px = max(1, int(t / pixel_size / 2))
+        # Convert to grid indices
+        gx = ((line[:, 0] - x_min) / pixel_size).astype(int)
+        gy = ((line[:, 1] - y_min) / pixel_size).astype(int)
+        hits = 0
+        for sx, sy in zip(gx, gy):
+            if sx < -half_t_px or sx >= w + half_t_px:
+                continue
+            if sy < -half_t_px or sy >= h + half_t_px:
+                continue
+            x_lo = max(0, sx - half_t_px)
+            x_hi = min(w, sx + half_t_px + 1)
+            y_lo = max(0, sy - half_t_px)
+            y_hi = min(h, sy + half_t_px + 1)
+            if x_lo >= x_hi or y_lo >= y_hi:
+                continue
+            if occ[y_lo:y_hi, x_lo:x_hi].any():
+                hits += 1
+        if hits / n >= min_support:
+            kept_axes.append(ax)
+            kept_thick.append(t)
+            kept_labels.append(lbl)
+    return kept_axes, kept_thick, kept_labels
 
 
 def _adjust_intersections(wall_axes, max_thickness: float):

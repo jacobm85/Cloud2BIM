@@ -1196,6 +1196,21 @@ function wizardOpenStageOverrides(stage) {
         <div class="form-group"><label>Yttervägg-tjocklek (m)</label><input type="number" id="ovr-ext-wt" value="0.3" step="0.05"></div>
         <div class="form-group"><label>Max väggar per våning (cap)</label><input type="number" id="ovr-max-walls" value="300" min="1"></div>
       </div>
+      <div style="margin-top:10px;padding:10px;background:var(--surface);border-radius:6px;font-size:12px">
+        <label style="display:flex;gap:8px;align-items:center">
+          <input type="checkbox" id="ovr-lower-support">
+          <span>
+            <strong>Filtrera bort väggar utan stöd i lågsnittet</strong> —
+            droppar väggar som detekteras i vägg-snittet men saknar punkter
+            i lågsnittet (30–35 cm). Tar typiskt bort fönster som tolkats
+            som väggar.
+          </span>
+        </label>
+        <div style="margin-top:8px;padding-left:24px">
+          <label style="font-size:11px;color:var(--text-dim)">Min andel av väggens längd som måste finnas i lågsnittet (0–1):</label>
+          <input type="number" id="ovr-lower-frac" value="0.30" step="0.05" min="0" max="1" style="width:80px">
+        </div>
+      </div>
       <div style="font-size:11px;color:var(--text-dim);margin-top:8px">
         Eventuella Z-band du satt ovan inkluderas automatiskt vid rerun. Höj
         "Max väggar per våning" om planlösningen har många rumsindelningar.
@@ -1239,6 +1254,14 @@ async function wizardRunStage(stage) {
   // Cross-section bands (for walls stage)
   if (stage === 'walls' && wizard.bands.length > 0) {
     overrides.cross_section_bands = wizard.bands.map(b => b ? [b.z_min, b.z_max] : null);
+    overrides.cross_section_bands_lower = wizard.bands_lower.map(b => b ? [b.z_min, b.z_max] : null);
+  }
+  // Low-section support filter toggle
+  if (stage === 'walls') {
+    const lowEl = document.getElementById('ovr-lower-support');
+    if (lowEl) overrides.require_lower_support = !!lowEl.checked;
+    const lowFrac = num('ovr-lower-frac');
+    if (lowFrac !== null) overrides.lower_support_fraction = lowFrac;
   }
 
   document.getElementById('wizard-stage-detail').innerHTML =

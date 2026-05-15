@@ -42,6 +42,7 @@ def run_pipeline(cfg: Config) -> int:
     """Run the full pipeline. Returns process exit code (0 = success)."""
     t_total = time.time()
     bands = list(cfg.walls.cross_section_bands or [])
+    bands_lower = list(cfg.walls.cross_section_bands_lower or [])
 
     # ── 1. Read & combine inputs ────────────────────────────────────────
     points_xyz = _load_inputs(cfg)
@@ -115,6 +116,7 @@ def run_pipeline(cfg: Config) -> int:
         slab_polygon_xy = np.column_stack([slabs[i + 1].polygon_x, slabs[i + 1].polygon_y])
 
         band_override = bands[i] if i < len(bands) and bands[i] is not None else None
+        band_lower = bands_lower[i] if i < len(bands_lower) and bands_lower[i] is not None else None
         contours_out: list = []
         try:
             t0 = time.time()
@@ -132,6 +134,7 @@ def run_pipeline(cfg: Config) -> int:
                 cross_section_band=band_override,
                 pca_angle=building_pca_angle,
                 out_contours=contours_out,
+                lower_section_band=band_lower,
             )
             if is_placeholder:
                 for w in walls:

@@ -269,6 +269,7 @@ def stage_walls(cfg: Config) -> None:
         placeholder_storeys = set(range(len(slabs) - 1))
 
     bands = list(cfg.walls.cross_section_bands or [])
+    bands_lower = list(cfg.walls.cross_section_bands_lower or [])
     storey_walls: list[list] = []
     storey_contours: list[list] = []
     for i in range(len(slabs) - 1):
@@ -283,6 +284,7 @@ def stage_walls(cfg: Config) -> None:
         )
         slab_polygon_xy = np.column_stack([slabs[i + 1].polygon_x, slabs[i + 1].polygon_y])
         band_override = bands[i] if i < len(bands) and bands[i] is not None else None
+        band_lower = bands_lower[i] if i < len(bands_lower) and bands_lower[i] is not None else None
         contours_out: list = []
 
         try:
@@ -300,6 +302,7 @@ def stage_walls(cfg: Config) -> None:
                 cross_section_band=band_override,
                 pca_angle=building_pca_angle,
                 out_contours=contours_out,
+                lower_section_band=band_lower,
             )
             if is_placeholder:
                 for w in walls:

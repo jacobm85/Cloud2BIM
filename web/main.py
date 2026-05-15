@@ -957,6 +957,11 @@ class RunStageRequest(BaseModel):
     # one pair per storey. None entries (passed as [null, null]) keep the
     # default 130-160 cm above-floor band.
     cross_section_bands: Optional[List[Optional[List[float]]]] = None
+    # Low-section bands (diagnostic + optional support-filter input).
+    cross_section_bands_lower: Optional[List[Optional[List[float]]]] = None
+    # When true, walls without point support in the low band are dropped.
+    require_lower_support: Optional[bool] = None
+    lower_support_fraction: Optional[float] = None
 
 
 @app.get("/api/jobs/{job_id}/state")
@@ -1007,6 +1012,12 @@ def _apply_overrides_to_config(config_path: Path, req: RunStageRequest) -> None:
         walls["max_walls_per_storey"] = req.max_walls_per_storey
     if req.cross_section_bands is not None:
         walls["cross_section_bands"] = req.cross_section_bands
+    if req.cross_section_bands_lower is not None:
+        walls["cross_section_bands_lower"] = req.cross_section_bands_lower
+    if req.require_lower_support is not None:
+        walls["require_lower_support"] = req.require_lower_support
+    if req.lower_support_fraction is not None:
+        walls["lower_support_fraction"] = req.lower_support_fraction
 
     with open(config_path, "w") as fh:
         yaml.dump(cfg, fh, allow_unicode=True)
