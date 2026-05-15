@@ -106,7 +106,7 @@ class WallConfig(BaseModel):
     max_thickness: float = Field(default=0.75, gt=0, description="m")
     exterior_thickness: float = Field(default=0.30, gt=0, description="m")
     singleton_min_length: float = Field(
-        default=0.50,
+        default=0.30,
         gt=0,
         description=(
             "m. Minimum length for a one-faced segment (no parallel partner) "

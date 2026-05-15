@@ -25,7 +25,6 @@ from skimage.morphology import closing, footprint_rectangle
 from cloud2bim.config import WallConfig
 from cloud2bim.geometry.lines import line_intersection
 from cloud2bim.geometry.pca import dominant_angle, rotate_points_2d
-from cloud2bim.geometry.polygon import swell_polygon
 from cloud2bim.logging import get_logger
 from cloud2bim.segmentation.base import SemanticLabels
 
@@ -145,40 +144,19 @@ def detect_walls(
 
     # 5. Strict pairing — parallel + within max_thickness + overlap along the
     #    wall length. Groups with 2+ segments are confident walls (both faces
-    #    scanned, measured thickness). Singletons (one face only) get a second
-    #    chance: v1's trick is to pair them against the slab outline swelled
-    #    outward by exterior_thickness, which gives a synthetic exterior face
-    #    so interior-scan singletons close into proper walls along the perimeter.
+    #    scanned, measured thickness).
     paired_groups, singletons = _group_segments_strict(segments, cfg.max_thickness)
     log.info(
-        "Storey %d: %d two-sided pairs + %d singletons (candidate one-sided walls)",
+        "Storey %d: %d two-sided pairs + %d singletons (one-faced walls)",
         storey_idx, len(paired_groups), len(singletons),
     )
-
-    # 5b. Facade re-pairing against the swelled slab polygon (v1 approach).
-    #     For interior scans the exterior wall's outside face is never seen,
-    #     so we synthesise it from the slab outline; the original singleton
-    #     becomes the inside face. This yields long continuous facade walls
-    #     instead of dropping them or emitting them as one-faced fragments.
-    facade_pairs: list = []
-    leftover_singletons: list = singletons
-    if not exterior_scan and slab_polygon_xy is not None and len(slab_polygon_xy) >= 3:
-        swelled = swell_polygon(slab_polygon_xy, cfg.exterior_thickness)
-        if swelled:
-            candidates = [list(s) for s in singletons] + [list(s) for s in swelled]
-            facade_pairs, leftover_singletons = _group_segments_strict(
-                candidates, cfg.max_thickness,
-            )
-            log.info(
-                "Storey %d: facade pass — %d slab-swell candidates → %d facade pairs",
-                storey_idx, len(swelled), len(facade_pairs),
-            )
 
     wall_axes: list[list[list[float]]] = []
     wall_thicknesses: list[float] = []
     wall_labels: list[str] = []
 
-    for group in list(paired_groups) + list(facade_pairs):
+    # 5a. Interior walls — both faces visible, axis is the midline.
+    for group in paired_groups:
         axis, thickness = _calculate_wall_axis(group)
         if axis is None or _has_nan(axis):
             continue
@@ -189,10 +167,19 @@ def detect_walls(
         wall_thicknesses.append(max(thickness, cfg.min_thickness))
         wall_labels.append("wall")
 
-    # 5c. Fallback: keep singletons that still didn't pair if they are long
-    #     enough to be confidently real walls. Drop short fragments — they're
-    #     almost always furniture/clutter edges, not partitions.
-    for seg in leftover_singletons:
+    # 5b. One-faced walls — typical exterior walls scanned from inside only.
+    #     The contour segment IS the inside face of the wall. Shift the axis
+    #     OUTWARD (away from the slab centroid) by exterior_thickness/2 so
+    #     the wall body grows outside the building instead of straddling the
+    #     visible face — which used to put half the wall inside the room.
+    centroid = None
+    if not exterior_scan and slab_polygon_xy is not None and len(slab_polygon_xy) >= 3:
+        centroid = (
+            float(np.asarray(slab_polygon_xy)[:, 0].mean()),
+            float(np.asarray(slab_polygon_xy)[:, 1].mean()),
+        )
+
+    for seg in singletons:
         a = np.array(seg[0], dtype=float)
         b = np.array(seg[1], dtype=float)
         length = float(np.linalg.norm(b - a))
@@ -200,8 +187,24 @@ def detect_walls(
             continue
         if _has_nan([a.tolist(), b.tolist()]):
             continue
+
+        if centroid is not None:
+            mid = (a + b) / 2.0
+            direction = b - a
+            d_norm = float(np.linalg.norm(direction))
+            if d_norm > 1e-9:
+                unit = direction / d_norm
+                normal = np.array([-unit[1], unit[0]])
+                # Flip so it points outward (away from the slab centroid)
+                to_centroid = np.array([centroid[0] - mid[0], centroid[1] - mid[1]])
+                if np.dot(normal, to_centroid) > 0:
+                    normal = -normal
+                shift = normal * (cfg.exterior_thickness / 2.0)
+                a = a + shift
+                b = b + shift
+
         wall_axes.append([a.tolist(), b.tolist()])
-        wall_thicknesses.append(cfg.singleton_thickness)
+        wall_thicknesses.append(cfg.exterior_thickness)
         wall_labels.append("wall")
 
     if not wall_axes:
@@ -269,8 +272,10 @@ def _extract_2d_segments(points_2d: np.ndarray, pixel_size: float, min_length: f
     grid, _, _ = np.histogram2d(points_2d[:, 0], points_2d[:, 1], bins=[xs, ys])
     grid = grid.T
 
-    threshold = 0.01 * grid.max()
-    mask = (grid > threshold).astype(np.uint8) * 255
+    # v1 used an absolute density threshold of 0.01, so any bin with ≥1 point
+    # was kept. A "1% of max" threshold (v2's earlier choice) dropped weak but
+    # real wall signal — exactly the data the user pointed out was missing.
+    mask = (grid > 0).astype(np.uint8) * 255
     mask = closing(mask, footprint_rectangle((5, 5)))
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
