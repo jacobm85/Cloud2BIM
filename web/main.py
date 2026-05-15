@@ -733,6 +733,16 @@ async def debug_bbox(job_id: str):
                 import ifcopenshell
                 import ifcopenshell.geom
                 ifc = ifcopenshell.open(str(ifc_path))
+                # Project units — surfaces unit bugs that would otherwise look
+                # like a coordinate mismatch.
+                units = []
+                for u in ifc.by_type("IfcSIUnit"):
+                    units.append({
+                        "type": getattr(u, "UnitType", None),
+                        "prefix": getattr(u, "Prefix", None),
+                        "name": getattr(u, "Name", None),
+                    })
+                out["ifc_units"] = units
                 settings = ifcopenshell.geom.settings()
                 settings.set(settings.USE_WORLD_COORDS, True)
                 it = ifcopenshell.geom.iterator(settings, ifc)

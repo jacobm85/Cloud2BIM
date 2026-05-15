@@ -60,7 +60,19 @@ class IfcBuilder:
             "root.create_entity", self.model,
             ifc_class="IfcProject", name=cfg.project.name,
         )
-        ifcopenshell.api.run("unit.assign_unit", self.model)
+        # Be explicit about metric units. The bare api.run("unit.assign_unit")
+        # call in older ifcopenshell versions could fall back to mm, which
+        # silently turned a 10 m building into a 10 mm one in any viewer.
+        try:
+            ifcopenshell.api.run(
+                "unit.assign_unit", self.model,
+                length={"is_metric": True, "raw": "METERS"},
+                area={"is_metric": True, "raw": "METERS"},
+                volume={"is_metric": True, "raw": "METERS"},
+            )
+        except TypeError:
+            # Older ifcopenshell signature — explicit kwargs not supported
+            ifcopenshell.api.run("unit.assign_unit", self.model)
 
         # Spatial hierarchy: Project → Site → Building → Storeys
         self._site = self._create_spatial("IfcSite", "Site", parent=self._project)
