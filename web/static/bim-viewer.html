@@ -281,29 +281,38 @@ refreshLegendCounts();
 // Hide point-cloud row until it's loaded (Feature 3)
 const pcRow = legendRows().find(r => (r.dataset.types || '') === '__pointcloud__');
 if (pcRow) {
-  pcRow.classList.add('off');  // start hidden
-  pcRow.style.display = 'none'; // until point cloud is fetched
+  pcRow.style.display = 'none'; // hidden until point cloud is fetched
 }
 
 // ── Point cloud overlay (Feature 3) ────────────────────────────────────────
 async function loadPointCloud() {
   try {
-    const res = await fetch(`/api/jobs/${jobId}/pointcloud.bin?max_points=80000`);
+    const res = await fetch(`/api/jobs/${jobId}/pointcloud.bin?max_points=120000`);
     if (!res.ok) return;  // silently skip — viewer still works
     const buf = await res.arrayBuffer();
     const arr = new Float32Array(buf);
+    if (arr.length === 0) return;
     pointCloudCount = arr.length / 3;
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+    // Pick a point size proportional to the model — small models need
+    // smaller points; large ones need bigger ones for visibility.
+    geom.computeBoundingBox();
+    const bb = geom.boundingBox;
+    const span = Math.max(
+      bb.max.x - bb.min.x, bb.max.y - bb.min.y, bb.max.z - bb.min.z,
+    );
+    const pointSize = Math.max(0.03, span * 0.0012);
     const mat = new THREE.PointsMaterial({
-      color: 0x76c8e8, size: 0.025, sizeAttenuation: true,
-      transparent: true, opacity: 0.65, depthWrite: false,
+      color: 0x76c8e8, size: pointSize, sizeAttenuation: true,
+      transparent: true, opacity: 0.75, depthWrite: false,
     });
     pointCloud = new THREE.Points(geom, mat);
-    pointCloud.visible = false;
+    pointCloud.visible = true;  // on by default so the user sees it
     root.add(pointCloud);
     if (pcRow) {
       pcRow.style.display = '';
+      pcRow.classList.remove('off');  // match visible=true
       refreshLegendCounts();
     }
   } catch (e) { /* point cloud is optional */ }

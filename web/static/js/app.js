@@ -999,9 +999,42 @@ function renderIfcReview() {
     <div class="alert alert-success">IFC och planlösningspreview genererade. Klicka "Fortsätt →" för att gå till resultat-sidan.</div>
     <div class="stage-preview-row">
       <div><img src="/api/jobs/${wizard.jobId}/preview?t=${Date.now()}" alt="Planlösning"></div>
+    </div>
+    <div id="dxf-export-row" style="margin-top:14px;padding:12px;background:var(--surface2);border-radius:8px">
+      <div style="font-weight:600;margin-bottom:6px">Exportera 2D-plan (DXF)</div>
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
+        En fil per våning. Lager: SLAB_OUTLINE, WALLS (väggens ytterkant), WALL_AXIS,
+        WINDOWS, DOORS, COLUMNS, STAIRS.
+      </div>
+      <div id="dxf-buttons" style="display:flex;gap:8px;flex-wrap:wrap"></div>
     </div>`;
   document.getElementById('btn-stage-continue').textContent = 'Visa resultat →';
   document.getElementById('btn-stage-continue').onclick = () => goTo(4);
+  renderDxfButtons();
+}
+
+async function renderDxfButtons() {
+  const wrap = document.getElementById('dxf-buttons');
+  if (!wrap) return;
+  try {
+    const res = await fetch('/api/jobs/' + wizard.jobId + '/dxf/storeys');
+    if (!res.ok) {
+      wrap.innerHTML = '<span style="font-size:12px;color:var(--text-dim)">Inga våningar att exportera.</span>';
+      return;
+    }
+    const { storeys } = await res.json();
+    if (!storeys) {
+      wrap.innerHTML = '<span style="font-size:12px;color:var(--text-dim)">Inga våningar att exportera.</span>';
+      return;
+    }
+    const buttons = [];
+    for (let i = 0; i < storeys; i++) {
+      buttons.push(`<a class="btn btn-outline" href="/api/jobs/${wizard.jobId}/dxf/${i}" download>⬇ Våning ${i} (.dxf)</a>`);
+    }
+    wrap.innerHTML = buttons.join('');
+  } catch (e) {
+    wrap.innerHTML = '<span style="font-size:12px;color:var(--danger)">Kunde inte hämta DXF-info: ' + e.message + '</span>';
+  }
 }
 
 function wizardOpenStageOverrides(stage) {

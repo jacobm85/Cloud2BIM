@@ -18,6 +18,7 @@ from scipy.signal import find_peaks
 from skimage.morphology import closing, footprint_rectangle
 
 from cloud2bim.config import SlabConfig
+from cloud2bim.geometry.pca import dominant_angle, rotate_points_2d
 from cloud2bim.geometry.polygon import smooth_contour
 from cloud2bim.logging import get_logger
 
@@ -98,6 +99,19 @@ def detect_slabs(
     z = points_xyz[:, 2]
     log.info("Slab Z-range: %.2f .. %.2f m", float(z.min()), float(z.max()))
 
+    # Building-wide PCA: rotate slabs the same way walls will, so the slab
+    # outline follows the building's actual axes instead of the world axes.
+    # Sample at the densest Z-band (most likely a slab) for a stable angle.
+    pca_sample = points_xyz[::max(1, len(points_xyz) // 200_000)]
+    building_pca_angle = float(dominant_angle(pca_sample[:, :2]))
+    if abs(building_pca_angle) > np.radians(3):
+        log.info(
+            "Slabs: applying building PCA rotation %.1f° for hull extraction",
+            np.degrees(building_pca_angle),
+        )
+    else:
+        building_pca_angle = 0.0
+
     zh = compute_z_histogram(points_xyz, cfg.z_step, cfg.peak_height_ratio)
     log.info("Found %d horizontal-surface peaks", len(zh.peak_z))
 
@@ -156,10 +170,20 @@ def detect_slabs(
             log.warning("Slab %d: too few points (%d) — skipping", idx, len(slice_pts))
             continue
 
-        x, y = _hull_from_points(slice_pts, cfg.pc_resolution, cfg.grid_coefficient)
+        if building_pca_angle != 0.0:
+            rotated_xy = rotate_points_2d(slice_pts[:, :2], -building_pca_angle)
+            slice_for_hull = np.column_stack([rotated_xy, slice_pts[:, 2]])
+        else:
+            slice_for_hull = slice_pts
+
+        x, y = _hull_from_points(slice_for_hull, cfg.pc_resolution, cfg.grid_coefficient)
         if x is None or len(x) < 3:
             log.warning("Slab %d: failed to build polygon — skipping", idx)
             continue
+
+        if building_pca_angle != 0.0:
+            xy_back = rotate_points_2d(np.column_stack([x, y]), building_pca_angle)
+            x, y = xy_back[:, 0], xy_back[:, 1]
 
         slabs.append(
             Slab(

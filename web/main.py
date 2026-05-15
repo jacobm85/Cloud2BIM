@@ -700,6 +700,76 @@ async def get_preview(job_id: str):
     return FileResponse(str(preview_path), media_type="image/png")
 
 
+# ── DXF export ───────────────────────────────────────────────────────────────
+
+def _load_storey_data(job_dir: Path) -> dict:
+    """Load slabs/walls/openings/columns/stairs pickles from a job dir."""
+    import pickle
+    out: dict = {"slabs": [], "walls": [], "openings": [], "columns": [], "stairs": []}
+    for key, fname in [
+        ("slabs", "slabs.pkl"),
+        ("walls", "walls.pkl"),
+        ("openings", "openings.pkl"),
+        ("columns", "columns.pkl"),
+        ("stairs", "stairs.pkl"),
+    ]:
+        p = job_dir / fname
+        if p.exists():
+            try:
+                with p.open("rb") as f:
+                    out[key] = pickle.load(f)
+            except Exception:
+                out[key] = []
+    return out
+
+
+@app.get("/api/jobs/{job_id}/dxf/storeys")
+async def list_dxf_storeys(job_id: str):
+    """Return how many storeys are available for DXF export."""
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    job_dir = JOBS_DIR / job_id
+    walls_pkl = job_dir / "walls.pkl"
+    if not walls_pkl.exists():
+        raise HTTPException(404, "walls.pkl not found — run the walls stage first")
+    data = _load_storey_data(job_dir)
+    return {"storeys": len(data["walls"])}
+
+
+@app.get("/api/jobs/{job_id}/dxf/{storey_idx}")
+async def export_storey_dxf(job_id: str, storey_idx: int):
+    """Generate and return a DXF for one storey."""
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    job_dir = JOBS_DIR / job_id
+    if not (job_dir / "walls.pkl").exists():
+        raise HTTPException(404, "walls.pkl not found — run the walls stage first")
+
+    def _write():
+        from cloud2bim.exporters.dxf import write_storey_dxf
+        d = _load_storey_data(job_dir)
+        if storey_idx < 0 or storey_idx >= len(d["walls"]):
+            return None
+        slab = d["slabs"][storey_idx] if storey_idx < len(d["slabs"]) else None
+        openings = d["openings"][storey_idx] if storey_idx < len(d["openings"]) else []
+        columns = d["columns"][storey_idx] if storey_idx < len(d["columns"]) else []
+        stairs = d["stairs"][storey_idx] if storey_idx < len(d["stairs"]) else []
+        out = job_dir / f"plan_storey_{storey_idx}.dxf"
+        write_storey_dxf(out, storey_idx, d["walls"][storey_idx],
+                         openings, columns, stairs, slab)
+        return out
+
+    path = await asyncio.to_thread(_write)
+    if path is None:
+        raise HTTPException(404, f"Storey {storey_idx} not found")
+    return FileResponse(
+        str(path), media_type="application/dxf",
+        filename=f"plan_storey_{storey_idx}.dxf",
+    )
+
+
 # ── Stepwise wizard endpoints ────────────────────────────────────────────────
 
 class RunStageRequest(BaseModel):

@@ -149,9 +149,17 @@ def render_z_histogram(
             ax.axhline(z, color="#ffcc66", linewidth=0.5, alpha=0.4)
 
     if slabs:
-        for slab in slabs:
-            ax.axhspan(slab.bottom_z, slab.bottom_z + slab.thickness,
-                       color="#888888", alpha=0.35, zorder=2)
+        x_label = counts.max() * 0.5 if len(counts) else 0
+        for i, slab in enumerate(slabs):
+            z_top = slab.bottom_z + slab.thickness
+            ax.axhspan(slab.bottom_z, z_top, color="#888888", alpha=0.35, zorder=2)
+            ax.text(
+                x_label, (slab.bottom_z + z_top) / 2, f"#{i}",
+                color="#ffffff", fontsize=11, fontweight="bold",
+                ha="center", va="center", zorder=6,
+                bbox=dict(boxstyle="round,pad=0.25", facecolor="#444444",
+                          edgecolor="#888888", alpha=0.85),
+            )
         # legend
         ax.fill_betweenx([0, 0], 0, 0, color="#888888", alpha=0.35, label="Slab")
 
