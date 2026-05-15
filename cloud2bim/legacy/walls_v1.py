@@ -1,17 +1,11 @@
-"""V1 wall detection ported from aronfothi/Cloud2BIM master:app/core/aux_functions.py.
+"""V1 wall detection ported from master:aux_functions.py.
 
-Bit-for-bit reproduction of ``identify_walls`` from the aronfothi fork
-(https://github.com/aronfothi/Cloud2BIM) — which is the v1 baseline the
-user has confirmed works. Notably the aronfothi fork does NOT apply
-PCA rotation (the upstream VaclavNezerka/Cloud2BIM master added it
-later, which produced inferior walls on the user's data).
-
-Adaptations made:
+Bit-for-bit reproduction of the original ``identify_walls`` plus its
+helpers. The only adaptations:
     * input: full storey ``pointcloud`` (Nx3) instead of split arrays
     * output: ``List[Wall]`` instead of v1's tuple of parallel lists
-    * dropped the wall-point-assignment / per-wall rotation block —
-      that data was used by v1's own opening detection, which we don't
-      share
+    * dropped the wall-point-assignment / per-wall rotation block — that
+      data was used by v1's own opening detection, which we don't share
 
 Everything else (Z-band 85–120% of pc height, absolute density
 threshold 0.01, +1 pixel contour shift, swell-polygon-pair for
@@ -33,7 +27,29 @@ from cloud2bim.logging import get_logger
 log = get_logger(__name__)
 
 
-# ── Geometric helpers (mirrors aronfothi) ──────────────────────────────────
+# ── PCA helpers (mirrors master:_pca_dominant_angle / _rotate_pts_2d) ──────
+
+def _pca_dominant_angle(points_2d: np.ndarray) -> float:
+    pts = np.asarray(points_2d)
+    if len(pts) < 10:
+        return 0.0
+    cov = np.cov(pts.T)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    dominant = eigvecs[:, np.argmax(eigvals)]
+    angle = np.arctan2(dominant[1], dominant[0])
+    angle = angle % (np.pi / 2)
+    if angle > np.pi / 4:
+        angle -= np.pi / 2
+    return float(angle)
+
+
+def _rotate_pts_2d(pts: np.ndarray, angle: float) -> np.ndarray:
+    c, s = np.cos(angle), np.sin(angle)
+    R = np.array([[c, -s], [s, c]])
+    return (R @ np.asarray(pts).T).T
+
+
+# ── Geometric helpers (mirrors master) ─────────────────────────────────────
 
 def _get_line_segments(contour, pixel_size, segment_approximation_tolerance=0.02):
     """Douglas-Peucker simplification → list of (pt, pt) segments."""
@@ -323,10 +339,15 @@ def detect_walls_v1(
     log.info("Storey %d (v1): Z-band %.2f–%.2f m, %d points",
              storey_idx, z_band_lo, z_band_hi, int(z_mask.sum()))
 
-    # NOTE: aronfothi/Cloud2BIM master does NOT apply PCA rotation here.
-    # Slab polygon stays in original frame for the swell-pair step.
-    if slab_polygon_xy is not None:
-        slab_polygon_xy = np.asarray(slab_polygon_xy)
+    # PCA rotation
+    pca_angle = _pca_dominant_angle(points_2d)
+    do_rotate = abs(pca_angle) > np.radians(3)
+    if do_rotate:
+        log.info("Storey %d (v1): applying PCA rotation %.1f°",
+                 storey_idx, np.degrees(pca_angle))
+        points_2d = _rotate_pts_2d(points_2d, -pca_angle)
+        if slab_polygon_xy is not None:
+            slab_polygon_xy = _rotate_pts_2d(np.asarray(slab_polygon_xy), -pca_angle)
 
     # 2D histogram → binary mask
     pixel_size = pc_resolution * grid_coefficient
@@ -418,7 +439,12 @@ def detect_walls_v1(
     # Snap intersections
     wall_axes = _adjust_intersections(wall_axes, cfg.max_thickness)
 
-    # No inverse PCA rotation needed — aronfothi v1 never rotated.
+    # Inverse PCA rotation
+    if do_rotate:
+        for ax in wall_axes:
+            rot = _rotate_pts_2d(np.array(ax), pca_angle)
+            ax[0] = rot[0].tolist()
+            ax[1] = rot[1].tolist()
 
     # Safety cap
     if len(wall_axes) > cfg.max_walls_per_storey:
