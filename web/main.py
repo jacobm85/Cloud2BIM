@@ -737,6 +737,43 @@ async def list_dxf_storeys(job_id: str):
     return {"storeys": len(data["walls"])}
 
 
+@app.get("/api/jobs/{job_id}/stats")
+async def get_job_stats(job_id: str):
+    """Detected-element counts read straight from the pickled stage outputs.
+
+    Works for both pipeline and wizard runs — the log-scraper approach
+    only worked for the full pipeline which writes a final summary line.
+    """
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    job_dir = JOBS_DIR / job_id
+    d = _load_storey_data(job_dir)
+    n_slabs = len(d["slabs"])
+    n_storeys = max(0, n_slabs - 1)
+    n_walls = sum(len(s) for s in d["walls"])
+    n_openings = sum(len(s) for s in d["openings"])
+    n_doors = sum(1 for s in d["openings"] for op in s if getattr(op, "type", "") == "door")
+    n_windows = sum(1 for s in d["openings"] for op in s if getattr(op, "type", "") == "window")
+    n_columns = sum(len(s) for s in d["columns"])
+    n_stairs = sum(len(s) for s in d["stairs"])
+    # Roofs are stored separately, single list (not per-storey)
+    n_roofs = 0
+    roofs_pkl = job_dir / "roofs.pkl"
+    if roofs_pkl.exists():
+        try:
+            import pickle
+            with roofs_pkl.open("rb") as f:
+                n_roofs = len(pickle.load(f))
+        except Exception:
+            pass
+    return {
+        "slabs": n_slabs, "storeys": n_storeys, "walls": n_walls,
+        "openings": n_openings, "windows": n_windows, "doors": n_doors,
+        "columns": n_columns, "stairs": n_stairs, "roofs": n_roofs,
+    }
+
+
 @app.get("/api/jobs/{job_id}/dxf/{storey_idx}")
 async def export_storey_dxf(job_id: str, storey_idx: int):
     """Generate and return a DXF for one storey."""
@@ -788,7 +825,7 @@ class RunStageRequest(BaseModel):
     max_walls_per_storey: Optional[int] = None
     # Cross-section bands as a flat list of [z_min, z_max, z_min, z_max, ...]
     # one pair per storey. None entries (passed as [null, null]) keep the
-    # default 30-130 cm above-floor band.
+    # default 130-160 cm above-floor band.
     cross_section_bands: Optional[List[Optional[List[float]]]] = None
 
 
@@ -871,27 +908,20 @@ async def run_stage(job_id: str, req: RunStageRequest):
     return {"ok": True, "stage": req.stage}
 
 
-@app.get("/api/jobs/{job_id}/z_histogram.png")
-async def z_histogram_image(job_id: str):
-    """Render the Z-histogram PNG on demand using saved state."""
-    job_dir = JOBS_DIR / job_id
+def _render_z_histogram(job_dir: Path, bands_override=None) -> Path:
+    """Render the Z-histogram PNG. Returns the path."""
+    import pickle
+    from cloud2bim.preview import render_z_histogram
     zh_path = job_dir / "z_histogram.pkl"
-    if not zh_path.exists():
-        raise HTTPException(404, "Z-histogram not yet computed — run 'slabs' stage first")
-
     out = job_dir / "z_histogram.png"
-
-    def _render():
-        import pickle
-        from cloud2bim.preview import render_z_histogram
-        with open(zh_path, "rb") as fh:
-            zh = pickle.load(fh)
-        slabs_path = job_dir / "slabs.pkl"
-        slabs = None
-        if slabs_path.exists():
-            with open(slabs_path, "rb") as fh:
-                slabs = pickle.load(fh)
-        # Read cross-section bands from current config
+    with open(zh_path, "rb") as fh:
+        zh = pickle.load(fh)
+    slabs_path = job_dir / "slabs.pkl"
+    slabs = None
+    if slabs_path.exists():
+        with open(slabs_path, "rb") as fh:
+            slabs = pickle.load(fh)
+    if bands_override is None:
         cfg_path = job_dir / "config.yaml"
         bands = None
         if cfg_path.exists():
@@ -899,10 +929,40 @@ async def z_histogram_image(job_id: str):
                 cfg = yaml.safe_load(fh) or {}
             raw = (cfg.get("walls") or {}).get("cross_section_bands") or []
             bands = [tuple(b) if b else None for b in raw]
-        render_z_histogram(out, zh.bin_centers, zh.counts, zh.peak_z,
-                           slabs=slabs, cross_section_bands=bands)
+    else:
+        bands = bands_override
+    render_z_histogram(out, zh.bin_centers, zh.counts, zh.peak_z,
+                       slabs=slabs, cross_section_bands=bands)
+    return out
 
-    await asyncio.to_thread(_render)
+
+@app.get("/api/jobs/{job_id}/z_histogram.png")
+async def z_histogram_image(job_id: str):
+    """Render the Z-histogram PNG on demand using saved state."""
+    job_dir = JOBS_DIR / job_id
+    zh_path = job_dir / "z_histogram.pkl"
+    if not zh_path.exists():
+        raise HTTPException(404, "Z-histogram not yet computed — run 'slabs' stage first")
+    out = await asyncio.to_thread(_render_z_histogram, job_dir, None)
+    return FileResponse(str(out), media_type="image/png")
+
+
+class BandsRequest(BaseModel):
+    """Live-preview bands for the Z-histogram. Each entry is [z_min, z_max]
+    or null to use the default for that storey."""
+    bands: List[Optional[List[float]]]
+
+
+@app.post("/api/jobs/{job_id}/z_histogram.png")
+async def z_histogram_image_with_bands(job_id: str, req: BandsRequest):
+    """Same as GET but lets the client preview a band selection without
+    writing the config (used for live updates while the user drags inputs)."""
+    job_dir = JOBS_DIR / job_id
+    zh_path = job_dir / "z_histogram.pkl"
+    if not zh_path.exists():
+        raise HTTPException(404, "Z-histogram not yet computed — run 'slabs' stage first")
+    bands = [tuple(b) if b and len(b) == 2 else None for b in (req.bands or [])]
+    out = await asyncio.to_thread(_render_z_histogram, job_dir, bands)
     return FileResponse(str(out), media_type="image/png")
 
 
@@ -965,6 +1025,43 @@ async def select_slabs(job_id: str, req: SlabSelectRequest):
         "total_before": len(slabs),
         "total_after": len(filtered),
     }
+
+
+class SlabEdit(BaseModel):
+    idx: int
+    bottom_z: Optional[float] = None
+    thickness: Optional[float] = None
+
+
+class SlabEditRequest(BaseModel):
+    edits: List[SlabEdit]
+
+
+@app.post("/api/jobs/{job_id}/slabs/edit")
+async def edit_slabs(job_id: str, req: SlabEditRequest):
+    """Apply per-slab bottom_z / thickness overrides to slabs.pkl.
+
+    The user can adjust the floor of each detected slab and its thickness
+    independently. Top is implied (bottom + thickness).
+    """
+    import pickle
+    job_dir = JOBS_DIR / job_id
+    slabs_path = job_dir / "slabs.pkl"
+    if not slabs_path.exists():
+        raise HTTPException(404, "Slabs not yet computed")
+    with open(slabs_path, "rb") as fh:
+        slabs = pickle.load(fh)
+    for e in req.edits:
+        if not 0 <= e.idx < len(slabs):
+            raise HTTPException(400, f"Slab index {e.idx} out of range")
+        s = slabs[e.idx]
+        if e.bottom_z is not None:
+            s.bottom_z = float(e.bottom_z)
+        if e.thickness is not None:
+            s.thickness = max(0.01, float(e.thickness))
+    with open(slabs_path, "wb") as fh:
+        pickle.dump(slabs, fh)
+    return {"ok": True, "count": len(slabs)}
 
 
 class CrossSectionRequest(BaseModel):

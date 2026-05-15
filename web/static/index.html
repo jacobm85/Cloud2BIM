@@ -376,13 +376,13 @@
 
         <ol class="stage-list" id="wizard-stages">
           <li data-stage="prepare"><span class="stage-tick">·</span> Förberedelse — läs in, gleslägg, centrera, crop</li>
-          <li data-stage="segment"><span class="stage-tick">·</span> ML-segmentering (eller passthrough)</li>
+          <li data-stage="segment"><span class="stage-tick">·</span> ML-segmentering</li>
           <li data-stage="slabs"><span class="stage-tick">·</span> Bjälklag — Z-histogram &amp; golv/tak-detektion</li>
           <li data-stage="walls"><span class="stage-tick">·</span> Väggar — horisontellt tvärsnitt per våning</li>
           <li data-stage="openings"><span class="stage-tick">·</span> Öppningar (fönster, dörrar)</li>
-          <li data-stage="columns"><span class="stage-tick">·</span> Pelare (om aktiverat)</li>
-          <li data-stage="stairs"><span class="stage-tick">·</span> Trappor (om aktiverat)</li>
-          <li data-stage="roofs"><span class="stage-tick">·</span> Tak (om aktiverat)</li>
+          <li data-stage="columns"><span class="stage-tick">·</span> Pelare</li>
+          <li data-stage="stairs"><span class="stage-tick">·</span> Trappor</li>
+          <li data-stage="roofs"><span class="stage-tick">·</span> Tak</li>
           <li data-stage="ifc"><span class="stage-tick">·</span> IFC-export + planlösningspreview</li>
         </ol>
 
@@ -427,6 +427,15 @@
         <button type="button" id="btn-open-viewer" class="btn btn-primary btn-lg" style="display:none" onclick="window.open('/static/bim-viewer.html?job='+window._state.jobId,'_blank')">
           🏗&nbsp; Öppna 3D-viewer
         </button>
+      </div>
+
+      <div style="margin-top:16px">
+        <div style="font-weight:600;margin-bottom:6px">Exportera 2D-plan (DXF)</div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
+          En fil per våning. Lager: SLAB_OUTLINE, WALLS (väggens ytterkant),
+          WALL_AXIS, WINDOWS, DOORS, COLUMNS, STAIRS.
+        </div>
+        <div id="result-dxf-buttons" style="display:flex;gap:8px;flex-wrap:wrap"></div>
       </div>
     </div>
 

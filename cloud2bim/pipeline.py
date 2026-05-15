@@ -25,7 +25,7 @@ import numpy as np
 from cloud2bim.config import Config
 from cloud2bim.elements.openings import detect_openings
 from cloud2bim.elements.roofs import detect_roofs
-from cloud2bim.elements.slabs import Slab, detect_slabs
+from cloud2bim.elements.slabs import Slab, compute_building_pca, compute_z_histogram, detect_slabs
 from cloud2bim.elements.walls import detect_walls
 from cloud2bim.ifc import IfcBuilder
 from cloud2bim.io import center_xy, read_pointcloud
@@ -62,13 +62,27 @@ def run_pipeline(cfg: Config) -> int:
     else:
         offset = CoordinateOffset(0, 0, 0)
 
+    # Persist the prepared point cloud so the web viewer can overlay it on
+    # the IFC. (The wizard already does this in its prepare stage; the full
+    # pipeline produced no points.npz before.)
+    try:
+        work = Path(cfg.io.work_dir)
+        work.mkdir(parents=True, exist_ok=True)
+        np.savez(work / "points.npz",
+                 xyz=points_xyz.astype(np.float32),
+                 offset=np.array([offset.x, offset.y, offset.z], dtype=np.float64))
+    except Exception as exc:
+        log.warning("Could not save points.npz for viewer overlay: %s", exc)
+
     # ── 4. Semantic segmentation ────────────────────────────────────────
     labels = _run_segmentation(cfg, points_xyz)
 
     # ── 5. Slab detection ───────────────────────────────────────────────
     log.info("─── Slab segmentation ───")
     t0 = time.time()
-    slabs = detect_slabs(points_xyz, cfg.slabs)
+    zh = compute_z_histogram(points_xyz, cfg.slabs.z_step, cfg.slabs.peak_height_ratio)
+    building_pca_angle = compute_building_pca(points_xyz, zh.peak_z)
+    slabs = detect_slabs(points_xyz, cfg.slabs, pca_angle=building_pca_angle)
     log.info("Slabs: %d in %.1fs", len(slabs), time.time() - t0)
 
     # Synthesize missing floor/ceiling so we can still emit placeholder walls
@@ -114,6 +128,7 @@ def run_pipeline(cfg: Config) -> int:
                 semantic_labels=storey_labels,
                 exterior_scan=cfg.exterior_scan,
                 cross_section_band=band_override,
+                pca_angle=building_pca_angle,
             )
             if is_placeholder:
                 for w in walls:

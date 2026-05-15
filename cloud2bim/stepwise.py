@@ -199,8 +199,24 @@ def stage_segment(cfg: Config) -> None:
     log.info("segment: %.1fs", time.time() - t0)
 
 
+def _pca_angle_path(cfg: Config) -> Path:
+    return Path(cfg.io.work_dir) / "pca_angle.json"
+
+
+def load_pca_angle(cfg: Config) -> float:
+    """Load the shared building PCA angle (radians); 0 if not yet computed."""
+    p = _pca_angle_path(cfg)
+    if not p.exists():
+        return 0.0
+    try:
+        return float(json.loads(p.read_text()).get("pca_angle_rad", 0.0))
+    except Exception:
+        return 0.0
+
+
 def stage_slabs(cfg: Config) -> None:
-    """Z-histogram → slab detection."""
+    """Z-histogram → slab detection. Also persists the shared PCA angle."""
+    from cloud2bim.elements.slabs import compute_building_pca
     log.info("─── slabs ───")
     t0 = time.time()
     if not cfg.slabs.enabled:
@@ -212,20 +228,23 @@ def stage_slabs(cfg: Config) -> None:
         log.info("slabs: disabled (skipping)")
         return
     pts, _ = load_points(cfg)
-    slabs = detect_slabs(pts, cfg.slabs)
     zh = compute_z_histogram(pts, cfg.slabs.z_step, cfg.slabs.peak_height_ratio)
+    pca_angle = compute_building_pca(pts, zh.peak_z)
+    slabs = detect_slabs(pts, cfg.slabs, pca_angle=pca_angle)
     work = Path(cfg.io.work_dir)
     _save_pickle(work / "slabs.pkl", slabs)
     _save_pickle(work / "z_histogram.pkl", zh)
+    _pca_angle_path(cfg).write_text(json.dumps({"pca_angle_rad": float(pca_angle)}))
     write_state(cfg, "slabs")
-    log.info("slabs: %d in %.1fs", len(slabs), time.time() - t0)
+    log.info("slabs: %d in %.1fs (PCA %.1f°)",
+             len(slabs), time.time() - t0, float(np.degrees(pca_angle)))
 
 
 def stage_walls(cfg: Config) -> None:
     """Per-storey wall detection.
 
     Uses ``cfg.walls.cross_section_bands`` (one (z_min, z_max) per storey)
-    to override the default 30–130 cm above-floor band when provided.
+    to override the default 130–160 cm above-floor band when provided.
     """
     from cloud2bim.pipeline import _synthesize_slabs  # avoid circular import
     log.info("─── walls ───")
@@ -238,6 +257,7 @@ def stage_walls(cfg: Config) -> None:
     pts, _ = load_points(cfg)
     labels = load_labels(cfg)
     slabs = load_slabs(cfg)
+    building_pca_angle = load_pca_angle(cfg)
 
     placeholder_storeys: set[int] = set()
     if len(slabs) < 2:
@@ -276,6 +296,7 @@ def stage_walls(cfg: Config) -> None:
                 semantic_labels=storey_labels,
                 exterior_scan=cfg.exterior_scan,
                 cross_section_band=band_override,
+                pca_angle=building_pca_angle,
             )
             if is_placeholder:
                 for w in walls:

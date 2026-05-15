@@ -70,12 +70,39 @@ def compute_z_histogram(
     return ZHistogram(bin_centers, hist, peak_z, float(threshold))
 
 
+def compute_building_pca(points_xyz: np.ndarray, peak_z: list[float]) -> float:
+    """Return the dominant orientation of the building, in radians.
+
+    Uses points inside a representative cross-section band — same kind of
+    slice the wall detector takes — so the angle here matches what walls
+    will compute later. If no useful slice can be found, returns 0.
+    """
+    if len(points_xyz) == 0:
+        return 0.0
+    # Prefer a 1m band centred between the lowest and highest detected
+    # horizontal surface — that's almost certainly inside a storey.
+    if peak_z and len(peak_z) >= 2:
+        z_centre = (peak_z[0] + peak_z[-1]) / 2.0
+    else:
+        z = points_xyz[:, 2]
+        z_centre = float((z.min() + z.max()) / 2.0)
+    band_mask = np.abs(points_xyz[:, 2] - z_centre) <= 0.5
+    band_pts = points_xyz[band_mask, :2]
+    if len(band_pts) < 100:
+        band_pts = points_xyz[:, :2]
+    if len(band_pts) > 200_000:
+        band_pts = band_pts[:: max(1, len(band_pts) // 200_000)]
+    angle = float(dominant_angle(band_pts))
+    return angle if abs(angle) > np.radians(3) else 0.0
+
+
 def detect_slabs(
     points_xyz: np.ndarray,
     cfg: SlabConfig,
     *,
     bottom_floor_thickness: float | None = None,
     top_floor_thickness: float | None = None,
+    pca_angle: float | None = None,
 ) -> List[Slab]:
     """Detect horizontal slabs from a point cloud.
 
@@ -99,21 +126,22 @@ def detect_slabs(
     z = points_xyz[:, 2]
     log.info("Slab Z-range: %.2f .. %.2f m", float(z.min()), float(z.max()))
 
-    # Building-wide PCA: rotate slabs the same way walls will, so the slab
-    # outline follows the building's actual axes instead of the world axes.
-    # Sample at the densest Z-band (most likely a slab) for a stable angle.
-    pca_sample = points_xyz[::max(1, len(points_xyz) // 200_000)]
-    building_pca_angle = float(dominant_angle(pca_sample[:, :2]))
-    if abs(building_pca_angle) > np.radians(3):
-        log.info(
-            "Slabs: applying building PCA rotation %.1f° for hull extraction",
-            np.degrees(building_pca_angle),
-        )
-    else:
-        building_pca_angle = 0.0
-
     zh = compute_z_histogram(points_xyz, cfg.z_step, cfg.peak_height_ratio)
     log.info("Found %d horizontal-surface peaks", len(zh.peak_z))
+
+    # Building-wide PCA: rotate slabs the same way walls will, so the slab
+    # outline follows the building's actual axes instead of the world axes.
+    # If the caller passed in an angle (set once for the whole building),
+    # honour it so walls and slabs share one rotation.
+    if pca_angle is None:
+        building_pca_angle = compute_building_pca(points_xyz, zh.peak_z)
+    else:
+        building_pca_angle = float(pca_angle)
+    if abs(building_pca_angle) > np.radians(3):
+        log.info("Slabs: applying PCA rotation %.1f° for hull extraction",
+                 np.degrees(building_pca_angle))
+    else:
+        building_pca_angle = 0.0
 
     if not zh.peak_z:
         log.warning(

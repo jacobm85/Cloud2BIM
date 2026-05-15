@@ -147,7 +147,7 @@ class WallConfig(BaseModel):
         description=(
             "Per-storey absolute Z-band overrides for the wall cross-section. "
             "Each entry is [z_min, z_max] in metres (world Z); empty/null = "
-            "use the default 30-130 cm above-floor band. Wizard mode lets "
+            "use the default 130-160 cm above-floor band. Wizard mode lets "
             "the user set these via the histogram slider."
         ),
     )

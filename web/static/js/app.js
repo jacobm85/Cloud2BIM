@@ -424,36 +424,43 @@ async function setupResults() {
   dlBtn.style.display = 'inline-flex';
   const viewBtn = document.getElementById('btn-open-viewer');
   if (viewBtn) viewBtn.style.display = 'inline-flex';
-  const job = await fetch('/api/jobs/' + state.jobId).then(r => r.json());
-  renderStats(parseStats(job.log_lines || []));
+  try {
+    const stats = await fetch('/api/jobs/' + state.jobId + '/stats').then(r => r.json());
+    renderStats(stats);
+  } catch (e) {
+    renderStats({ storeys: 0, walls: 0, slabs: 0, openings: 0, roofs: 0 });
+  }
+  renderResultDxfButtons();
   if (typeof window.loadViewer === 'function') window.loadViewer(state.jobId);
 }
 
-function parseStats(lines) {
-  // v2 final summary: "DONE in N.Ns: 3 slabs, 14 walls, 7 openings, 0 roof planes"
-  const s = { walls: 0, slabs: 0, windows: 0, doors: 0, storeys: 0, openings: 0, roofs: 0 };
-  for (const line of lines) {
-    let m = line.match(/DONE in [\d.]+s:\s*(\d+)\s+slabs?,\s*(\d+)\s+walls?,\s*(\d+)\s+openings?,\s*(\d+)\s+roof/i);
-    if (m) {
-      s.slabs = +m[1];
-      s.walls = +m[2];
-      s.openings = +m[3];
-      s.roofs = +m[4];
-    }
-  }
-  s.storeys = s.slabs > 1 ? s.slabs - 1 : Math.min(s.slabs, 1);
-  // Doors and windows aren't broken out in summary; show combined as "Öppningar"
-  s.windows = s.openings;
-  s.doors = 0;
-  return s;
-}
-
 function renderStats(s) {
-  document.getElementById('result-stats').innerHTML =
-    [['Våningar', s.storeys], ['Väggar', s.walls], ['Bjälklag', s.slabs],
-     ['Öppningar', s.openings || 0], ['Tak', s.roofs || 0]]
+  const rows = [
+    ['Våningar', s.storeys ?? 0], ['Väggar', s.walls ?? 0],
+    ['Bjälklag', s.slabs ?? 0], ['Öppningar', s.openings ?? 0],
+    ['Pelare', s.columns ?? 0], ['Trappor', s.stairs ?? 0],
+    ['Tak', s.roofs ?? 0],
+  ];
+  document.getElementById('result-stats').innerHTML = rows
     .map(([l, n]) => '<div class="stat-box"><div class="stat-num">' + n +
       '</div><div class="stat-label">' + l + '</div></div>').join('');
+}
+
+async function renderResultDxfButtons() {
+  const wrap = document.getElementById('result-dxf-buttons');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  try {
+    const res = await fetch('/api/jobs/' + state.jobId + '/dxf/storeys');
+    if (!res.ok) return;
+    const { storeys } = await res.json();
+    if (!storeys) return;
+    const buttons = [];
+    for (let i = 0; i < storeys; i++) {
+      buttons.push(`<a class="btn btn-outline" href="/api/jobs/${state.jobId}/dxf/${i}" download>⬇ Plan våning ${i} (.dxf)</a>`);
+    }
+    wrap.innerHTML = buttons.join('');
+  } catch (e) { /* DXF is optional */ }
 }
 
 // ── Config collector ──────────────────────────────────────────────────────
@@ -514,7 +521,7 @@ const STAGE_INFO = {
   },
   walls: {
     title: 'Väggar',
-    desc: 'För varje våning tas ett horisontellt snitt 30–130 cm över golvet och 2D-histogrammet ger väggsegment. Du kan välja Z-snittet manuellt här om bjälklagsdetektionen blev fel.',
+    desc: 'För varje våning tas ett horisontellt snitt 130–160 cm över golvet och 2D-histogrammet ger väggsegment. Du kan välja Z-snittet manuellt här om bjälklagsdetektionen blev fel.',
   },
   openings: {
     title: 'Öppningar',
@@ -819,19 +826,21 @@ async function renderSlabsReview() {
     const data = await fetch('/api/jobs/' + wizard.jobId + '/slabs').then(r => r.json());
     wizard.slabsData = data;
     wizard.slabCount = data.slabs.length;
-    // Initialize default bands: floor+0.30 to floor+1.30 per storey
+    // Initialize default bands: floor+1.30 to floor+1.60 per storey
     wizard.bands = [];
     for (let i = 0; i < data.slabs.length - 1; i++) {
       const floor = data.slabs[i].top_z;
-      wizard.bands.push({ z_min: floor + 0.30, z_max: floor + 1.30 });
+      wizard.bands.push({ z_min: floor + 1.30, z_max: floor + 1.60 });
     }
     const rows = data.slabs.map((s, i) => `
       <tr>
         <td><input type="checkbox" class="slab-keep" data-idx="${i}" checked></td>
         <td>${i}</td>
-        <td align="right">${s.bottom_z.toFixed(3)}</td>
-        <td align="right">${s.top_z.toFixed(3)}</td>
-        <td align="right">${Math.round(s.thickness*1000)} mm</td>
+        <td><input type="number" class="slab-bottom" data-idx="${i}" step="0.01"
+                   value="${s.bottom_z.toFixed(3)}" style="width:90px;font-size:12px"></td>
+        <td><input type="number" class="slab-thick" data-idx="${i}" step="0.005" min="0.01"
+                   value="${s.thickness.toFixed(3)}" style="width:80px;font-size:12px"></td>
+        <td align="right" class="slab-top" data-idx="${i}">${s.top_z.toFixed(3)}</td>
       </tr>`).join('');
     extra.innerHTML = `
       <div class="stage-preview-row">
@@ -841,21 +850,34 @@ async function renderSlabsReview() {
         <div style="padding:12px">
           <div style="font-weight:600;margin-bottom:8px">Identifierade bjälklag (${data.slabs.length})</div>
           <table style="width:100%;font-size:12px;border-collapse:collapse">
-            <thead><tr style="color:var(--text-dim)"><th align="left">Behåll</th><th align="left">#</th><th align="right">Botten (m)</th><th align="right">Topp (m)</th><th align="right">Tjocklek</th></tr></thead>
+            <thead><tr style="color:var(--text-dim)">
+              <th align="left">Behåll</th><th align="left">#</th>
+              <th align="left">Botten (m)</th><th align="left">Tjocklek (m)</th>
+              <th align="right">Topp (m)</th>
+            </tr></thead>
             <tbody>${rows}</tbody>
           </table>
           <div style="margin-top:10px;font-size:11px;color:var(--text-dim)">
-            ${data.peak_z.length} Z-toppar hittades. Avmarkera bjälklag som inte ska räknas
-            (t.ex. falsk topp som tolkades som en extra våning) och klicka "Tillämpa urval".
+            ${data.peak_z.length} Z-toppar hittades. Justera botten/tjocklek vid behov,
+            avmarkera bjälklag som inte ska räknas, och klicka "Tillämpa".
             Du måste behålla minst 2 bjälklag (golv + tak) för att väggdetekteringen ska kunna köra.
           </div>
           <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
-            <button class="btn btn-outline" id="btn-apply-slab-select">Tillämpa urval</button>
+            <button class="btn btn-outline" id="btn-apply-slab-select">Tillämpa</button>
             <span id="slab-select-status" style="font-size:12px;color:var(--text-dim);align-self:center"></span>
           </div>
         </div>
       </div>`;
     document.getElementById('btn-apply-slab-select').onclick = applySlabSelection;
+    extra.querySelectorAll('.slab-bottom, .slab-thick').forEach(inp => {
+      inp.addEventListener('input', () => {
+        const idx = parseInt(inp.dataset.idx, 10);
+        const b = parseFloat(extra.querySelector(`.slab-bottom[data-idx="${idx}"]`).value) || 0;
+        const t = parseFloat(extra.querySelector(`.slab-thick[data-idx="${idx}"]`).value) || 0;
+        const topEl = extra.querySelector(`.slab-top[data-idx="${idx}"]`);
+        if (topEl) topEl.textContent = (b + t).toFixed(3);
+      });
+    });
   } catch (e) {
     extra.innerHTML = '<div class="alert alert-danger">Kunde inte ladda bjälklagsdata: ' + e.message + '</div>';
   }
@@ -873,6 +895,22 @@ async function applySlabSelection() {
   status.style.color = 'var(--text-dim)';
   status.textContent = 'Uppdaterar…';
   try {
+    // Apply per-slab bottom/thickness edits first (across all slabs, not
+    // just the kept ones — keeps indices stable for the next call).
+    const edits = Array.from(document.querySelectorAll('.slab-bottom')).map(inp => {
+      const idx = parseInt(inp.dataset.idx, 10);
+      const bottomEl = document.querySelector(`.slab-bottom[data-idx="${idx}"]`);
+      const thickEl  = document.querySelector(`.slab-thick[data-idx="${idx}"]`);
+      return {
+        idx,
+        bottom_z: bottomEl ? parseFloat(bottomEl.value) : null,
+        thickness: thickEl ? parseFloat(thickEl.value) : null,
+      };
+    });
+    await fetch('/api/jobs/' + wizard.jobId + '/slabs/edit', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ edits }),
+    });
     const res = await fetch('/api/jobs/' + wizard.jobId + '/slabs/select', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ keep_indices: keep }),
@@ -901,7 +939,7 @@ async function renderWallsReview() {
       if (wizard.bands.length === 0) {
         for (let i = 0; i < wizard.slabsData.slabs.length - 1; i++) {
           const floor = wizard.slabsData.slabs[i].top_z;
-          wizard.bands.push({ z_min: floor + 0.30, z_max: floor + 1.30 });
+          wizard.bands.push({ z_min: floor + 1.30, z_max: floor + 1.60 });
         }
       }
     } catch (e) { /* ignore — handled below */ }
@@ -915,14 +953,16 @@ async function renderWallsReview() {
       <div style="padding:12px;font-size:12px;line-height:1.55">
         <div style="font-weight:600;font-size:13px;margin-bottom:6px">Horisontellt tvärsnitt per våning</div>
         <p style="color:var(--text-dim);margin-bottom:8px">
-          Förslag: 30–130 cm över golvet. Om bjälklagsdetektionen gjorde fel —
+          Förslag: 130–160 cm över golvet. Om bjälklagsdetektionen gjorde fel —
           ändra Z min/max manuellt nedan. Snittet ritas automatiskt så du ser
           planlösningen direkt.
         </p>
         <div style="color:var(--text-dim)">${numStoreys} våning${numStoreys === 1 ? '' : 'ar'} hittade.</div>
       </div>
     </div>
-    <div id="storey-bands"></div>`;
+    <div id="storey-bands"></div>
+    <div id="walls-dxf-section" style="margin-top:14px"></div>`;
+  renderWallsDxfButtons();
   const list = document.getElementById('storey-bands');
   if (numStoreys === 0) {
     list.innerHTML = '<div class="alert alert-danger">Inga våningar — bjälklagsdetektionen gav färre än 2 bjälklag. Kör om "Bjälklag"-steget med andra inställningar.</div>';
@@ -949,24 +989,65 @@ async function renderWallsReview() {
     renderCrossSection(i, band.z_min, band.z_max);
   }
   const debouncers = {};
+  let histDebouncer = null;
   list.addEventListener('input', e => {
     const storey = parseInt(e.target.dataset.storey, 10);
     if (Number.isNaN(storey)) return;
     if (e.target.classList.contains('band-min')) wizard.bands[storey].z_min = parseFloat(e.target.value);
     if (e.target.classList.contains('band-max')) wizard.bands[storey].z_max = parseFloat(e.target.value);
-    // Debounce live re-render
     if (debouncers[storey]) clearTimeout(debouncers[storey]);
     debouncers[storey] = setTimeout(() => {
       const b = wizard.bands[storey];
       renderCrossSection(storey, b.z_min, b.z_max);
     }, 600);
+    if (histDebouncer) clearTimeout(histDebouncer);
+    histDebouncer = setTimeout(refreshHistogramWithBands, 500);
   });
   list.addEventListener('click', async e => {
     if (e.target.dataset.action !== 'preview') return;
     const storey = parseInt(e.target.dataset.storey, 10);
     const band = wizard.bands[storey];
     await renderCrossSection(storey, band.z_min, band.z_max);
+    refreshHistogramWithBands();
   });
+}
+
+async function renderWallsDxfButtons() {
+  const wrap = document.getElementById('walls-dxf-section');
+  if (!wrap) return;
+  try {
+    const res = await fetch('/api/jobs/' + wizard.jobId + '/dxf/storeys');
+    if (!res.ok) { wrap.innerHTML = ''; return; }
+    const { storeys } = await res.json();
+    if (!storeys) { wrap.innerHTML = ''; return; }
+    const buttons = [];
+    for (let i = 0; i < storeys; i++) {
+      buttons.push(`<a class="btn btn-outline" href="/api/jobs/${wizard.jobId}/dxf/${i}" download>⬇ Plan våning ${i} (.dxf)</a>`);
+    }
+    wrap.innerHTML = `
+      <div style="padding:12px;background:var(--surface2);border-radius:8px">
+        <div style="font-weight:600;margin-bottom:6px">Exportera 2D-plan (DXF) — väggar + bjälklagskontur</div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
+          En fil per våning. Öppningar/pelare/trappor läggs till om de detekterats senare.
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">${buttons.join('')}</div>
+      </div>`;
+  } catch (e) { wrap.innerHTML = ''; }
+}
+
+async function refreshHistogramWithBands() {
+  const img = document.getElementById('walls-z-hist');
+  if (!img) return;
+  try {
+    const bands = wizard.bands.map(b => b ? [b.z_min, b.z_max] : null);
+    const res = await fetch('/api/jobs/' + wizard.jobId + '/z_histogram.png', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bands }),
+    });
+    if (!res.ok) return;
+    const blob = await res.blob();
+    img.src = URL.createObjectURL(blob);
+  } catch (e) { /* histogram update is cosmetic */ }
 }
 
 async function renderCrossSection(storey, zMin, zMax) {

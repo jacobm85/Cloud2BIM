@@ -56,15 +56,20 @@ def detect_walls(
     semantic_labels: Optional[SemanticLabels] = None,
     exterior_scan: bool = False,
     cross_section_band: Optional[tuple[float, float]] = None,
+    pca_angle: Optional[float] = None,
 ) -> List[Wall]:
     """Extract wall axes from a single storey's points.
 
     ``semantic_labels`` is per-point — if provided and ``cfg.use_ml_filter``
     is true, only wall-classified points feed the histogram.
 
-    ``cross_section_band`` overrides the default 30–130 cm above-floor band.
+    ``cross_section_band`` overrides the default 130–160 cm above-floor band.
     When set, the tuple is interpreted as absolute world Z (m) — useful when
     the user has hand-picked a band from the Z-histogram in the UI.
+
+    ``pca_angle`` overrides the per-storey PCA computation. Pass the same
+    angle that slab extraction used to keep walls and slab outlines in the
+    same rotated frame.
     """
     if len(storey_points) == 0:
         log.warning("Storey %d: empty point cloud — no walls", storey_idx)
@@ -87,7 +92,7 @@ def detect_walls(
             log.warning("Storey %d: no wall-labelled points; using all", storey_idx)
 
     # 2. Horizontal cross-section.
-    #    Default is 30–130 cm above the floor — that height contains wall
+    #    Default is 130–160 cm above the floor — that height contains wall
     #    faces but mostly misses furniture tops. The caller can override via
     #    ``cross_section_band`` after picking it from the Z-histogram in the
     #    UI; that's important when slabs were misdetected and z_floor is off.
@@ -95,8 +100,8 @@ def detect_walls(
         band_lo, band_hi = float(cross_section_band[0]), float(cross_section_band[1])
         band_label = "absolute Z"
     else:
-        band_lo = z_floor + 0.30
-        band_hi = z_floor + 1.30
+        band_lo = z_floor + 1.30
+        band_hi = z_floor + 1.60
         band_label = "floor-relative"
     band_mask = (pts_for_walls[:, 2] >= band_lo) & (pts_for_walls[:, 2] <= band_hi)
     if not band_mask.any():
@@ -111,8 +116,10 @@ def detect_walls(
         storey_idx, band_lo, band_hi, band_label, f"{band_mask.sum():,}",
     )
 
-    # 3. PCA rotation
-    pca_angle = dominant_angle(points_2d)
+    # 3. PCA rotation — use the caller-provided angle when given so walls
+    #    and slabs end up in the same rotated frame.
+    if pca_angle is None:
+        pca_angle = dominant_angle(points_2d)
     do_rotate = abs(pca_angle) > np.radians(3)
     if do_rotate:
         log.info("Storey %d: applying PCA rotation %.1f°", storey_idx, np.degrees(pca_angle))

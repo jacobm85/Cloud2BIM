@@ -278,16 +278,16 @@ let pointCloud = null;
 let pointCloudCount = 0;
 refreshLegendCounts();
 
-// Hide point-cloud row until it's loaded (Feature 3)
+// Hide point-cloud row until it's loaded
 const pcRow = legendRows().find(r => (r.dataset.types || '') === '__pointcloud__');
 if (pcRow) {
   pcRow.style.display = 'none'; // hidden until point cloud is fetched
 }
 
-// ── Point cloud overlay (Feature 3) ────────────────────────────────────────
+// ── Point cloud overlay ───────────────────────────────────────────────────
 async function loadPointCloud() {
   try {
-    const res = await fetch(`/api/jobs/${jobId}/pointcloud.bin?max_points=120000`);
+    const res = await fetch(`/api/jobs/${jobId}/pointcloud.bin?max_points=150000`);
     if (!res.ok) return;  // silently skip — viewer still works
     const buf = await res.arrayBuffer();
     const arr = new Float32Array(buf);
@@ -295,24 +295,40 @@ async function loadPointCloud() {
     pointCloudCount = arr.length / 3;
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(arr, 3));
-    // Pick a point size proportional to the model — small models need
-    // smaller points; large ones need bigger ones for visibility.
     geom.computeBoundingBox();
     const bb = geom.boundingBox;
     const span = Math.max(
       bb.max.x - bb.min.x, bb.max.y - bb.min.y, bb.max.z - bb.min.z,
     );
-    const pointSize = Math.max(0.03, span * 0.0012);
+    // Opaque points with a sane size — transparent+depthWrite=false made
+    // them invisible behind the walls in earlier iterations.
+    const pointSize = Math.max(0.04, span * 0.002);
     const mat = new THREE.PointsMaterial({
-      color: 0x76c8e8, size: pointSize, sizeAttenuation: true,
-      transparent: true, opacity: 0.75, depthWrite: false,
+      color: 0x9dd4ee, size: pointSize, sizeAttenuation: true,
     });
     pointCloud = new THREE.Points(geom, mat);
     pointCloud.visible = true;  // on by default so the user sees it
     root.add(pointCloud);
+
+    // Re-fit camera to include points + IFC together (points may extend
+    // past the IFC bbox, e.g. cropped scan with leftover periphery).
+    const both = new THREE.Box3().setFromObject(root);
+    if (!both.isEmpty()) {
+      const center = both.getCenter(new THREE.Vector3());
+      const size   = both.getSize(new THREE.Vector3());
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const dist   = maxDim * 1.8;
+      camera.position.set(center.x + dist * 0.6, center.y + dist * 0.5, center.z + dist);
+      camera.near = dist * 0.001;
+      camera.far  = dist * 10;
+      camera.updateProjectionMatrix();
+      controls.target.copy(center);
+      controls.update();
+    }
+
     if (pcRow) {
       pcRow.style.display = '';
-      pcRow.classList.remove('off');  // match visible=true
+      pcRow.classList.remove('off');
       refreshLegendCounts();
     }
   } catch (e) { /* point cloud is optional */ }
