@@ -1,11 +1,23 @@
-"""V1 wall detection ported from master:aux_functions.py.
+"""V1 wall detection ported from VaclavNezerka/Cloud2BIM master:aux_functions.py.
 
-Bit-for-bit reproduction of the original ``identify_walls`` plus its
-helpers. The only adaptations:
-    * input: full storey ``pointcloud`` (Nx3) instead of split arrays
+Reference: https://github.com/VaclavNezerka/Cloud2BIM (master branch, the
+upstream of this repo). Note: our LOCAL master branch has diverged from
+upstream — it added a PCA rotation step and lowered the slab density
+threshold. This port follows UPSTREAM, which is the version the user has
+empirically validated.
+
+Adaptations from the original:
+    * input: full storey ``pointcloud`` (Nx3) instead of zipped lists
     * output: ``List[Wall]`` instead of v1's tuple of parallel lists
     * dropped the wall-point-assignment / per-wall rotation block — that
       data was used by v1's own opening detection, which we don't share
+    * defensive guards added so the function returns ``[]`` cleanly on
+      degenerate inputs instead of raising
+    * ``_calculate_wall_axis``: replaced ``group[1 - argmax(lengths)]``
+      with ``group[argmin(lengths)]`` — the original line was only
+      correct for size-2 groups; merge_collinear + the swell-polygon
+      facade pass routinely produce groups of size 3+ where ``1-argmax``
+      picks a semi-random non-longest segment.
 
 Everything else (Z-band 85–120% of pc height, absolute density
 threshold 0.01, +1 pixel contour shift, swell-polygon-pair for
@@ -27,29 +39,7 @@ from cloud2bim.logging import get_logger
 log = get_logger(__name__)
 
 
-# ── PCA helpers (mirrors master:_pca_dominant_angle / _rotate_pts_2d) ──────
-
-def _pca_dominant_angle(points_2d: np.ndarray) -> float:
-    pts = np.asarray(points_2d)
-    if len(pts) < 10:
-        return 0.0
-    cov = np.cov(pts.T)
-    eigvals, eigvecs = np.linalg.eigh(cov)
-    dominant = eigvecs[:, np.argmax(eigvals)]
-    angle = np.arctan2(dominant[1], dominant[0])
-    angle = angle % (np.pi / 2)
-    if angle > np.pi / 4:
-        angle -= np.pi / 2
-    return float(angle)
-
-
-def _rotate_pts_2d(pts: np.ndarray, angle: float) -> np.ndarray:
-    c, s = np.cos(angle), np.sin(angle)
-    R = np.array([[c, -s], [s, c]])
-    return (R @ np.asarray(pts).T).T
-
-
-# ── Geometric helpers (mirrors master) ─────────────────────────────────────
+# ── Geometric helpers (mirrors VaclavNezerka master) ───────────────────────
 
 def _get_line_segments(contour, pixel_size, segment_approximation_tolerance=0.02):
     """Douglas-Peucker simplification → list of (pt, pt) segments."""
@@ -209,12 +199,19 @@ def _group_segments(segments, max_wall_thickness, wall_label, angle_tolerance=5)
 
 
 def _calculate_wall_axis(group):
-    """v1 calculate_wall_axis: midpoint between the two longest segments."""
+    """v1 calculate_wall_axis: midline between the two faces of the wall.
+
+    Upstream uses ``shorter = group[1 - argmax(lengths)]`` which is only
+    correct for 2-segment groups. After merge_collinear and the
+    facade-swell pass groups often have 3+ segments, where that
+    expression picks the wrong segment. We pick the actually-shortest
+    via ``argmin(lengths)``; identical to upstream for size-2 groups.
+    """
     if len(group) < 2:
         return None, 0.0
     lengths = [_distance_between_points(s[0], s[1]) for s in group]
     longer = group[int(np.argmax(lengths))]
-    shorter = group[1 - int(np.argmax(lengths))]
+    shorter = group[int(np.argmin(lengths))]
     dx = longer[1][0] - longer[0][0]
     dy = longer[1][1] - longer[0][1]
     norm = math.hypot(dx, dy)
@@ -339,15 +336,11 @@ def detect_walls_v1(
     log.info("Storey %d (v1): Z-band %.2f–%.2f m, %d points",
              storey_idx, z_band_lo, z_band_hi, int(z_mask.sum()))
 
-    # PCA rotation
-    pca_angle = _pca_dominant_angle(points_2d)
-    do_rotate = abs(pca_angle) > np.radians(3)
-    if do_rotate:
-        log.info("Storey %d (v1): applying PCA rotation %.1f°",
-                 storey_idx, np.degrees(pca_angle))
-        points_2d = _rotate_pts_2d(points_2d, -pca_angle)
-        if slab_polygon_xy is not None:
-            slab_polygon_xy = _rotate_pts_2d(np.asarray(slab_polygon_xy), -pca_angle)
+    # NOTE: upstream VaclavNezerka master:identify_walls does NOT rotate
+    # the cross-section by the dominant PCA angle — it processes points
+    # in the original frame. Slab polygon stays as-is for the swell pass.
+    if slab_polygon_xy is not None:
+        slab_polygon_xy = np.asarray(slab_polygon_xy)
 
     # 2D histogram → binary mask
     pixel_size = pc_resolution * grid_coefficient
@@ -439,12 +432,7 @@ def detect_walls_v1(
     # Snap intersections
     wall_axes = _adjust_intersections(wall_axes, cfg.max_thickness)
 
-    # Inverse PCA rotation
-    if do_rotate:
-        for ax in wall_axes:
-            rot = _rotate_pts_2d(np.array(ax), pca_angle)
-            ax[0] = rot[0].tolist()
-            ax[1] = rot[1].tolist()
+    # No inverse PCA rotation — upstream never rotated.
 
     # Safety cap
     if len(wall_axes) > cfg.max_walls_per_storey:

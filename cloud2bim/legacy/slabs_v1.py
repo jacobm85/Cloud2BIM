@@ -1,12 +1,17 @@
-"""V1 slab detection ported from master:aux_functions.py.
+"""V1 slab detection ported from VaclavNezerka/Cloud2BIM master:aux_functions.py.
+
+Reference: https://github.com/VaclavNezerka/Cloud2BIM (master branch, the
+upstream of this repo). Our LOCAL master branch lowered the density
+threshold to 40% of peak (so sparse ceilings still get detected); this
+port uses the UPSTREAM default of 60% which is what the user validated.
 
 Mirrors ``identify_slabs`` + ``create_hull_from_histogram`` +
 ``smooth_contour``. Differences from v2:
 
-  * Detection by **density-threshold scan** (40% of max bin density)
-    instead of scipy ``find_peaks``. Walks the Z-histogram and emits
-    every contiguous run of bins above the threshold as one horizontal
-    surface candidate.
+  * Detection by **density-threshold scan** (60% of max bin density,
+    upstream default) instead of scipy ``find_peaks``. Walks the
+    Z-histogram and emits every contiguous run of bins above the
+    threshold as one horizontal surface candidate.
   * Slab definition: consecutive surface candidates are paired
     (bottom + top). The very first standalone surface gets the
     bottom-floor default thickness; an odd-final surface gets the
@@ -140,8 +145,8 @@ def detect_slabs_v1(
     if n_arr.max() <= 0:
         log.warning("V1 slabs: empty density histogram")
         return []
-    # 40% of peak density (v1 master default)
-    density_threshold = 0.4 * float(n_arr.max())
+    # 60% of peak density — upstream VaclavNezerka default
+    density_threshold = 0.6 * float(n_arr.max())
 
     # Walk runs above threshold → horizontal-surface intervals
     candidates: list[list[float]] = []
