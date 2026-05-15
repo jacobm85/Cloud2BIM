@@ -25,6 +25,7 @@ from skimage.morphology import closing, footprint_rectangle
 from cloud2bim.config import WallConfig
 from cloud2bim.geometry.lines import line_intersection
 from cloud2bim.geometry.pca import dominant_angle, rotate_points_2d
+from cloud2bim.geometry.polygon import swell_polygon
 from cloud2bim.logging import get_logger
 from cloud2bim.segmentation.base import SemanticLabels
 
@@ -57,6 +58,7 @@ def detect_walls(
     exterior_scan: bool = False,
     cross_section_band: Optional[tuple[float, float]] = None,
     pca_angle: Optional[float] = None,
+    out_contours: Optional[list] = None,
 ) -> List[Wall]:
     """Extract wall axes from a single storey's points.
 
@@ -129,7 +131,7 @@ def detect_walls(
 
     # 4. Build 2D histogram + contour extraction
     pixel_size = pc_resolution * grid_coefficient
-    segments = _extract_2d_segments(points_2d, pixel_size, cfg.min_length)
+    segments, raw_contours = _extract_2d_segments(points_2d, pixel_size, cfg.min_length)
     if not segments:
         log.warning("Storey %d: no wall segments after histogram", storey_idx)
         return []
@@ -143,22 +145,40 @@ def detect_walls(
 
     # 5. Strict pairing — parallel + within max_thickness + overlap along the
     #    wall length. Groups with 2+ segments are confident walls (both faces
-    #    scanned, measured thickness). Singletons that are long enough are
-    #    one-faced walls (typical for exterior walls scanned only from inside);
-    #    short singletons are dropped as fragment noise.
+    #    scanned, measured thickness). Singletons (one face only) get a second
+    #    chance: v1's trick is to pair them against the slab outline swelled
+    #    outward by exterior_thickness, which gives a synthetic exterior face
+    #    so interior-scan singletons close into proper walls along the perimeter.
     paired_groups, singletons = _group_segments_strict(segments, cfg.max_thickness)
     log.info(
         "Storey %d: %d two-sided pairs + %d singletons (candidate one-sided walls)",
         storey_idx, len(paired_groups), len(singletons),
     )
 
-    # 7. Compute wall axes — every wall is just a "wall"; interior/exterior
-    #    classification is deferred until detection is stable.
+    # 5b. Facade re-pairing against the swelled slab polygon (v1 approach).
+    #     For interior scans the exterior wall's outside face is never seen,
+    #     so we synthesise it from the slab outline; the original singleton
+    #     becomes the inside face. This yields long continuous facade walls
+    #     instead of dropping them or emitting them as one-faced fragments.
+    facade_pairs: list = []
+    leftover_singletons: list = singletons
+    if not exterior_scan and slab_polygon_xy is not None and len(slab_polygon_xy) >= 3:
+        swelled = swell_polygon(slab_polygon_xy, cfg.exterior_thickness)
+        if swelled:
+            candidates = [list(s) for s in singletons] + [list(s) for s in swelled]
+            facade_pairs, leftover_singletons = _group_segments_strict(
+                candidates, cfg.max_thickness,
+            )
+            log.info(
+                "Storey %d: facade pass — %d slab-swell candidates → %d facade pairs",
+                storey_idx, len(swelled), len(facade_pairs),
+            )
+
     wall_axes: list[list[list[float]]] = []
     wall_thicknesses: list[float] = []
     wall_labels: list[str] = []
 
-    for group in paired_groups:
+    for group in list(paired_groups) + list(facade_pairs):
         axis, thickness = _calculate_wall_axis(group)
         if axis is None or _has_nan(axis):
             continue
@@ -169,7 +189,10 @@ def detect_walls(
         wall_thicknesses.append(max(thickness, cfg.min_thickness))
         wall_labels.append("wall")
 
-    for seg in singletons:
+    # 5c. Fallback: keep singletons that still didn't pair if they are long
+    #     enough to be confidently real walls. Drop short fragments — they're
+    #     almost always furniture/clutter edges, not partitions.
+    for seg in leftover_singletons:
         a = np.array(seg[0], dtype=float)
         b = np.array(seg[1], dtype=float)
         length = float(np.linalg.norm(b - a))
@@ -194,6 +217,10 @@ def detect_walls(
             rot = rotate_points_2d(np.array(ax), pca_angle)
             ax[0] = rot[0].tolist()
             ax[1] = rot[1].tolist()
+        raw_contours = [rotate_points_2d(c, pca_angle) for c in raw_contours]
+
+    if out_contours is not None:
+        out_contours.extend(raw_contours)
 
     # 10. Cap to safety limit
     if len(wall_axes) > cfg.max_walls_per_storey:
@@ -226,13 +253,19 @@ def detect_walls(
 # ── internal helpers ─────────────────────────────────────────────────────────
 
 def _extract_2d_segments(points_2d: np.ndarray, pixel_size: float, min_length: float):
-    """2D histogram → binary mask → contours → Douglas-Peucker segments."""
+    """2D histogram → binary mask → contours → Douglas-Peucker segments.
+
+    Returns (segments, raw_contours) where raw_contours is a list of closed
+    pixel-space contours (Nx2 arrays in world coords) — kept around so the
+    DXF exporter can emit them verbatim as the "continuous line" the user
+    sees in the cross-section preview.
+    """
     x_min, y_min = points_2d.min(axis=0)
     x_max, y_max = points_2d.max(axis=0)
     xs = np.arange(x_min + 0.5 * pixel_size, x_max, pixel_size)
     ys = np.arange(y_min + 0.5 * pixel_size, y_max, pixel_size)
     if len(xs) < 2 or len(ys) < 2:
-        return []
+        return [], []
     grid, _, _ = np.histogram2d(points_2d[:, 0], points_2d[:, 1], bins=[xs, ys])
     grid = grid.T
 
@@ -241,6 +274,13 @@ def _extract_2d_segments(points_2d: np.ndarray, pixel_size: float, min_length: f
     mask = closing(mask, footprint_rectangle((5, 5)))
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+    raw_world_contours: list[np.ndarray] = []
+    for cnt in contours:
+        cnt = cnt.reshape(-1, 2).astype(np.float64)
+        xs_world = cnt[:, 0] * pixel_size + x_min
+        ys_world = cnt[:, 1] * pixel_size + y_min
+        raw_world_contours.append(np.column_stack([xs_world, ys_world]))
 
     segments: list[list[list[float]]] = []
     for cnt in contours:
@@ -255,7 +295,7 @@ def _extract_2d_segments(points_2d: np.ndarray, pixel_size: float, min_length: f
             length = np.hypot(wp2[0] - wp1[0], wp2[1] - wp1[1])
             if length >= min_length:
                 segments.append([wp1, wp2])
-    return segments
+    return segments, raw_world_contours
 
 
 def _segments_parallel(s1, s2, angle_tol_deg: float = 5.0) -> bool:

@@ -270,6 +270,7 @@ def stage_walls(cfg: Config) -> None:
 
     bands = list(cfg.walls.cross_section_bands or [])
     storey_walls: list[list] = []
+    storey_contours: list[list] = []
     for i in range(len(slabs) - 1):
         z_floor = slabs[i].bottom_z + slabs[i].thickness
         z_ceiling = slabs[i + 1].bottom_z
@@ -282,6 +283,7 @@ def stage_walls(cfg: Config) -> None:
         )
         slab_polygon_xy = np.column_stack([slabs[i + 1].polygon_x, slabs[i + 1].polygon_y])
         band_override = bands[i] if i < len(bands) and bands[i] is not None else None
+        contours_out: list = []
 
         try:
             walls = detect_walls(
@@ -297,6 +299,7 @@ def stage_walls(cfg: Config) -> None:
                 exterior_scan=cfg.exterior_scan,
                 cross_section_band=band_override,
                 pca_angle=building_pca_angle,
+                out_contours=contours_out,
             )
             if is_placeholder:
                 for w in walls:
@@ -306,8 +309,10 @@ def stage_walls(cfg: Config) -> None:
             log.exception("Storey %d wall detection failed — skipping", i)
             walls = []
         storey_walls.append(walls)
+        storey_contours.append(contours_out)
 
     _save_pickle(Path(cfg.io.work_dir) / "walls.pkl", storey_walls)
+    _save_pickle(Path(cfg.io.work_dir) / "wall_contours.pkl", storey_contours)
     write_state(cfg, "walls")
     log.info("walls: %d total in %.1fs",
              sum(len(s) for s in storey_walls), time.time() - t0)

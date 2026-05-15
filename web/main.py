@@ -703,15 +703,19 @@ async def get_preview(job_id: str):
 # ── DXF export ───────────────────────────────────────────────────────────────
 
 def _load_storey_data(job_dir: Path) -> dict:
-    """Load slabs/walls/openings/columns/stairs pickles from a job dir."""
+    """Load slabs/walls/openings/columns/stairs/contours pickles from a job dir."""
     import pickle
-    out: dict = {"slabs": [], "walls": [], "openings": [], "columns": [], "stairs": []}
+    out: dict = {
+        "slabs": [], "walls": [], "openings": [],
+        "columns": [], "stairs": [], "contours": [],
+    }
     for key, fname in [
         ("slabs", "slabs.pkl"),
         ("walls", "walls.pkl"),
         ("openings", "openings.pkl"),
         ("columns", "columns.pkl"),
         ("stairs", "stairs.pkl"),
+        ("contours", "wall_contours.pkl"),
     ]:
         p = job_dir / fname
         if p.exists():
@@ -803,9 +807,11 @@ async def export_storey_dxf(job_id: str, storey_idx: int):
         openings = d["openings"][storey_idx] if storey_idx < len(d["openings"]) else []
         columns = d["columns"][storey_idx] if storey_idx < len(d["columns"]) else []
         stairs = d["stairs"][storey_idx] if storey_idx < len(d["stairs"]) else []
+        contours = d["contours"][storey_idx] if storey_idx < len(d["contours"]) else []
         out = job_dir / f"plan_storey_{storey_idx}.dxf"
         write_storey_dxf(out, storey_idx, d["walls"][storey_idx],
-                         openings, columns, stairs, slab)
+                         openings, columns, stairs, slab,
+                         cross_section_contours=contours)
         return out
 
     try:

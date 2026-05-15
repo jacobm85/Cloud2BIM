@@ -24,13 +24,14 @@ log = get_logger(__name__)
 # Layer name → ACI colour. ezdxf takes ACI ints (1=red, 2=yellow, 3=green,
 # 4=cyan, 5=blue, 6=magenta, 7=white/black, 8=dark grey).
 _LAYERS = {
+    "CROSS_SECTION": 7,    # continuous outline from the cross-section trace
     "SLAB_OUTLINE": 8,
-    "WALLS": 7,
+    "WALLS": 30,           # detected wall rectangles (analytical view)
     "WALL_AXIS": 8,
     "WINDOWS": 4,
-    "DOORS": 30,   # orange-ish
+    "DOORS": 30,
     "COLUMNS": 6,
-    "STAIRS": 40,  # yellow-orange
+    "STAIRS": 40,
 }
 
 
@@ -78,16 +79,32 @@ def write_storey_dxf(
     columns: Iterable = (),
     stairs: Iterable = (),
     slab: Slab | None = None,
+    cross_section_contours: Sequence[np.ndarray] = (),
 ) -> None:
     """Write a DXF for a single storey.
 
     ``slab`` is the floor slab below the storey (its top polygon is used
     as the storey outline). ``walls`` is the storey's wall list.
+    ``cross_section_contours`` is a list of (N,2) arrays — the closed
+    contour traces from the cross-section binary mask. These give a
+    continuous line that matches what the user sees in the wizard's
+    cross-section preview.
     """
     doc = ezdxf.new(dxfversion="R2018", setup=True)
     doc.units = ezdxf.units.M  # metres
     msp = doc.modelspace()
     _ensure_layers(doc)
+
+    # Continuous cross-section trace — closed polyline per detected blob.
+    # This is the layer the user typically wants to print/measure: it's a
+    # single line that follows the points in the section band, not a
+    # collection of analytical wall rectangles.
+    for contour in cross_section_contours:
+        arr = np.asarray(contour, dtype=float)
+        if arr.ndim != 2 or arr.shape[0] < 3 or arr.shape[1] != 2:
+            continue
+        pts = [(float(x), float(y)) for x, y in arr]
+        msp.add_lwpolyline(pts, close=True, dxfattribs={"layer": "CROSS_SECTION"})
 
     if slab is not None and len(slab.polygon_x) >= 3:
         pts = list(zip(slab.polygon_x.tolist(), slab.polygon_y.tolist()))
@@ -169,6 +186,7 @@ def write_all_storeys(
     storey_openings: Sequence[Sequence[Opening]] = (),
     storey_columns: Sequence[Sequence] = (),
     storey_stairs: Sequence[Sequence] = (),
+    storey_contours: Sequence[Sequence] = (),
     prefix: str = "plan_storey_",
 ) -> List[Path]:
     """Write one DXF per storey to ``out_dir``. Returns the file paths."""
@@ -180,7 +198,9 @@ def write_all_storeys(
         openings = storey_openings[i] if i < len(storey_openings) else []
         cols = storey_columns[i] if i < len(storey_columns) else []
         stairs = storey_stairs[i] if i < len(storey_stairs) else []
+        contours = storey_contours[i] if i < len(storey_contours) else []
         path = out_dir / f"{prefix}{i}.dxf"
-        write_storey_dxf(path, i, storey_walls[i], openings, cols, stairs, slab)
+        write_storey_dxf(path, i, storey_walls[i], openings, cols, stairs,
+                         slab, cross_section_contours=contours)
         paths.append(path)
     return paths

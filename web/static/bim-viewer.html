@@ -119,7 +119,10 @@ renderer.shadowMap.enabled = true;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0f1117);
-scene.fog = new THREE.FogExp2(0x0f1117, 0.008);
+// Mild fog so distant geometry fades but points still come through at
+// typical scan ranges (30-60 m). Earlier density of 0.008 wiped the
+// peripheral point cloud out.
+scene.fog = new THREE.FogExp2(0x0f1117, 0.0025);
 
 const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 5000);
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -213,13 +216,17 @@ if (!bbox.isEmpty()) {
   const dist   = maxDim * 1.8;
 
   camera.position.set(center.x + dist * 0.6, center.y + dist * 0.5, center.z + dist);
-  camera.near = dist * 0.001;
-  camera.far  = dist * 10;
+  // Keep camera.far roomy so peripheral point-cloud points don't clip.
+  camera.near = Math.max(0.01, dist * 0.001);
+  camera.far  = Math.max(500, dist * 50);
   camera.updateProjectionMatrix();
   controls.target.copy(center);
   controls.update();
 
-  grid.position.y = bbox.min.y;
+  // Keep grid at world Y=0 (matches v1: IFC hangs below the plane because
+  // scan Z is negative). Moving the grid up to the IFC floor made it look
+  // like the building was floating above the ground.
+  grid.position.y = 0;
 }
 
 // Stats
@@ -295,16 +302,12 @@ async function loadPointCloud() {
     pointCloudCount = arr.length / 3;
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.BufferAttribute(arr, 3));
-    geom.computeBoundingBox();
-    const bb = geom.boundingBox;
-    const span = Math.max(
-      bb.max.x - bb.min.x, bb.max.y - bb.min.y, bb.max.z - bb.min.z,
-    );
-    // Opaque points with a sane size — transparent+depthWrite=false made
-    // them invisible behind the walls in earlier iterations.
-    const pointSize = Math.max(0.04, span * 0.002);
+    // Screen-space points (sizeAttenuation false): consistent ~3 px size
+    // regardless of camera distance. With sizeAttenuation on, points at
+    // 30 m+ shrank to sub-pixel and looked invisible.
     const mat = new THREE.PointsMaterial({
-      color: 0x9dd4ee, size: pointSize, sizeAttenuation: true,
+      color: 0x9dd4ee, size: 3, sizeAttenuation: false,
+      fog: false,  // don't let scene fog erase peripheral scan points
     });
     pointCloud = new THREE.Points(geom, mat);
     pointCloud.visible = true;  // on by default so the user sees it

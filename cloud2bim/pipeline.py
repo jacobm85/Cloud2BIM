@@ -101,6 +101,7 @@ def run_pipeline(cfg: Config) -> int:
     log.info("─── Wall & opening segmentation ───")
     storey_walls: list[list] = []
     storey_openings: list[list] = []
+    storey_contours: list[list] = []
     for i in range(len(slabs) - 1):
         z_floor = slabs[i].bottom_z + slabs[i].thickness
         z_ceiling = slabs[i + 1].bottom_z
@@ -114,6 +115,7 @@ def run_pipeline(cfg: Config) -> int:
         slab_polygon_xy = np.column_stack([slabs[i + 1].polygon_x, slabs[i + 1].polygon_y])
 
         band_override = bands[i] if i < len(bands) and bands[i] is not None else None
+        contours_out: list = []
         try:
             t0 = time.time()
             walls = detect_walls(
@@ -129,6 +131,7 @@ def run_pipeline(cfg: Config) -> int:
                 exterior_scan=cfg.exterior_scan,
                 cross_section_band=band_override,
                 pca_angle=building_pca_angle,
+                out_contours=contours_out,
             )
             if is_placeholder:
                 for w in walls:
@@ -142,6 +145,7 @@ def run_pipeline(cfg: Config) -> int:
         except Exception as exc:
             log.exception("Storey %d wall detection failed — skipping: %s", i, exc)
             walls = []
+        storey_contours.append(contours_out)
 
         try:
             t0 = time.time()
@@ -160,6 +164,17 @@ def run_pipeline(cfg: Config) -> int:
 
         storey_walls.append(walls)
         storey_openings.append(openings)
+
+    # Persist raw cross-section contours so the DXF endpoint can emit the
+    # "continuous line like the cross-section" the user expects.
+    try:
+        import pickle
+        work = Path(cfg.io.work_dir)
+        work.mkdir(parents=True, exist_ok=True)
+        with (work / "wall_contours.pkl").open("wb") as fh:
+            pickle.dump(storey_contours, fh)
+    except Exception as exc:
+        log.warning("Could not save wall_contours.pkl: %s", exc)
 
     # ── 7a. Columns ─────────────────────────────────────────────────────
     storey_columns: list[list] = []
