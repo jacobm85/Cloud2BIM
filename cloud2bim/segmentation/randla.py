@@ -10,12 +10,31 @@ import numpy as np
 from cloud2bim.config import SegmentationConfig
 from cloud2bim.logging import get_logger
 from cloud2bim.segmentation.base import S3DIS_LABELS, Segmenter, SemanticLabels
+from cloud2bim.segmentation.weights import resolve_weights
 
 log = get_logger(__name__)
 
 
+# Architecture hyperparameters from Open3D-ML's bundled randlanet_s3dis.yml.
+# Inlined so we don't depend on the YAML file path inside the open3d
+# package, which has been a moving target across releases.
+RANDLA_S3DIS_MODEL_CFG = dict(
+    name="RandLANet",
+    num_classes=len(S3DIS_LABELS),
+    num_points=40960,
+    in_channels=6,          # XYZ + RGB
+    dim_features=8,
+    dim_output=[16, 64, 128, 256],
+    num_neighbors=16,
+    sub_sampling_ratio=[4, 4, 4, 4],
+    grid_size=0.04,
+)
+
+
 class RandLASegmenter(Segmenter):
     """RandLA-Net via Open3D-ML (torch backend)."""
+
+    DEFAULT_WEIGHTS_KEY = "randla-s3dis"
 
     def __init__(self, cfg: SegmentationConfig):
         self.cfg = cfg
@@ -32,7 +51,6 @@ class RandLASegmenter(Segmenter):
         if self._model is not None:
             return
         try:
-            import open3d.ml.torch as ml3d
             from open3d.ml.torch.models import RandLANet
         except ImportError as exc:
             raise ImportError(
@@ -40,22 +58,23 @@ class RandLASegmenter(Segmenter):
                 "Run: pip install open3d torch tensorboard"
             ) from exc
 
-        cfg = ml3d.utils.Config.load_from_file(
-            "open3d.ml.configs.randlanet_s3dis.yml"
-        )
-        self._model = RandLANet(**cfg.model)
-        if self.cfg.weights_path is not None:
-            import torch
-            state = torch.load(str(self.cfg.weights_path), map_location="cpu")
-            self._model.load_state_dict(state.get("model_state_dict", state), strict=False)
+        self._model = RandLANet(**RANDLA_S3DIS_MODEL_CFG)
+        weights = resolve_weights(self.DEFAULT_WEIGHTS_KEY, explicit_path=self.cfg.weights_path)
+        import torch
+        state = torch.load(str(weights), map_location="cpu")
+        self._model.load_state_dict(state.get("model_state_dict", state), strict=False)
         self._model.eval()
 
     def _infer(self, points: np.ndarray) -> np.ndarray:
         import torch
+        # RandLA-Net expects XYZ + per-point feature (RGB if available, else
+        # repeat XYZ). PointCloud-level RGB handling lives in the pipeline
+        # adapter (task 3); for now we duplicate XYZ as a placeholder feature.
+        feat = points  # fallback when caller passes XYZ only
         with torch.no_grad():
             inputs = {
                 "point": torch.from_numpy(points).float().unsqueeze(0),
-                "feat": torch.from_numpy(points).float().unsqueeze(0),
+                "feat": torch.from_numpy(feat).float().unsqueeze(0),
             }
             out = self._model(inputs)
             return out.argmax(dim=-1).squeeze(0).cpu().numpy()

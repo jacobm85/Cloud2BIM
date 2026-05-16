@@ -21,6 +21,7 @@ import numpy as np
 from cloud2bim.config import SegmentationConfig
 from cloud2bim.logging import get_logger
 from cloud2bim.segmentation.base import S3DIS_LABELS, Segmenter, SemanticLabels
+from cloud2bim.segmentation.weights import resolve_weights
 
 log = get_logger(__name__)
 
@@ -28,19 +29,19 @@ log = get_logger(__name__)
 class PTv3Segmenter(Segmenter):
     """PointTransformer V3 via Pointcept."""
 
-    DEFAULT_WEIGHTS_NAME = "ptv3-s3dis-area5.pth"
+    DEFAULT_WEIGHTS_KEY = "ptv3-s3dis-area5"
 
     def __init__(self, cfg: SegmentationConfig):
         self.cfg = cfg
         self._model = None  # lazy-init on first segment() call
         self._device = self._resolve_device(cfg.device)
-        log.info("PTv3 segmenter initialised (device=%s, voxel=%.3f m)", self._device, cfg.voxel_size)
+        log.info("PTv3 segmenter initialised (device=%s, voxel=%.3f m)", self._device, cfg.ml_voxel_size)
 
     def segment(self, points: np.ndarray) -> SemanticLabels:
         self._ensure_model()
         log.info("PTv3 inference on %s points", f"{len(points):,}")
 
-        voxel_pts, voxel_idx = self._voxelize(points, self.cfg.voxel_size)
+        voxel_pts, voxel_idx = self._voxelize(points, self.cfg.ml_voxel_size)
         voxel_logits = self._infer_voxels(voxel_pts)
         voxel_labels = voxel_logits.argmax(axis=1).astype(np.int32)
 
@@ -94,18 +95,7 @@ class PTv3Segmenter(Segmenter):
         self._model.to(self._device).eval()
 
     def _resolve_weights_path(self) -> Path:
-        if self.cfg.weights_path is not None:
-            return Path(self.cfg.weights_path)
-        # Default location inside the container/data dir
-        cache_dir = Path("/data/models")
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        path = cache_dir / self.DEFAULT_WEIGHTS_NAME
-        if not path.exists():
-            raise FileNotFoundError(
-                f"PTv3 weights not found at {path}. "
-                "Download from Pointcept release and mount /data/models."
-            )
-        return path
+        return resolve_weights(self.DEFAULT_WEIGHTS_KEY, explicit_path=self.cfg.weights_path)
 
     @staticmethod
     def _voxelize(points: np.ndarray, voxel_size: float) -> tuple[np.ndarray, np.ndarray]:
@@ -128,7 +118,7 @@ class PTv3Segmenter(Segmenter):
                 "coord": torch.from_numpy(voxel_pts).float().to(self._device),
                 "feat": torch.from_numpy(voxel_pts).float().to(self._device),
                 "grid_coord": torch.from_numpy(
-                    np.floor(voxel_pts / self.cfg.voxel_size).astype(np.int64)
+                    np.floor(voxel_pts / self.cfg.ml_voxel_size).astype(np.int64)
                 ).to(self._device),
                 "offset": torch.tensor([len(voxel_pts)], device=self._device),
             }
