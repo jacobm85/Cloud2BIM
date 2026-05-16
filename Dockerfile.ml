@@ -46,12 +46,20 @@ RUN pip install --no-cache-dir \
     addict \
     timm
 
-# torch_scatter is imported at Pointcept's models/__init__.py top-level
-# (used by other architectures, not PTv3 itself, but Python loads the
-# whole package). Building from source against torch+CUDA is fragile;
-# PyG ships prebuilt wheels at data.pyg.org keyed by torch version.
-# torch-2.5.0+cu124 wheels are binary-compatible with our 2.5.1+cu124.
-RUN pip install --no-cache-dir torch_scatter \
+# Pointcept's models/__init__.py loads default.py at import time, which
+# imports the full PyG extension suite (torch_scatter, torch_cluster,
+# torch_sparse, torch_spline_conv). PTv3 itself doesn't use them, but
+# Python loads the whole package when we import PTv3 from it. Install
+# all four prebuilt PyG wheels in one go — building any of them from
+# source against torch+CUDA takes 10+ min and often fails on ABI drift.
+#
+# torch-2.5.0+cu124 wheels are binary-compatible with our 2.5.1+cu124
+# base image (PyG hasn't shipped a 2.5.1 index yet).
+RUN pip install --no-cache-dir \
+    torch_scatter \
+    torch_cluster \
+    torch_sparse \
+    torch_spline_conv \
     -f https://data.pyg.org/whl/torch-2.5.0+cu124.html
 
 RUN git clone https://github.com/Pointcept/Pointcept.git /opt/pointcept_src && \
