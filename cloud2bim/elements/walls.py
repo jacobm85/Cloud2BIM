@@ -140,13 +140,16 @@ def detect_walls(
     # 4b. Merge collinear fragments before pairing — the contour-tracer often
     #     emits a wall as several short collinear pieces; merging gives the
     #     pairing step a clean view of "one wall = one segment".
-    segments = _merge_collinear(segments, cfg.min_thickness, cfg.max_thickness)
+    #     collinear_merge_distance is now decoupled from max_thickness so a
+    #     tight thickness band can coexist with a generous merge reach.
+    segments = _merge_collinear(segments, cfg.min_thickness, cfg.collinear_merge_distance)
     log.info("Storey %d: %d segments after collinear merge", storey_idx, len(segments))
 
     # 5. Strict pairing — parallel + within max_thickness + overlap along the
     #    wall length. Groups with 2+ segments are confident walls (both faces
-    #    scanned, measured thickness).
-    paired_groups, singletons = _group_segments_strict(segments, cfg.max_thickness)
+    #    scanned, measured thickness). pair_min_overlap is decoupled from
+    #    max_thickness so short walls (kitchen islands, stubs) can be paired.
+    paired_groups, singletons = _group_segments_strict(segments, cfg.max_thickness, cfg.pair_min_overlap)
     log.info(
         "Storey %d: %d two-sided pairs + %d singletons (one-faced walls)",
         storey_idx, len(paired_groups), len(singletons),
@@ -268,6 +271,39 @@ def detect_walls(
     ]
     log.info("Storey %d: %d walls finalised", storey_idx, len(walls))
     return walls
+
+
+def default_cross_section_band(
+    building_type: str,
+    z_floor: float,
+    z_ceiling: float,
+) -> tuple[float, float]:
+    """Pick a default Z-band for wall detection based on building type.
+
+    Three presets:
+      office     — 85-120% of storey height. Matches upstream
+                   VaclavNezerka/Cloud2BIM: a high band that's clear of
+                   furniture (chairs, tables, bookcases) but below
+                   typical ceiling installations. Good for offices,
+                   residential, schools.
+      industrial — 25-35 cm above the floor. A low, narrow band that
+                   avoids ceiling-mounted cable trays / ducts often
+                   running along walls in industrial scans.
+      custom     — 130-160 cm absolute (mid-wall). Fallback when the
+                   user prefers to set the band manually per storey in
+                   the wizard.
+
+    Pure function — the caller passes z_floor/z_ceiling for the storey
+    and gets back an (lo, hi) world-Z tuple ready to feed into
+    detect_walls(cross_section_band=...).
+    """
+    if building_type == "office":
+        h = z_ceiling - z_floor
+        return (z_floor + 0.85 * h, z_floor + 1.20 * h)
+    if building_type == "industrial":
+        return (z_floor + 0.25, z_floor + 0.35)
+    # custom / unknown — fall back to mid-wall absolute band.
+    return (z_floor + 1.30, z_floor + 1.60)
 
 
 # ── internal helpers ─────────────────────────────────────────────────────────
@@ -426,20 +462,21 @@ def _furthest_pair(points):
     return [list(map(float, best[0])), list(map(float, best[1]))]
 
 
-def _group_segments_strict(segments, max_thickness: float):
-    """v1-style pair grouping.
+def _group_segments_strict(segments, max_thickness: float, min_overlap: float):
+    """Pair grouping based on parallel + close + overlap.
 
-    Two segments only form a pair when they are parallel, within
+    Two segments form a pair when they are parallel, within
     ``max_thickness`` of each other AND overlap along their length by
-    at least ``max_thickness`` (so a real wall's two faces line up,
-    not just sit near each other in different rooms).
+    at least ``min_overlap``. Pre-v3 the overlap requirement was hard-
+    wired to ``max_thickness`` which made short walls (kitchen islands,
+    door stubs) impossible to detect as two-sided. Decoupling lets the
+    user tune the two thresholds independently.
 
     Singletons are dropped from the wall list and returned separately so
     the caller can try to pair them against the building envelope.
     """
     grouped: list = []
     unpaired: list = []
-    min_overlap = max_thickness
     work = [list(s) for s in segments]
     while work:
         current = work.pop(0)

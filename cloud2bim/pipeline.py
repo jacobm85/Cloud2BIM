@@ -26,7 +26,7 @@ from cloud2bim.config import Config
 from cloud2bim.elements.openings import detect_openings
 from cloud2bim.elements.roofs import detect_roofs
 from cloud2bim.elements.slabs import Slab, compute_building_pca, compute_z_histogram, detect_slabs
-from cloud2bim.elements.walls import detect_walls
+from cloud2bim.elements.walls import default_cross_section_band, detect_walls
 from cloud2bim.extraction import extract_openings_ml, extract_slabs_ml, extract_walls_ml
 from cloud2bim.legacy import detect_slabs_v1, detect_walls_v1
 from cloud2bim.ifc import IfcBuilder
@@ -125,6 +125,13 @@ def run_pipeline(cfg: Config) -> int:
         slab_polygon_xy = np.column_stack([slabs[i + 1].polygon_x, slabs[i + 1].polygon_y])
 
         band_override = bands[i] if i < len(bands) and bands[i] is not None else None
+        if band_override is None:
+            # No per-storey override → fall back to the building-type preset
+            # (office/industrial/custom). Keeps the wizard's manual picker
+            # authoritative when set.
+            band_override = list(default_cross_section_band(
+                cfg.building_type, z_floor, z_ceiling,
+            ))
         band_lower = bands_lower[i] if i < len(bands_lower) and bands_lower[i] is not None else None
         contours_out: list = []
         try:
@@ -388,7 +395,7 @@ def _detect_walls_dispatch(
             return walls
         log.warning("Hybrid storey %d: ML walls empty — falling back to geometric", storey_idx)
 
-    wall_fn = detect_walls_v1 if cfg.algorithm == "v1" else detect_walls
+    wall_fn = _pick_wall_fn(cfg.algorithm)
     return wall_fn(
         storey_points=storey_pts,
         z_floor=z_floor,
@@ -405,6 +412,21 @@ def _detect_walls_dispatch(
         out_contours=contours_out,
         lower_section_band=band_lower,
     )
+
+
+def _pick_wall_fn(algorithm: str):
+    """Return the wall-detection callable for the configured algorithm.
+
+    v1       — original Cloud2BIM port (legacy.detect_walls_v1)
+    v2       — v2 rewrite (elements.walls.detect_walls)
+    vertical — vertical-continuity (elements.walls_vertical.detect_walls_vertical)
+    """
+    if algorithm == "v1":
+        return detect_walls_v1
+    if algorithm == "vertical":
+        from cloud2bim.elements.walls_vertical import detect_walls_vertical
+        return detect_walls_vertical
+    return detect_walls
 
 
 def _detect_openings_dispatch(

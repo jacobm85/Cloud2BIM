@@ -188,6 +188,20 @@ class CreateJobRequest(BaseModel):
     pipeline_mode: str = "geometric"
     hybrid_min_class_points: int = 5_000
 
+    # Building type drives the default cross-section band when the user
+    # hasn't set one manually per storey. office=upstream's 85-120% of
+    # storey height. industrial=25-35 cm above floor. custom=130-160 cm.
+    building_type: str = "office"
+
+    # Vertical-continuity algorithm parameters (only used if algorithm=vertical)
+    vertical_slice_thickness: float = 0.05
+    vertical_min_fill: float = 0.70
+    vertical_min_points_per_slice: int = 5
+
+    # New wall pairing/merging parameters (decoupled from max_thickness)
+    collinear_merge_distance: float = 1.5
+    pair_min_overlap: float = 0.20
+
     # ML semantic segmentation
     seg_enabled: bool = False
     seg_backend: str = "ptv3"
@@ -416,6 +430,11 @@ async def create_job(request: CreateJobRequest):
             "exterior_thickness": request.exterior_walls_thickness,
             "use_ml_filter": True,
             "enable_ransac_fallback": True,
+            "collinear_merge_distance": request.collinear_merge_distance,
+            "pair_min_overlap": request.pair_min_overlap,
+            "vertical_slice_thickness": request.vertical_slice_thickness,
+            "vertical_min_fill": request.vertical_min_fill,
+            "vertical_min_points_per_slice": request.vertical_min_points_per_slice,
         },
         "openings": {"enabled": request.openings_enabled},
         "columns": {"enabled": request.columns_enabled},
@@ -446,9 +465,10 @@ async def create_job(request: CreateJobRequest):
             "revit_compatible": True,
         },
         "exterior_scan": request.exterior_scan,
-        "algorithm": request.algorithm if request.algorithm in ("v1", "v2") else "v1",
+        "algorithm": request.algorithm if request.algorithm in ("v1", "v2", "vertical") else "v1",
         "pipeline_mode": request.pipeline_mode if request.pipeline_mode in ("geometric", "hybrid", "ml") else "geometric",
         "hybrid_min_class_points": request.hybrid_min_class_points,
+        "building_type": request.building_type if request.building_type in ("office", "industrial", "custom") else "office",
     }
 
     config_path = job_dir / "config.yaml"

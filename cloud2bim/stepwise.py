@@ -36,7 +36,7 @@ from cloud2bim.elements.openings import detect_openings
 from cloud2bim.elements.roofs import detect_roofs
 from cloud2bim.elements.slabs import Slab, compute_z_histogram, detect_slabs
 from cloud2bim.elements.stairs import StairFlight, detect_stairs
-from cloud2bim.elements.walls import detect_walls
+from cloud2bim.elements.walls import default_cross_section_band, detect_walls
 from cloud2bim.extraction import extract_openings_ml, extract_slabs_ml, extract_walls_ml
 from cloud2bim.ifc import IfcBuilder
 from cloud2bim.io import center_xy, read_pointcloud
@@ -360,6 +360,10 @@ def stage_walls(cfg: Config) -> None:
         )
         slab_polygon_xy = np.column_stack([slabs[i + 1].polygon_x, slabs[i + 1].polygon_y])
         band_override = bands[i] if i < len(bands) and bands[i] is not None else None
+        if band_override is None:
+            band_override = list(default_cross_section_band(
+                cfg.building_type, z_floor, z_ceiling,
+            ))
         band_lower = bands_lower[i] if i < len(bands_lower) and bands_lower[i] is not None else None
         contours_out: list = []
         try:

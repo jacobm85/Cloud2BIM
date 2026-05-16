@@ -155,10 +155,42 @@ class SlabConfig(BaseModel):
 
 class WallConfig(BaseModel):
     enabled: bool = Field(default=True, description="Toggle wall detection off entirely")
-    min_length: float = Field(default=0.10, gt=0, description="m")
+    min_length: float = Field(
+        default=0.05,
+        gt=0,
+        description=(
+            "Minimum wall length (m). Lowered from the old 0.10 default — "
+            "real interior partitions often run shorter than 10 cm in "
+            "scans (short stubs between door frames etc.). Raise if you "
+            "see noise being promoted to walls."
+        ),
+    )
     min_thickness: float = Field(default=0.05, gt=0, description="m")
     max_thickness: float = Field(default=0.75, gt=0, description="m")
     exterior_thickness: float = Field(default=0.30, gt=0, description="m")
+    collinear_merge_distance: float = Field(
+        default=1.5,
+        gt=0,
+        description=(
+            "m. Two parallel, near-collinear segments merge when their "
+            "endpoints are within this distance. Decoupled from "
+            "max_thickness so you can keep a tight thickness band while "
+            "letting the contour-tracer's fragmented runs merge into one "
+            "long wall. The merged result is re-queued so chains of "
+            "fragments collapse iteratively."
+        ),
+    )
+    pair_min_overlap: float = Field(
+        default=0.20,
+        gt=0,
+        description=(
+            "m. When pairing two parallel segments as the inner and "
+            "outer face of one wall, they must overlap along the wall "
+            "direction by at least this much. Decoupled from "
+            "max_thickness so short walls (between door frames, kitchen "
+            "islands) can still be detected as two-sided."
+        ),
+    )
     singleton_min_length: float = Field(
         default=0.30,
         gt=0,
@@ -232,6 +264,42 @@ class WallConfig(BaseModel):
             "Fraction of a detected wall's length that must overlap with "
             "low-section points for the wall to be kept. Tighter (0.5+) "
             "drops more walls; looser (0.1) keeps almost everything."
+        ),
+    )
+
+    # ── Vertical-continuity algorithm parameters ────────────────────────
+    #
+    # Used only when algorithm="vertical". A wall is detected as an
+    # XY-pixel column where points are present from floor to ceiling
+    # without significant lateral drift between Z-slices.
+    vertical_slice_thickness: float = Field(
+        default=0.05,
+        gt=0,
+        description=(
+            "m. Height of each Z-slice when scanning a pixel column "
+            "from floor to ceiling. 5 cm matches typical scan density; "
+            "raise to 10 cm for sparse clouds."
+        ),
+    )
+    vertical_min_fill: float = Field(
+        default=0.70,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Fraction of Z-slices a pixel must be filled in to count "
+            "as a wall candidate. 0.7 = 70% of storey height. Lower "
+            "the value to keep wall pixels near windows (where the "
+            "column is empty over the glazing); raise it to drop "
+            "furniture that only fills the lower half."
+        ),
+    )
+    vertical_min_points_per_slice: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Minimum points in a pixel × slice cell to count it as "
+            "'filled'. Filters out noise — single stray points don't "
+            "create a wall column."
         ),
     )
 
@@ -366,14 +434,34 @@ class Config(BaseModel):
 
     exterior_scan: bool = False
 
-    algorithm: Literal["v1", "v2"] = Field(
+    building_type: Literal["office", "industrial", "custom"] = Field(
+        default="office",
+        description=(
+            "Controls the default cross-section Z-band used to detect "
+            "walls when the user hasn't picked one manually. "
+            "'office' = upstream's 85-120% of storey height (high band, "
+            "clear of furniture; matches VaclavNezerka/Cloud2BIM). "
+            "'industrial' = 25-35 cm above the floor (low band, clear "
+            "of ceiling-mounted cable trays / ducts common along walls "
+            "in industrial scans). "
+            "'custom' = no preset; the wizard's per-storey band picker "
+            "starts at a mid-wall fallback (130-160 cm absolute) and "
+            "expects the user to set it explicitly."
+        ),
+    )
+
+    algorithm: Literal["v1", "v2", "vertical"] = Field(
         default="v1",
         description=(
             "Wall + slab detection variant. 'v1' = original Cloud2BIM "
             "(VaclavNezerka/Cloud2BIM), kept as known-good baseline. "
-            "'v2' = current rewrite with experimental geometric tweaks; "
-            "use only after verifying it beats v1 on your data. Only "
-            "consulted when pipeline_mode includes a geometric stage."
+            "'v2' = rewrite with geometric tweaks; use after verifying "
+            "it beats v1 on your data. 'vertical' = vertical-continuity "
+            "approach — a wall is any XY-pixel column that's filled "
+            "from floor to ceiling. Robust against furniture and "
+            "diagonal building orientations because each pixel is "
+            "evaluated independently. Only consulted when pipeline_mode "
+            "includes a geometric stage."
         ),
     )
 

@@ -143,7 +143,39 @@
         RGB-hantering konfigureras längre ned under "Semantisk segmentering".
       </div>
 
-      <div class="section-label">Fallback-algoritm (för geometric / hybrid)</div>
+      <div class="section-label">Byggnadstyp (styr standard-snitt för väggdetektion)</div>
+      <div class="mode-picker" style="margin-bottom:8px">
+        <label class="mode-option">
+          <input type="radio" name="building-type" value="office" checked>
+          <div class="mode-card">
+            <div class="mode-title">🏢 Kontor / bostad</div>
+            <div class="mode-desc">Snitt 85–120% av våningshöjden (högt band, ovanför
+              möbler). Matchar upstream-Cloud2BIM. Bra för kontor, bostäder, skolor.</div>
+          </div>
+        </label>
+        <label class="mode-option">
+          <input type="radio" name="building-type" value="industrial">
+          <div class="mode-card">
+            <div class="mode-title">🏭 Industri / lager</div>
+            <div class="mode-desc">Snitt 25–35 cm över golvet (lågt band, undviker
+              tak-monterade kabelstegar och installationer som ofta löper längs väggar).</div>
+          </div>
+        </label>
+        <label class="mode-option">
+          <input type="radio" name="building-type" value="custom">
+          <div class="mode-card">
+            <div class="mode-title">⚙️ Anpassat</div>
+            <div class="mode-desc">Inget preset — i wizard-läget plockar du snittet
+              själv från Z-histogrammet per våning.</div>
+          </div>
+        </label>
+      </div>
+      <div class="alert alert-info" style="font-size:12px;margin-bottom:20px">
+        ℹ️ I wizard-läget kan du justera snittnivån per våning från Z-histogrammet
+        oavsett vad du väljer här — byggnadstypen styr bara default-värdet.
+      </div>
+
+      <div class="section-label">Detekteringsalgoritm (för geometric / hybrid)</div>
       <div class="mode-picker" style="margin-bottom:20px">
         <label class="mode-option">
           <input type="radio" name="algorithm" value="v1" checked>
@@ -157,9 +189,18 @@
           <input type="radio" name="algorithm" value="v2">
           <div class="mode-card">
             <div class="mode-title">🧪 Förbättrad (v2)</div>
-            <div class="mode-desc">Pågående omarbetning med geometriska finjusteringar.
-              Använd när du vill testa men v1 är fortfarande default tills v2 mätbart
-              överträffar.</div>
+            <div class="mode-desc">Histogrambaserad detektion med geometriska
+              finjusteringar. Stöder PCA-rotation, separata params för
+              sammanslagning och pairing.</div>
+          </div>
+        </label>
+        <label class="mode-option">
+          <input type="radio" name="algorithm" value="vertical">
+          <div class="mode-card">
+            <div class="mode-title">📏 Vertikal kontinuitet (v3)</div>
+            <div class="mode-desc">Detekterar en vägg som XY-pixel-kolumn fylld
+              från golv till tak. Robust mot möbler och diagonala byggnader. Bra
+              alternativ när histogram-metoden ger för många falska väggar.</div>
           </div>
         </label>
       </div>
@@ -310,11 +351,11 @@
           </div>
         </div>
 
-        <div class="section-label">Väggar</div>
+        <div class="section-label">Väggar — gemensamma</div>
         <div class="form-grid" style="margin-bottom:16px">
           <div class="form-group">
             <label for="min-wall-length">Min vägglängd (m)</label>
-            <input type="number" id="min-wall-length" value="0.10" step="0.05" min="0.05">
+            <input type="number" id="min-wall-length" value="0.05" step="0.05" min="0.01">
           </div>
           <div class="form-group">
             <label for="min-wall-thickness">Min väggtjocklek (m)</label>
@@ -328,6 +369,49 @@
             <label for="ext-wall-thickness">Ytterväggar tjocklek (m)</label>
             <input type="number" id="ext-wall-thickness" value="0.3" step="0.05">
           </div>
+        </div>
+
+        <div class="section-label">Väggar — v1/v2 histogram (sammanslagning)</div>
+        <div class="form-grid" style="margin-bottom:16px">
+          <div class="form-group">
+            <label for="collinear-merge-distance">Sammanslagningsavstånd (m)</label>
+            <input type="number" id="collinear-merge-distance" value="1.5" step="0.1" min="0.1">
+          </div>
+          <div class="form-group">
+            <label for="pair-min-overlap">Min överlapp för paring (m)</label>
+            <input type="number" id="pair-min-overlap" value="0.20" step="0.05" min="0.05">
+          </div>
+        </div>
+        <div class="alert alert-info" style="font-size:12px;margin-bottom:16px">
+          ℹ️ <strong>Sammanslagningsavstånd</strong> — hur långt ifrån varandra
+          fragment får ligga för att ses som samma vägg-yta. Höj om långa väggar
+          delas upp i bitar.<br>
+          <strong>Min överlapp för paring</strong> — hur mycket två parallella
+          ytor måste överlappa längs väggens riktning för att räknas som två
+          sidor av samma vägg. Sänk för att fånga kortare väggar (köksöar,
+          väggstubbar mellan dörrar).
+        </div>
+
+        <div class="section-label">Väggar — v3 vertikal kontinuitet</div>
+        <div class="form-grid" style="margin-bottom:16px">
+          <div class="form-group">
+            <label for="vertical-slice-thickness">Z-snittstjocklek (m)</label>
+            <input type="number" id="vertical-slice-thickness" value="0.05" step="0.01" min="0.01">
+          </div>
+          <div class="form-group">
+            <label for="vertical-min-fill">Min fyllningsgrad (0–1)</label>
+            <input type="number" id="vertical-min-fill" value="0.70" step="0.05" min="0.10" max="1.0">
+          </div>
+          <div class="form-group">
+            <label for="vertical-min-points">Min punkter per snitt</label>
+            <input type="number" id="vertical-min-points" value="5" step="1" min="1">
+          </div>
+        </div>
+        <div class="alert alert-info" style="font-size:12px;margin-bottom:16px">
+          ℹ️ <strong>Fyllningsgrad</strong> — andel av våningens höjd som en pixel
+          måste vara fylld i. 0.7 = 70%. Sänk för rum med många fönster (där
+          glaset bryter kolonnen); höj för att vara strängare mot möbler som
+          fyller halva höjden.
         </div>
 
         <div class="section-label">Histogramupplösning</div>

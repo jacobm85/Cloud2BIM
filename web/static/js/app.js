@@ -498,6 +498,7 @@ function collectConfig() {
   const mode = (document.querySelector('input[name="run-mode"]:checked') || {}).value || 'full';
   const algorithm = (document.querySelector('input[name="algorithm"]:checked') || {}).value || 'v1';
   const pipelineMode = (document.querySelector('input[name="pipeline-mode"]:checked') || {}).value || 'geometric';
+  const buildingType = (document.querySelector('input[name="building-type"]:checked') || {}).value || 'office';
   return {
     upload_id: state.sourceType === 'upload' ? state.uploadId : null,
     network_path: state.sourceType === 'network' ? state.networkPath : null,
@@ -505,6 +506,7 @@ function collectConfig() {
     e57_input: false,  // auto-detected on backend from file extension
     mode,
     algorithm,
+    building_type: buildingType,
     pipeline_mode: pipelineMode,
     hybrid_min_class_points: parseInt(v('hybrid-threshold')) || 5000,
     seg_enabled: b('seg-enabled'),
@@ -513,6 +515,11 @@ function collectConfig() {
     ml_voxel_size: n('ml-voxel-size') || 0.05,
     geometry_resolution: n('geometry-resolution') || 0.01,
     has_rgb: v('has-rgb') || 'auto',
+    collinear_merge_distance: n('collinear-merge-distance') || 1.5,
+    pair_min_overlap: n('pair-min-overlap') || 0.20,
+    vertical_slice_thickness: n('vertical-slice-thickness') || 0.05,
+    vertical_min_fill: n('vertical-min-fill') || 0.70,
+    vertical_min_points_per_slice: parseInt(v('vertical-min-points')) || 5,
     slabs_enabled: b('slabs-enabled'),
     walls_enabled: b('walls-enabled'),
     openings_enabled: b('openings-enabled'),
