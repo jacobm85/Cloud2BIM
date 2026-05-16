@@ -37,6 +37,7 @@ from cloud2bim.elements.roofs import detect_roofs
 from cloud2bim.elements.slabs import Slab, compute_z_histogram, detect_slabs
 from cloud2bim.elements.stairs import StairFlight, detect_stairs
 from cloud2bim.elements.walls import detect_walls
+from cloud2bim.extraction import extract_openings_ml, extract_slabs_ml, extract_walls_ml
 from cloud2bim.ifc import IfcBuilder
 from cloud2bim.io import center_xy, read_pointcloud
 from cloud2bim.io.coordinates import CoordinateOffset
@@ -264,10 +265,10 @@ def load_pca_angle(cfg: Config) -> float:
 
 
 def stage_slabs(cfg: Config) -> None:
-    """Z-histogram → slab detection. Also persists the shared PCA angle (v2 only)."""
+    """Slab detection via the configured pipeline_mode (ml/hybrid/geometric)."""
     from cloud2bim.elements.slabs import compute_building_pca
     from cloud2bim.legacy import detect_slabs_v1
-    log.info("─── slabs (%s) ───", cfg.algorithm)
+    log.info("─── slabs (mode=%s, fallback=%s) ───", cfg.pipeline_mode, cfg.algorithm)
     t0 = time.time()
     if not cfg.slabs.enabled:
         _save_pickle(Path(cfg.io.work_dir) / "slabs.pkl", [])
@@ -281,12 +282,30 @@ def stage_slabs(cfg: Config) -> None:
     # Z-histogram is needed for the wizard preview regardless of algorithm.
     zh = compute_z_histogram(pts, cfg.slabs.z_step, cfg.slabs.peak_height_ratio)
 
-    if cfg.algorithm == "v1":
-        slabs = detect_slabs_v1(pts, cfg.slabs)
-        pca_angle = 0.0
-    else:
-        pca_angle = compute_building_pca(pts, zh.peak_z)
-        slabs = detect_slabs(pts, cfg.slabs, pca_angle=pca_angle)
+    slabs: list[Slab] = []
+    pca_angle = 0.0
+
+    if cfg.pipeline_mode in ("ml", "hybrid"):
+        try:
+            labels = load_labels(cfg)
+            slabs = extract_slabs_ml(pts, labels, cfg.slabs, cfg.segmentation)
+        except FileNotFoundError:
+            log.warning("ML mode: labels.npy missing — run the 'segment' stage first")
+        except Exception:
+            log.exception("ML slab extraction crashed")
+
+    if (not slabs or len(slabs) < 2) and cfg.pipeline_mode != "ml":
+        if cfg.pipeline_mode == "hybrid":
+            log.warning(
+                "Hybrid: ML found %d slabs (<2) — falling back to geometric (%s)",
+                len(slabs), cfg.algorithm,
+            )
+        if cfg.algorithm == "v1":
+            slabs = detect_slabs_v1(pts, cfg.slabs)
+            pca_angle = 0.0
+        else:
+            pca_angle = compute_building_pca(pts, zh.peak_z)
+            slabs = detect_slabs(pts, cfg.slabs, pca_angle=pca_angle)
 
     work = Path(cfg.io.work_dir)
     _save_pickle(work / "slabs.pkl", slabs)
@@ -343,25 +362,19 @@ def stage_walls(cfg: Config) -> None:
         band_override = bands[i] if i < len(bands) and bands[i] is not None else None
         band_lower = bands_lower[i] if i < len(bands_lower) and bands_lower[i] is not None else None
         contours_out: list = []
-        from cloud2bim.legacy import detect_walls_v1
-        wall_fn = detect_walls_v1 if cfg.algorithm == "v1" else detect_walls
-
         try:
-            walls = wall_fn(
-                storey_points=storey_pts,
-                z_floor=z_floor,
-                z_ceiling=z_ceiling,
+            from cloud2bim.pipeline import _detect_walls_dispatch
+            walls = _detect_walls_dispatch(
+                cfg=cfg,
+                storey_pts=storey_pts,
+                storey_labels=storey_labels,
+                z_floor=z_floor, z_ceiling=z_ceiling,
                 storey_idx=i,
-                cfg=cfg.walls,
-                pc_resolution=cfg.slabs.pc_resolution,
-                grid_coefficient=cfg.slabs.grid_coefficient,
                 slab_polygon_xy=slab_polygon_xy,
-                semantic_labels=storey_labels,
-                exterior_scan=cfg.exterior_scan,
-                cross_section_band=band_override,
-                pca_angle=building_pca_angle,
-                out_contours=contours_out,
-                lower_section_band=band_lower,
+                building_pca_angle=building_pca_angle,
+                band_override=band_override,
+                band_lower=band_lower,
+                contours_out=contours_out,
             )
             if is_placeholder:
                 for w in walls:
@@ -404,13 +417,12 @@ def stage_openings(cfg: Config) -> None:
             label_names=labels.label_names,
         )
         try:
-            openings = detect_openings(
+            from cloud2bim.pipeline import _detect_openings_dispatch
+            openings = _detect_openings_dispatch(
+                cfg=cfg,
                 walls=storey_walls[i],
-                storey_points=storey_pts,
-                cfg=cfg.openings,
-                pc_resolution=cfg.slabs.pc_resolution,
-                grid_coefficient=cfg.slabs.grid_coefficient,
-                semantic_labels=storey_labels,
+                storey_pts=storey_pts,
+                storey_labels=storey_labels,
             )
         except Exception:
             log.exception("Storey %d opening detection failed — skipping", i)

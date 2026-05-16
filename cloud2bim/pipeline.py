@@ -27,6 +27,7 @@ from cloud2bim.elements.openings import detect_openings
 from cloud2bim.elements.roofs import detect_roofs
 from cloud2bim.elements.slabs import Slab, compute_building_pca, compute_z_histogram, detect_slabs
 from cloud2bim.elements.walls import detect_walls
+from cloud2bim.extraction import extract_openings_ml, extract_slabs_ml, extract_walls_ml
 from cloud2bim.legacy import detect_slabs_v1, detect_walls_v1
 from cloud2bim.ifc import IfcBuilder
 from cloud2bim.io import center_xy, read_pointcloud
@@ -88,15 +89,10 @@ def run_pipeline(cfg: Config) -> int:
     labels = _run_segmentation(cfg, points_xyz, seg_rgb)
 
     # ── 5. Slab detection ───────────────────────────────────────────────
-    log.info("─── Slab segmentation (%s) ───", cfg.algorithm)
+    log.info("─── Slab segmentation (mode=%s, fallback algo=%s) ───",
+             cfg.pipeline_mode, cfg.algorithm)
     t0 = time.time()
-    if cfg.algorithm == "v1":
-        slabs = detect_slabs_v1(points_xyz, cfg.slabs)
-        building_pca_angle = 0.0  # v1 doesn't share PCA across stages
-    else:
-        zh = compute_z_histogram(points_xyz, cfg.slabs.z_step, cfg.slabs.peak_height_ratio)
-        building_pca_angle = compute_building_pca(points_xyz, zh.peak_z)
-        slabs = detect_slabs(points_xyz, cfg.slabs, pca_angle=building_pca_angle)
+    slabs, building_pca_angle = _detect_slabs_dispatch(cfg, points_xyz, labels)
     log.info("Slabs: %d in %.1fs", len(slabs), time.time() - t0)
 
     # Synthesize missing floor/ceiling so we can still emit placeholder walls
@@ -131,24 +127,19 @@ def run_pipeline(cfg: Config) -> int:
         band_override = bands[i] if i < len(bands) and bands[i] is not None else None
         band_lower = bands_lower[i] if i < len(bands_lower) and bands_lower[i] is not None else None
         contours_out: list = []
-        wall_fn = detect_walls_v1 if cfg.algorithm == "v1" else detect_walls
         try:
             t0 = time.time()
-            walls = wall_fn(
-                storey_points=storey_pts,
-                z_floor=z_floor,
-                z_ceiling=z_ceiling,
+            walls = _detect_walls_dispatch(
+                cfg=cfg,
+                storey_pts=storey_pts,
+                storey_labels=storey_labels,
+                z_floor=z_floor, z_ceiling=z_ceiling,
                 storey_idx=i,
-                cfg=cfg.walls,
-                pc_resolution=cfg.slabs.pc_resolution,
-                grid_coefficient=cfg.slabs.grid_coefficient,
                 slab_polygon_xy=slab_polygon_xy,
-                semantic_labels=storey_labels,
-                exterior_scan=cfg.exterior_scan,
-                cross_section_band=band_override,
-                pca_angle=building_pca_angle,
-                out_contours=contours_out,
-                lower_section_band=band_lower,
+                building_pca_angle=building_pca_angle,
+                band_override=band_override,
+                band_lower=band_lower,
+                contours_out=contours_out,
             )
             if is_placeholder:
                 for w in walls:
@@ -166,13 +157,11 @@ def run_pipeline(cfg: Config) -> int:
 
         try:
             t0 = time.time()
-            openings = detect_openings(
+            openings = _detect_openings_dispatch(
+                cfg=cfg,
                 walls=walls,
-                storey_points=storey_pts,
-                cfg=cfg.openings,
-                pc_resolution=cfg.slabs.pc_resolution,
-                grid_coefficient=cfg.slabs.grid_coefficient,
-                semantic_labels=storey_labels,
+                storey_pts=storey_pts,
+                storey_labels=storey_labels,
             )
             log.info("Storey %d openings: %d in %.1fs", i, len(openings), time.time() - t0)
         except Exception as exc:
@@ -311,6 +300,151 @@ def run_pipeline(cfg: Config) -> int:
         len(roof_planes),
     )
     return 0
+
+
+# ── dispatch helpers (geometric / hybrid / ml) ──────────────────────────────
+
+
+def _detect_slabs_dispatch(
+    cfg: Config,
+    points_xyz: np.ndarray,
+    labels: SemanticLabels,
+) -> tuple[list[Slab], float]:
+    """Return (slabs, building_pca_angle_rad).
+
+    For ml/hybrid we try the ML extractor first; in hybrid mode we
+    fall back to the geometric path if the ML extractor returned
+    fewer than 2 slabs (a single floor isn't enough to drive walls).
+    """
+    if cfg.pipeline_mode in ("ml", "hybrid"):
+        try:
+            slabs = extract_slabs_ml(points_xyz, labels, cfg.slabs, cfg.segmentation)
+        except Exception:
+            log.exception("ML slab extraction crashed")
+            slabs = []
+        if slabs and len(slabs) >= 2:
+            return slabs, 0.0  # ML path is rotation-agnostic
+        if cfg.pipeline_mode == "ml":
+            log.warning("ML mode: slab extraction returned %d slabs — keeping result", len(slabs))
+            return slabs, 0.0
+        log.warning(
+            "Hybrid: ML found %d slabs (<2) — falling back to geometric (%s)",
+            len(slabs), cfg.algorithm,
+        )
+
+    if cfg.algorithm == "v1":
+        return detect_slabs_v1(points_xyz, cfg.slabs), 0.0
+    zh = compute_z_histogram(points_xyz, cfg.slabs.z_step, cfg.slabs.peak_height_ratio)
+    pca_angle = compute_building_pca(points_xyz, zh.peak_z)
+    return detect_slabs(points_xyz, cfg.slabs, pca_angle=pca_angle), pca_angle
+
+
+def _should_use_ml_for_walls(
+    cfg: Config,
+    storey_labels: SemanticLabels,
+) -> bool:
+    """Decide ml vs geometric for a single storey's walls."""
+    if cfg.pipeline_mode == "geometric":
+        return False
+    if cfg.pipeline_mode == "ml":
+        return True
+    # hybrid — gate on label count for the relevant class.
+    n_wall_pts = int(storey_labels.mask_for(cfg.segmentation.wall_classes).sum())
+    if n_wall_pts < cfg.hybrid_min_class_points:
+        log.info(
+            "Hybrid storey: only %d wall-labelled points (<%d threshold) — using geometric",
+            n_wall_pts, cfg.hybrid_min_class_points,
+        )
+        return False
+    return True
+
+
+def _detect_walls_dispatch(
+    cfg: Config,
+    storey_pts: np.ndarray,
+    storey_labels: SemanticLabels,
+    z_floor: float,
+    z_ceiling: float,
+    storey_idx: int,
+    slab_polygon_xy: np.ndarray,
+    building_pca_angle: float,
+    band_override,
+    band_lower,
+    contours_out: list,
+):
+    """ML or geometric walls per storey, per the configured pipeline_mode."""
+    if _should_use_ml_for_walls(cfg, storey_labels):
+        walls = extract_walls_ml(
+            storey_points=storey_pts,
+            storey_labels=storey_labels,
+            z_floor=z_floor, z_ceiling=z_ceiling,
+            storey_idx=storey_idx,
+            cfg=cfg.walls,
+            seg_cfg=cfg.segmentation,
+            slab_polygon_xy=slab_polygon_xy,
+            exterior_scan=cfg.exterior_scan,
+        )
+        if walls or cfg.pipeline_mode == "ml":
+            return walls
+        log.warning("Hybrid storey %d: ML walls empty — falling back to geometric", storey_idx)
+
+    wall_fn = detect_walls_v1 if cfg.algorithm == "v1" else detect_walls
+    return wall_fn(
+        storey_points=storey_pts,
+        z_floor=z_floor,
+        z_ceiling=z_ceiling,
+        storey_idx=storey_idx,
+        cfg=cfg.walls,
+        pc_resolution=cfg.slabs.pc_resolution,
+        grid_coefficient=cfg.slabs.grid_coefficient,
+        slab_polygon_xy=slab_polygon_xy,
+        semantic_labels=storey_labels,
+        exterior_scan=cfg.exterior_scan,
+        cross_section_band=band_override,
+        pca_angle=building_pca_angle,
+        out_contours=contours_out,
+        lower_section_band=band_lower,
+    )
+
+
+def _detect_openings_dispatch(
+    cfg: Config,
+    walls: list,
+    storey_pts: np.ndarray,
+    storey_labels: SemanticLabels,
+):
+    """ML or geometric openings, per pipeline_mode + hybrid threshold."""
+    if cfg.pipeline_mode == "geometric":
+        use_ml = False
+    elif cfg.pipeline_mode == "ml":
+        use_ml = True
+    else:
+        # hybrid — require both door+window labels combined to clear threshold.
+        n_op_pts = int(storey_labels.mask_for(
+            list(cfg.segmentation.door_classes) + list(cfg.segmentation.window_classes)
+        ).sum())
+        use_ml = n_op_pts >= cfg.hybrid_min_class_points // 4  # quarter threshold
+
+    if use_ml:
+        openings = extract_openings_ml(
+            walls=walls,
+            storey_points=storey_pts,
+            storey_labels=storey_labels,
+            cfg=cfg.openings,
+            seg_cfg=cfg.segmentation,
+        )
+        if openings or cfg.pipeline_mode == "ml":
+            return openings
+        log.info("Hybrid: ML openings empty — trying geometric")
+
+    return detect_openings(
+        walls=walls,
+        storey_points=storey_pts,
+        cfg=cfg.openings,
+        pc_resolution=cfg.slabs.pc_resolution,
+        grid_coefficient=cfg.slabs.grid_coefficient,
+        semantic_labels=storey_labels,
+    )
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
