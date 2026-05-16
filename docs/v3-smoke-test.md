@@ -65,6 +65,30 @@ sudo mount -t cifs //192.168.2.79/ssd250/scan2bim/pointclouds \
 
 The container reads from the mount directly — no file copying.
 
+### (Optional) Pre-download the PTv3 weights
+
+Auto-download happens on first inference. If your network can't reach
+Hugging Face from the container, or you want to avoid the 555 MB
+download interrupting the first run:
+
+```bash
+# Same host path as the bind-mount in docker-compose.ml.yml
+mkdir -p /mnt/SSD250/scan2bim/models
+cd /mnt/SSD250/scan2bim/models
+
+# PointTransformer V3 — S3DIS Area 5, v3m1-0-rpe variant (555 MB)
+curl -L -o ptv3-s3dis-area5.pth \
+  "https://huggingface.co/Pointcept/PointTransformerV3/resolve/main/s3dis-semseg-pt-v3m1-0-rpe/model/model_best.pth"
+
+# Verify size
+ls -lh ptv3-s3dis-area5.pth
+# -rw-r--r-- 1 user user 555M ... ptv3-s3dis-area5.pth
+```
+
+The filename must be exactly `ptv3-s3dis-area5.pth` — that's what
+`cloud2bim/segmentation/weights.py` REGISTRY looks for. If you grab
+a different variant, rename it to that.
+
 ### Run
 
 ```bash

@@ -28,12 +28,19 @@ services:
       # ── Datamappar ───────────────────────────────────────────────────────────
       # Ändra vänster sida av : till din lokala sökväg.
       # Skapa mapparna första gången med:
-      #   mkdir -p /mnt/SSD250/scan2bim/{uploads,jobs,output_xyz,images,pointclouds}
+      #   mkdir -p /mnt/SSD250/scan2bim/{uploads,jobs,output_xyz,images,pointclouds,models}
       #
       - /mnt/SSD250/scan2bim/uploads:/app/web/uploads
       - /mnt/SSD250/scan2bim/jobs:/app/web/jobs
       - /mnt/SSD250/scan2bim/output_xyz:/app/output_xyz
       - /mnt/SSD250/scan2bim/images:/app/images
+
+      # ── ML-modellvikter ──────────────────────────────────────────────────────
+      # Förtränade PTv3 / RandLA-Net checkpoints. Auto-laddas hit vid första
+      # körning, eller lägg dit dem manuellt (se docs/v3-smoke-test.md).
+      # Bind-mount så du ser dem i samma katalogträd som resten av jobben.
+      #
+      - /mnt/SSD250/scan2bim/models:/models
 
       # ── Nätverksdiskar ───────────────────────────────────────────────────────
       # Varje mapp monterad under /drives/<Namn> visas automatiskt i
@@ -42,12 +49,6 @@ services:
       - /mnt/SSD250/scan2bim/pointclouds:/drives/Punktmoln
       # - /mnt/annanNas/projekt:/drives/NAS_Projekt:ro
       # - /mnt/annanNas/skanningar:/drives/Skanningar:ro
-
-      # ── ML-modellvikter ──────────────────────────────────────────────────────
-      # Persisterar nedladdade PTv3/RandLA vikter (~160 MB) över container-
-      # rebuilds. Named volume — Docker hanterar lagring på hosten.
-      #
-      - cloud2bim-models:/models
 
     environment:
       PYTHONUNBUFFERED: "1"
@@ -64,6 +65,3 @@ services:
     shm_size: "2gb"
 
     restart: unless-stopped
-
-volumes:
-  cloud2bim-models:

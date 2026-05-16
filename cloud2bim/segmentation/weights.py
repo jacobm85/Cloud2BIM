@@ -47,12 +47,16 @@ class WeightSpec:
 REGISTRY: dict[str, WeightSpec] = {
     # PointTransformer V3 — S3DIS Area-5 pretrained, 13 classes.
     # Source: Pointcept project (Wu et al. 2024).
+    # Variant: v3m1-0-rpe (relative position encoding, no flash-attn).
+    # The "ppt-extreme" variant exists too but is jointly trained across
+    # multiple datasets and uses 9+ in_channels — incompatible with our
+    # PTV3_IN_CHANNELS=6 wiring without code changes.
     "ptv3-s3dis-area5": WeightSpec(
         filename="ptv3-s3dis-area5.pth",
-        url="https://huggingface.co/Pointcept/PointTransformerV3/resolve/main/s3dis-semseg-pt-v3m1-1-rpe-bs2x4-warmup/model_best.pth",
+        url="https://huggingface.co/Pointcept/PointTransformerV3/resolve/main/s3dis-semseg-pt-v3m1-0-rpe/model/model_best.pth",
         sha256=None,  # Fill in once we've verified a download
-        size_mb=160.0,
-        description="PointTransformer V3, trained on S3DIS Area 1-4+6, validated on Area 5",
+        size_mb=555.0,
+        description="PointTransformer V3 (v3m1-0-rpe), trained on S3DIS Area 1-4+6, validated on Area 5",
     ),
     # RandLA-Net — S3DIS pretrained from Open3D-ML release.
     "randla-s3dis": WeightSpec(
