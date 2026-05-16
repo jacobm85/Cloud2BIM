@@ -65,7 +65,18 @@ RUN pip install --no-cache-dir \
 RUN git clone https://github.com/Pointcept/Pointcept.git /opt/pointcept_src && \
     cd /opt/pointcept_src && \
     git checkout d74c646db6abec569d0f23e0c34e7ddfce142789 && \
-    rm -rf .git
+    rm -rf .git && \
+    # Pointcept's pointcept/models/__init__.py eagerly imports
+    # default.py which pulls in the entire training-side stack
+    # (peft, transformers, lora-utils, ...) — none of which PTv3
+    # inference needs. Replace it with a stripped __init__ so that
+    # `from pointcept.models.point_transformer_v3 import ...` only
+    # loads PTv3's own submodule. If you ever need DefaultSegmentor
+    # in the container, install the missing deps and revert this.
+    printf '%s\n' \
+      '# Stripped __init__ — see Dockerfile.ml for why.' \
+      '# Original imports default.py which requires peft/transformers.' \
+      > /opt/pointcept_src/pointcept/models/__init__.py
 ENV PYTHONPATH=/opt/pointcept_src:${PYTHONPATH}
 
 # Application source
