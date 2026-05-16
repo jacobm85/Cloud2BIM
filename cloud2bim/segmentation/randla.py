@@ -1,4 +1,26 @@
-"""RandLA-Net backend via Open3D-ML — fallback when PTv3 is unavailable.
+"""RandLA-Net backend via Open3D-ML.
+
+⚠ NOT CURRENTLY FUNCTIONAL in the Docker.ml image (and removed from
+the wizard's backend dropdown). Open3D-ML 0.19 ships C++ extensions
+compiled against torch 2.2's ABI; we install torch 2.5 because that's
+what Pointcept/PTv3 needs. The symbol layout doesn't match, so the
+.so fails to dlopen with errors like:
+
+    undefined symbol: _ZN3c1015SmallVectorBaseIjE8grow_podEPvmm
+
+This isn't a config or version-string issue — it's binary
+incompatibility that can only be fixed by either:
+  (a) rebuilding Open3D-ML from source against torch 2.5 (multi-hour
+      CMake build, no guarantees), or
+  (b) replacing the implementation with a torch-version-agnostic
+      RandLA-Net source (e.g. aRI0U/RandLA-Net-pytorch).
+
+Until then PTv3 (auto-CPU-fallback on small GPUs) and pipeline_mode=
+geometric cover the same use cases. The CLI / YAML still accepts
+backend=randla so the code path is testable for whoever picks (a) or
+(b) up.
+
+Original design notes follow.
 
 Lighter weight than PTv3 (no spconv, no pointcept), still effective on
 indoor S3DIS-style data.

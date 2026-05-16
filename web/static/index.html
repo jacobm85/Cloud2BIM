@@ -218,9 +218,8 @@
         <div class="form-group">
           <label for="seg-backend">Backend</label>
           <select id="seg-backend">
-            <option value="ptv3">PointTransformer V3 (rekommenderas, kräver CUDA)</option>
-            <option value="randla">RandLA-Net (lättare, fungerar på CPU)</option>
-            <option value="none">Ingen (passthrough)</option>
+            <option value="ptv3">PointTransformer V3 (faller automatiskt till CPU på äldre/mindre GPU)</option>
+            <option value="none">Ingen (passthrough — pipelinen ignorerar ML-steget)</option>
           </select>
         </div>
       </div>
