@@ -32,11 +32,25 @@ COPY requirements-docker.txt .
 RUN pip install --no-cache-dir -r requirements-docker.txt
 
 # ML deps. spconv-cu120 is forward-compatible with cu124+ drivers
-# (NVIDIA ABI is stable within the 12.x family). Pointcept installed
-# from main; pin if upstream changes the model API again.
+# (NVIDIA ABI is stable within the 12.x family).
+#
+# Pointcept's repo ships no setup.py / pyproject.toml so pip install
+# from git fails ("not a Python project"). Clone it into a known path
+# and add to PYTHONPATH instead — PTv3 is a self-contained module that
+# only imports torch + spconv + a few utility libs from elsewhere.
+# Pinned to a known-working commit so main-branch churn doesn't break
+# rebuilds; bump deliberately when you want a newer PTv3.
 RUN pip install --no-cache-dir \
     spconv-cu120==2.3.6 \
-    "git+https://github.com/Pointcept/Pointcept.git@main"
+    einops \
+    addict \
+    timm
+
+RUN git clone https://github.com/Pointcept/Pointcept.git /opt/pointcept_src && \
+    cd /opt/pointcept_src && \
+    git checkout d74c646db6abec569d0f23e0c34e7ddfce142789 && \
+    rm -rf .git
+ENV PYTHONPATH=/opt/pointcept_src:${PYTHONPATH}
 
 # Application source
 COPY . .
