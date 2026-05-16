@@ -56,7 +56,19 @@ class PTv3Segmenter(Segmenter):
     ) -> SemanticLabels:
         self._ensure_model()
         n = len(points)
-        log.info("PTv3 inference on %s points (rgb=%s)", f"{n:,}", rgb is not None)
+        log.info("PTv3 inference on %s points (rgb=%s, device=%s)",
+                 f"{n:,}", rgb is not None, self._device)
+        if self._device == "cpu":
+            # Rough back-of-envelope: PTv3 takes ~50-200x longer on CPU
+            # than on a modern GPU. Tell the operator before the wait
+            # starts so they don't think it hung.
+            est_min = max(5, n // 200_000)
+            log.warning(
+                "Running on CPU — this will be slow. Estimate: %d-%d min "
+                "for %s points. Consider switching to pipeline_mode=geometric "
+                "(no ML, runs immediately) or upgrading to a Volta+/8 GB+ GPU.",
+                est_min, est_min * 4, f"{n:,}",
+            )
 
         # 1. Voxelise — collapse high-density points into one voxel each.
         voxel_xyz, voxel_rgb, voxel_idx = self._voxelize(
@@ -84,23 +96,67 @@ class PTv3Segmenter(Segmenter):
 
     # ── model / device setup ────────────────────────────────────────────
 
+    # Minimum capabilities for PTv3 on GPU. Below either threshold we
+    # fall back to CPU automatically — Pascal (sm_61) and Maxwell don't
+    # have prebuilt spconv kernels and the JIT path hangs / OOM-kills,
+    # and <4 GB total VRAM can't fit the model + a meaningful chunk.
+    MIN_COMPUTE_CAPABILITY = 7.0   # Volta+
+    MIN_TOTAL_VRAM_GB = 4.0
+
     def _resolve_device(self, requested: str) -> str:
-        if requested != "auto":
-            return requested
+        if requested == "cpu":
+            log.info("PTv3 device=cpu (explicit) — inference will be slow")
+            return "cpu"
+        if requested == "cuda":
+            log.warning(
+                "PTv3 device=cuda (explicit override) — skipping the "
+                "auto-fallback safety checks. If you crash mid-forward "
+                "on a pre-Volta GPU or <4 GB VRAM, that's why."
+            )
+            return "cuda"
+        # requested == "auto" — probe.
         try:
             import torch
-            if torch.cuda.is_available():
-                # Log GPU info so the operator can size max_voxels_per_batch.
-                name = torch.cuda.get_device_name(0)
-                free, total = torch.cuda.mem_get_info(0)
-                log.info(
-                    "CUDA detected: %s — %.1f GB free of %.1f GB total",
-                    name, free / 1024**3, total / 1024**3,
-                )
-                return "cuda"
-            return "cpu"
         except ImportError:
+            log.info("torch not installed — using CPU")
             return "cpu"
+
+        if not torch.cuda.is_available():
+            log.info("CUDA not available — using CPU (slow)")
+            return "cpu"
+
+        name = torch.cuda.get_device_name(0)
+        major, minor = torch.cuda.get_device_capability(0)
+        cc = major + minor / 10
+        free, total = torch.cuda.mem_get_info(0)
+        free_gb, total_gb = free / 1024**3, total / 1024**3
+        log.info(
+            "CUDA detected: %s (sm_%d%d, %.1f GB free of %.1f GB total)",
+            name, major, minor, free_gb, total_gb,
+        )
+
+        if cc < self.MIN_COMPUTE_CAPABILITY:
+            log.warning(
+                "GPU compute capability %.1f is below the supported floor "
+                "(%.1f / Volta). spconv ships no prebuilt SIMT kernels "
+                "for this arch, and the JIT path hangs or gets OOM-killed "
+                "in practice. Falling back to CPU (slow but reliable). "
+                "Override with segmentation.device=cuda in config.yaml "
+                "if you want to force a try.",
+                cc, self.MIN_COMPUTE_CAPABILITY,
+            )
+            return "cpu"
+
+        if total_gb < self.MIN_TOTAL_VRAM_GB:
+            log.warning(
+                "GPU has only %.1f GB total VRAM (need %.1f GB minimum "
+                "for PTv3). Falling back to CPU (slow but reliable). "
+                "Override with segmentation.device=cuda in config.yaml.",
+                total_gb, self.MIN_TOTAL_VRAM_GB,
+            )
+            return "cpu"
+
+        return "cuda"
 
     def _ensure_model(self) -> None:
         if self._model is not None:
