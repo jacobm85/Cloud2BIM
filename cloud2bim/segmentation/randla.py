@@ -41,10 +41,12 @@ class RandLASegmenter(Segmenter):
         self._model = None
         log.info("RandLA-Net segmenter initialised")
 
-    def segment(self, points: np.ndarray) -> SemanticLabels:
+    def segment(
+        self, points: np.ndarray, rgb: np.ndarray | None = None
+    ) -> SemanticLabels:
         self._ensure_model()
-        log.info("RandLA inference on %s points", f"{len(points):,}")
-        labels = self._infer(points)
+        log.info("RandLA inference on %s points (rgb=%s)", f"{len(points):,}", rgb is not None)
+        labels = self._infer(points, rgb)
         return SemanticLabels(label_ids=labels.astype(np.int32), label_names=S3DIS_LABELS)
 
     def _ensure_model(self) -> None:
@@ -65,16 +67,21 @@ class RandLASegmenter(Segmenter):
         self._model.load_state_dict(state.get("model_state_dict", state), strict=False)
         self._model.eval()
 
-    def _infer(self, points: np.ndarray) -> np.ndarray:
+    def _infer(self, points: np.ndarray, rgb: np.ndarray | None) -> np.ndarray:
         import torch
-        # RandLA-Net expects XYZ + per-point feature (RGB if available, else
-        # repeat XYZ). PointCloud-level RGB handling lives in the pipeline
-        # adapter (task 3); for now we duplicate XYZ as a placeholder feature.
-        feat = points  # fallback when caller passes XYZ only
+        # RandLA-Net's S3DIS recipe uses 6 input channels: XYZ + RGB.
+        # If the cloud has no colour we fall back to mid-grey, matching
+        # PTv3's behaviour (slight accuracy loss vs real RGB).
+        from cloud2bim.segmentation.ptv3 import SYNTHETIC_RGB, _normalise_rgb
+        if rgb is None:
+            rgb_f = np.broadcast_to(SYNTHETIC_RGB, points.shape).astype(np.float32)
+        else:
+            rgb_f = _normalise_rgb(rgb)
+        feat = np.concatenate([points.astype(np.float32), rgb_f], axis=1)
         with torch.no_grad():
             inputs = {
-                "point": torch.from_numpy(points).float().unsqueeze(0),
-                "feat": torch.from_numpy(feat).float().unsqueeze(0),
+                "point": torch.from_numpy(points.astype(np.float32)).unsqueeze(0),
+                "feat": torch.from_numpy(feat).unsqueeze(0),
             }
             out = self._model(inputs)
             return out.argmax(dim=-1).squeeze(0).cpu().numpy()

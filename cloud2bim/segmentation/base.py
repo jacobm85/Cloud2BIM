@@ -50,8 +50,17 @@ class Segmenter(ABC):
     """Abstract per-point semantic segmenter."""
 
     @abstractmethod
-    def segment(self, points: np.ndarray) -> SemanticLabels:
-        """Return per-point labels. ``points`` is (N, 3) XYZ."""
+    def segment(
+        self, points: np.ndarray, rgb: np.ndarray | None = None
+    ) -> SemanticLabels:
+        """Return per-point labels.
+
+        ``points`` is (N, 3) XYZ in world metres.
+        ``rgb`` is (N, 3) colour in any range — implementations normalise.
+        When ``rgb`` is None the implementation falls back to a synthetic
+        feature (typically a constant grey) which works with S3DIS-pretrained
+        weights at a small accuracy cost.
+        """
         ...
 
     @property
@@ -70,7 +79,9 @@ class PassthroughSegmenter(Segmenter):
 
     LABEL_NAME = "unknown"
 
-    def segment(self, points: np.ndarray) -> SemanticLabels:
+    def segment(
+        self, points: np.ndarray, rgb: np.ndarray | None = None
+    ) -> SemanticLabels:
         return SemanticLabels(
             label_ids=np.zeros(len(points), dtype=np.int32),
             label_names=(self.LABEL_NAME,),
