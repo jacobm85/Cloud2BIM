@@ -1,4 +1,32 @@
 .env
+.env.*
 __pycache__/
 *.pyc
 *.pyo
+
+# Secrets — never commit
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+id_ecdsa*
+.ssh/
+secrets.yaml
+secrets.yml
+credentials.json
+*.credentials
+
+# Large/binary model weights (live in CLOUD2BIM_MODELS_DIR or compose volume)
+*.pth
+*.ckpt
+*.safetensors
+
+# Local user data
+web/jobs/
+web/uploads/
+data/
+*.npz
+*.e57
+*.las
+*.laz
+*.xyz

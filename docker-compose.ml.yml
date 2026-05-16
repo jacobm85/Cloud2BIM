@@ -1,0 +1,53 @@
+# GPU compose for Cloud2BIM v3-ml.
+#
+# Run on the .74 server (CUDA 12.5 host, Ubuntu 24 LTS):
+#   cd /opt/Cloud2BIM
+#   docker compose -f docker-compose.ml.yml up -d --build
+#
+# Scans go in /opt/Cloud2BIM/data on the host. Web UI on :8001.
+
+services:
+  cloud2bim-ml:
+    build:
+      context: .
+      dockerfile: Dockerfile.ml
+    image: cloud2bim:ml
+    container_name: cloud2bim-ml
+
+    # GPU allocation — needs nvidia-container-toolkit on the host.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - CLOUD2BIM_MODELS_DIR=/models
+      # Disable spconv's CUDA-cache prompting at import time.
+      - SPCONV_DISABLE_JIT=1
+
+    volumes:
+      # Scans copied to /opt/Cloud2BIM/data on the host (read-only)
+      - ./data:/data:ro
+      # Persist downloaded model weights across rebuilds (~160 MB for PTv3)
+      - cloud2bim-models:/models
+      # Persist job outputs and uploads across rebuilds
+      - cloud2bim-jobs:/app/web/jobs
+      - cloud2bim-uploads:/app/web/uploads
+
+    ports:
+      - "8001:8001"
+
+    # Larger shared memory because torch's data loaders use /dev/shm
+    shm_size: "2gb"
+
+    restart: unless-stopped
+
+volumes:
+  cloud2bim-models:
+  cloud2bim-jobs:
+  cloud2bim-uploads:

@@ -6,6 +6,97 @@ them into IFC geometry.
 
 Target scan for this team: `\\192.168.2.79\ssd250\scan2bim\pointclouds\vasakronan temp.e57`
 
+> **Recommended path** — use the Docker images, not local pip.
+> See "Docker workflow (recommended)" below before the pip section.
+
+## Docker workflow (recommended)
+
+Two images / two compose files:
+
+| File | Purpose | Hardware |
+| --- | --- | --- |
+| `Dockerfile` + `docker-compose.yml` | Existing CPU-only image | Any host, no ML |
+| `Dockerfile.ml` + `docker-compose.ml.yml` | **v3 ML image** | CUDA 12.x host with `nvidia-container-toolkit` |
+
+### Build
+
+The CUDA 12.4 base image works for any CUDA 12.x driver (forward-binary
+compatible). Building doesn't need a GPU — only running does.
+
+```bash
+cd /opt/Cloud2BIM
+git fetch origin && git checkout v3-ml && git pull
+docker compose -f docker-compose.ml.yml build
+```
+
+Expect ~10 minutes the first time: pulls the 4 GB pytorch base image,
+installs spconv-cu120 and Pointcept from source. Subsequent rebuilds
+hit the layer cache.
+
+### Prepare test data
+
+The compose file bind-mounts `/opt/Cloud2BIM/data` (host) as `/data`
+(container, read-only). Drop the scan there:
+
+```bash
+mkdir -p /opt/Cloud2BIM/data
+cp /path/to/vasakronan-temp.e57 /opt/Cloud2BIM/data/
+```
+
+### Run
+
+```bash
+docker compose -f docker-compose.ml.yml up -d
+docker compose -f docker-compose.ml.yml logs -f cloud2bim-ml
+```
+
+Web UI: `http://<host>:8001`
+
+In the wizard:
+1. Step 1 → "Network path" → `/data/vasakronan-temp.e57`
+   (the in-container path; host file is bind-mounted there)
+2. Step 2 → **Pipeline-läge** = "Hybrid" (or "ML-only" once trusted)
+3. Step 2 → **Backend** = PointTransformer V3
+4. Step 2 → **Has RGB** = Auto
+
+The first run downloads PTv3 weights into the `cloud2bim-models` named
+volume (~160 MB). The volume persists across container rebuilds so the
+download happens once per host.
+
+### Quick GPU sanity test inside the container
+
+```bash
+docker compose -f docker-compose.ml.yml exec cloud2bim-ml python -c "
+import torch
+print('cuda:', torch.cuda.is_available(),
+      torch.cuda.get_device_name() if torch.cuda.is_available() else '')
+from pointcept.models.point_transformer_v3 import PointTransformerV3
+print('PTv3 import OK')
+"
+```
+
+Expected:
+```
+cuda: True NVIDIA RTX ...
+PTv3 import OK
+```
+
+If `cuda: False` — `nvidia-container-toolkit` can't see the GPU. Verify
+the toolkit is installed and configured for Docker:
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+```
+
+If that command also fails, follow the NVIDIA container toolkit install
+guide for Ubuntu 24 — typically `sudo apt-get install -y nvidia-container-toolkit`
+followed by `sudo nvidia-ctk runtime configure --runtime=docker` and a
+`sudo systemctl restart docker`.
+
+---
+
+## Local pip workflow (alternative)
+
 ## 1. Install ML dependencies (Windows + CUDA)
 
 Pointcept's PointTransformer V3 needs torch + spconv built against your
