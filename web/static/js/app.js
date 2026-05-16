@@ -482,7 +482,7 @@ function collectConfig() {
     hybrid_min_class_points: parseInt(v('hybrid-threshold')) || 5000,
     seg_enabled: b('seg-enabled'),
     seg_backend: v('seg-backend') || 'ptv3',
-    seg_weights: v('seg-weights') || null,
+    seg_weights: null,  // Always auto-resolved via REGISTRY + /models bind-mount; advanced users set weights_path in config.yaml directly.
     ml_voxel_size: n('ml-voxel-size') || 0.05,
     geometry_resolution: n('geometry-resolution') || 0.01,
     has_rgb: v('has-rgb') || 'auto',
