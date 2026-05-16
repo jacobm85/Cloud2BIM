@@ -25,6 +25,21 @@ def create_segmenter(cfg: SegmentationConfig) -> Segmenter:
         except ImportError as exc:
             log.warning("PTv3 unavailable (%s) — falling back to passthrough", exc)
             return PassthroughSegmenter()
+        except RuntimeError as exc:
+            # PTv3's _resolve_device raises RuntimeError when the host
+            # can't run it: no CUDA, GPU too old (pre-Volta), or too
+            # little VRAM. spconv has no functional CPU path so there's
+            # no point pretending otherwise — drop in Passthrough so
+            # the hybrid pipeline transparently switches to geometric.
+            log.warning(
+                "PTv3 cannot run on this host: %s\n"
+                "Falling back to passthrough segmentation — hybrid "
+                "pipeline will use the geometric extractor instead. "
+                "For non-ML detection set pipeline_mode=geometric in "
+                "the wizard to skip this step entirely.",
+                exc,
+            )
+            return PassthroughSegmenter()
 
     if cfg.backend == "randla":
         try:

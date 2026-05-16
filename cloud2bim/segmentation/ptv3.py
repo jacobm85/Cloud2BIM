@@ -58,17 +58,6 @@ class PTv3Segmenter(Segmenter):
         n = len(points)
         log.info("PTv3 inference on %s points (rgb=%s, device=%s)",
                  f"{n:,}", rgb is not None, self._device)
-        if self._device == "cpu":
-            # Rough back-of-envelope: PTv3 takes ~50-200x longer on CPU
-            # than on a modern GPU. Tell the operator before the wait
-            # starts so they don't think it hung.
-            est_min = max(5, n // 200_000)
-            log.warning(
-                "Running on CPU — this will be slow. Estimate: %d-%d min "
-                "for %s points. Consider switching to pipeline_mode=geometric "
-                "(no ML, runs immediately) or upgrading to a Volta+/8 GB+ GPU.",
-                est_min, est_min * 4, f"{n:,}",
-            )
 
         # 1. Voxelise — collapse high-density points into one voxel each.
         voxel_xyz, voxel_rgb, voxel_idx = self._voxelize(
@@ -96,34 +85,51 @@ class PTv3Segmenter(Segmenter):
 
     # ── model / device setup ────────────────────────────────────────────
 
-    # Minimum capabilities for PTv3 on GPU. Below either threshold we
-    # fall back to CPU automatically — Pascal (sm_61) and Maxwell don't
-    # have prebuilt spconv kernels and the JIT path hangs / OOM-kills,
-    # and <4 GB total VRAM can't fit the model + a meaningful chunk.
+    # Hard requirements for PTv3. Below either threshold we raise so the
+    # factory can drop in a PassthroughSegmenter and the hybrid pipeline
+    # transparently falls back to geometric detection.
+    #
+    # spconv has no functional CPU implementation of sparse convolution
+    # (bias+act layers assert features.is_cuda), so "CPU fallback" for
+    # PTv3 isn't possible regardless of how patient the user is. Pascal
+    # (sm_61) and older fail too because spconv's prebuilt SIMT kernels
+    # target sm_70+ and JIT compilation for older archs hangs or OOM-
+    # kills the process.
     MIN_COMPUTE_CAPABILITY = 7.0   # Volta+
     MIN_TOTAL_VRAM_GB = 4.0
 
     def _resolve_device(self, requested: str) -> str:
         if requested == "cpu":
-            log.info("PTv3 device=cpu (explicit) — inference will be slow")
-            return "cpu"
+            raise RuntimeError(
+                "PTv3 explicit device=cpu requested, but spconv has no "
+                "functional CPU implementation of sparse 3D convolution. "
+                "Use pipeline_mode=geometric for non-ML detection, or "
+                "run PTv3 on a CUDA GPU."
+            )
         if requested == "cuda":
             log.warning(
                 "PTv3 device=cuda (explicit override) — skipping the "
-                "auto-fallback safety checks. If you crash mid-forward "
-                "on a pre-Volta GPU or <4 GB VRAM, that's why."
+                "GPU capability checks. Crashes mid-forward on pre-Volta "
+                "GPUs or <4 GB VRAM are now your problem."
             )
             return "cuda"
         # requested == "auto" — probe.
         try:
             import torch
         except ImportError:
-            log.info("torch not installed — using CPU")
-            return "cpu"
+            raise RuntimeError(
+                "PTv3 needs torch but torch isn't installed. The "
+                "Dockerfile.ml image bundles it; if you're running pip-"
+                "installed, see docs/v3-smoke-test.md."
+            )
 
         if not torch.cuda.is_available():
-            log.info("CUDA not available — using CPU (slow)")
-            return "cpu"
+            raise RuntimeError(
+                "PTv3 needs a CUDA GPU. spconv has no functional CPU "
+                "implementation of sparse convolution. Either run on a "
+                "host with a Volta+/8 GB+ GPU, or switch to "
+                "pipeline_mode=geometric for non-ML detection."
+            )
 
         name = torch.cuda.get_device_name(0)
         major, minor = torch.cuda.get_device_capability(0)
@@ -136,25 +142,20 @@ class PTv3Segmenter(Segmenter):
         )
 
         if cc < self.MIN_COMPUTE_CAPABILITY:
-            log.warning(
-                "GPU compute capability %.1f is below the supported floor "
-                "(%.1f / Volta). spconv ships no prebuilt SIMT kernels "
-                "for this arch, and the JIT path hangs or gets OOM-killed "
-                "in practice. Falling back to CPU (slow but reliable). "
-                "Override with segmentation.device=cuda in config.yaml "
-                "if you want to force a try.",
-                cc, self.MIN_COMPUTE_CAPABILITY,
+            raise RuntimeError(
+                f"PTv3 needs compute capability >= {self.MIN_COMPUTE_CAPABILITY} "
+                f"(Volta+). This GPU is sm_{major}{minor} ({name}). "
+                "spconv has no prebuilt SIMT kernels for older archs "
+                "and the JIT path hangs/OOM-kills in practice. Switch "
+                "to pipeline_mode=geometric or upgrade the GPU."
             )
-            return "cpu"
 
         if total_gb < self.MIN_TOTAL_VRAM_GB:
-            log.warning(
-                "GPU has only %.1f GB total VRAM (need %.1f GB minimum "
-                "for PTv3). Falling back to CPU (slow but reliable). "
-                "Override with segmentation.device=cuda in config.yaml.",
-                total_gb, self.MIN_TOTAL_VRAM_GB,
+            raise RuntimeError(
+                f"PTv3 needs >= {self.MIN_TOTAL_VRAM_GB} GB total VRAM. "
+                f"{name} has only {total_gb:.1f} GB. Switch to "
+                "pipeline_mode=geometric or upgrade the GPU."
             )
-            return "cpu"
 
         return "cuda"
 
@@ -325,29 +326,6 @@ class PTv3Segmenter(Segmenter):
 
         self._model.to(self._device).eval()
         self._seg_head.to(self._device).eval()
-
-        # On CPU, spconv's default MaskImplicitGemm algo asserts is_cuda
-        # and crashes. The "Native" algorithm is CPU-compatible but
-        # slower. Apply it to every sparse-conv layer in PTv3 — the
-        # standalone PointTransformerV3 model constructs layers without
-        # specifying algo, so we have to monkey-patch after the fact.
-        if self._device == "cpu":
-            self._force_native_spconv_algo()
-
-    def _force_native_spconv_algo(self) -> None:
-        """Set algo=Native on every spconv layer (required for CPU)."""
-        try:
-            import spconv.pytorch as spconv
-            from spconv.core import ConvAlgo
-        except ImportError:
-            log.warning("spconv not importable — can't force Native algo")
-            return
-        patched = 0
-        for m in self._model.modules():
-            if hasattr(m, "algo"):
-                m.algo = ConvAlgo.Native
-                patched += 1
-        log.info("Forced spconv ConvAlgo.Native on %d layers (CPU mode)", patched)
 
     def _resolve_weights_path(self) -> Path:
         return resolve_weights(self.DEFAULT_WEIGHTS_KEY, explicit_path=self.cfg.weights_path)
