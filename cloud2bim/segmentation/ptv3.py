@@ -176,39 +176,77 @@ class PTv3Segmenter(Segmenter):
                 state = state[key]
                 break
 
-        # Pointcept saves keys as "backbone.<...>" and "seg_head.<...>"
-        # (or sometimes "cls_head"/"head"). Split them and load each
-        # piece into its own module.
-        backbone_state = {
-            k[len("backbone."):]: v for k, v in state.items()
-            if k.startswith("backbone.")
-        }
-        if not backbone_state:
-            # Older checkpoints save backbone keys at the top level.
-            backbone_state = {k: v for k, v in state.items() if "." in k}
-        missing, unexpected = self._model.load_state_dict(backbone_state, strict=False)
+        # Dump the structure so we can see what prefixes the checkpoint
+        # actually uses — much faster than guessing across rebuilds.
+        all_keys = sorted(state.keys())
+        top_prefixes: dict[str, int] = {}
+        for k in all_keys:
+            top = k.split(".", 1)[0] if "." in k else "<no-dot>"
+            top_prefixes[top] = top_prefixes.get(top, 0) + 1
+        log.info(
+            "Checkpoint structure: %d total keys, top-level groups: %s",
+            len(all_keys),
+            ", ".join(f"{p}({n})" for p, n in sorted(top_prefixes.items(), key=lambda x: -x[1])),
+        )
+        log.info("Checkpoint sample keys (first 10): %s", all_keys[:10])
+
+        # Auto-detect backbone prefix: try each top-level group, strip it,
+        # see which yields the most matches against our backbone module.
+        backbone_param_names = set(dict(self._model.named_parameters()).keys()) | \
+                               set(dict(self._model.named_buffers()).keys())
+        best_prefix = None
+        best_match_count = 0
+        best_state: dict = {}
+        for prefix in list(top_prefixes.keys()) + [""]:  # "" = no prefix
+            pfx = f"{prefix}." if prefix else ""
+            candidate = {
+                k[len(pfx):]: v for k, v in state.items()
+                if (not pfx) or k.startswith(pfx)
+            }
+            matches = sum(1 for name in candidate if name in backbone_param_names)
+            if matches > best_match_count:
+                best_match_count = matches
+                best_prefix = prefix
+                best_state = candidate
+        log.info(
+            "Best backbone prefix: '%s' → %d/%d params match",
+            best_prefix or "<root>", best_match_count, len(backbone_param_names),
+        )
+        missing, unexpected = self._model.load_state_dict(best_state, strict=False)
         log.info(
             "PTv3 backbone loaded: %d params matched, %d missing, %d unexpected",
-            len(backbone_state) - len(unexpected), len(missing), len(unexpected),
+            best_match_count, len(missing), len(unexpected),
         )
+        if unexpected:
+            log.info("First 5 unexpected keys (might point at the head): %s", unexpected[:5])
 
+        # Look for the classification head Linear(64, 13). Check every key
+        # whose tensor shape matches (out_features=13, in_features=64),
+        # so we don't depend on a fixed name.
         head_loaded = False
-        for prefix in ("seg_head", "cls_head", "classifier", "head"):
-            w = state.get(f"{prefix}.weight")
-            b = state.get(f"{prefix}.bias")
-            if w is not None and b is not None:
+        head_in = self._seg_head.in_features   # 64
+        head_out = self._seg_head.out_features # 13 (len(S3DIS_LABELS))
+        for k, v in state.items():
+            if not k.endswith(".weight"):
+                continue
+            if v.dim() == 2 and v.shape == (head_out, head_in):
+                bias_key = k[: -len(".weight")] + ".bias"
+                b = state.get(bias_key)
+                if b is None or b.dim() != 1 or b.shape[0] != head_out:
+                    continue
                 with torch.no_grad():
-                    self._seg_head.weight.copy_(w)
+                    self._seg_head.weight.copy_(v)
                     self._seg_head.bias.copy_(b)
-                log.info("Classification head loaded from key prefix '%s.'", prefix)
+                log.info("Classification head loaded from key '%s' (shape match %d→%d)",
+                         k[:-len(".weight")], head_in, head_out)
                 head_loaded = True
                 break
         if not head_loaded:
             log.error(
-                "No classification head weights found in checkpoint "
-                "(tried prefixes: seg_head, cls_head, classifier, head). "
-                "Predictions WILL be random. Inspect the .pth state_dict "
-                "keys and update the prefix list in ptv3.py."
+                "No Linear(%d→%d) weights found in checkpoint — classification "
+                "head will use random init and predictions will be nonsense. "
+                "Inspect the dumped checkpoint structure above to find the head.",
+                head_in, head_out,
             )
 
         self._model.to(self._device).eval()
