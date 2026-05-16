@@ -190,18 +190,27 @@ class PTv3Segmenter(Segmenter):
         )
         log.info("Checkpoint sample keys (first 10): %s", all_keys[:10])
 
-        # Auto-detect backbone prefix: try each top-level group, strip it,
-        # see which yields the most matches against our backbone module.
+        # Auto-detect backbone prefix. Checkpoints can wrap parameters
+        # several levels deep (e.g. "module." for DataParallel + "backbone."
+        # for Pointcept's segmentor → "module.backbone.<name>"). Generate
+        # every prefix up to 3 segments deep from the checkpoint's own
+        # keys, then pick the one that maximises matches against the
+        # standalone PTv3's named parameters.
         backbone_param_names = set(dict(self._model.named_parameters()).keys()) | \
                                set(dict(self._model.named_buffers()).keys())
-        best_prefix = None
+        candidate_prefixes: set[str] = {""}
+        for k in all_keys:
+            segs = k.split(".")
+            for i in range(1, min(4, len(segs))):  # up to 3 segments
+                candidate_prefixes.add(".".join(segs[:i]) + ".")
+        best_prefix = ""
         best_match_count = 0
         best_state: dict = {}
-        for prefix in list(top_prefixes.keys()) + [""]:  # "" = no prefix
-            pfx = f"{prefix}." if prefix else ""
+        for prefix in candidate_prefixes:
+            pfx_len = len(prefix)
             candidate = {
-                k[len(pfx):]: v for k, v in state.items()
-                if (not pfx) or k.startswith(pfx)
+                k[pfx_len:]: v for k, v in state.items()
+                if (not prefix) or k.startswith(prefix)
             }
             matches = sum(1 for name in candidate if name in backbone_param_names)
             if matches > best_match_count:
