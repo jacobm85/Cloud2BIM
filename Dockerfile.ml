@@ -90,6 +90,20 @@ RUN git clone https://github.com/Pointcept/PointTransformerV3.git /opt/pt_v3 && 
     touch __init__.py
 ENV PYTHONPATH=/opt:${PYTHONPATH}
 
+# Open3D-ML's torch backend hard-pins to torch 2.2.* and raises on import
+# when any other version is installed. We need torch 2.5 for Pointcept,
+# so the version check has to go. Open3D-ML's runtime API is API-stable
+# across these torch releases for inference (the version-pin is mostly
+# about training-time autograd shims we don't use). Replace the raise
+# with a logged warning so RandLA-Net is selectable as a fallback when
+# PTv3 doesn't fit the hardware.
+RUN python -c "import open3d; from pathlib import Path; \
+    p = Path(open3d.__file__).parent / 'ml' / 'torch' / '__init__.py'; \
+    src = p.read_text(); \
+    patched = src.replace('raise Exception(', 'print(\"[cloud2bim] Open3D-ML torch version mismatch — patched out:\", '); \
+    p.write_text(patched); \
+    print('Patched', p)"
+
 # Application source
 COPY . .
 

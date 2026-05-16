@@ -59,6 +59,18 @@ class RandLASegmenter(Segmenter):
                 "Open3D-ML (torch backend) not installed. "
                 "Run: pip install open3d torch tensorboard"
             ) from exc
+        except Exception as exc:
+            # Most likely the torch-version hard-pin reasserting itself
+            # (Open3D-ML 0.19 pins to torch 2.2.* but we ship 2.5 for
+            # Pointcept). Dockerfile.ml patches that check at build time
+            # but the patch can drift if the upstream file changes.
+            raise RuntimeError(
+                f"RandLA-Net import failed ({exc}). The Open3D-ML / torch "
+                "version stack is famously fragile. Two reliable paths "
+                "on your hardware: switch backend to 'ptv3' (will run "
+                "on CPU automatically if your GPU is too small/old), or "
+                "set pipeline_mode=geometric for no-ML detection."
+            ) from exc
 
         self._model = RandLANet(**RANDLA_S3DIS_MODEL_CFG)
         weights = resolve_weights(self.DEFAULT_WEIGHTS_KEY, explicit_path=self.cfg.weights_path)
