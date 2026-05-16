@@ -97,11 +97,14 @@ class PTv3Segmenter(Segmenter):
             return
         try:
             import torch  # noqa: F401  (verifies presence)
-            from pointcept.models.point_transformer_v3 import PointTransformerV3
+            # Standalone PTv3 repo, not the full Pointcept framework —
+            # see Dockerfile.ml for the rationale (avoids pulling in
+            # peft / transformers / training-side deps).
+            from pt_v3.model import PointTransformerV3
         except ImportError as exc:
             raise ImportError(
-                f"PointTransformerV3 import failed ({exc}). The Docker.ml image "
-                "bundles this stack — rebuild with `docker compose -f "
+                f"PointTransformerV3 import failed ({exc}). The Dockerfile.ml "
+                "image bundles this stack — rebuild with `docker compose -f "
                 "docker-compose.ml.yml build --no-cache cloud2bim-ml`. For "
                 "local installs see docs/v3-smoke-test.md (pip section)."
             ) from exc

@@ -62,22 +62,27 @@ RUN pip install --no-cache-dir \
     torch_spline_conv \
     -f https://data.pyg.org/whl/torch-2.5.0+cu124.html
 
-RUN git clone https://github.com/Pointcept/Pointcept.git /opt/pointcept_src && \
-    cd /opt/pointcept_src && \
-    git checkout d74c646db6abec569d0f23e0c34e7ddfce142789 && \
+# Pointcept's main repo is a research framework that imports its full
+# training stack (peft, transformers, point_prompt_training, ...) just
+# to load the PTv3 architecture. Pointcept publishes a separate repo
+# specifically for standalone PTv3 use — that's what we clone here.
+# Its model.py wraps flash_attn in try/except so we don't need to
+# install or stub it, and its only internal import is `.serialization`
+# which ships in the same folder.
+#
+# Imported in cloud2bim/segmentation/ptv3.py as:
+#     from pt_v3.model import PointTransformerV3
+#
+# Pinned to a known-working commit so upstream churn can't silently
+# break PTV3_IN_CHANNELS or model kwargs.
+RUN git clone https://github.com/Pointcept/PointTransformerV3.git /opt/pt_v3 && \
+    cd /opt/pt_v3 && \
     rm -rf .git && \
-    # Pointcept's pointcept/models/__init__.py eagerly imports
-    # default.py which pulls in the entire training-side stack
-    # (peft, transformers, lora-utils, ...) — none of which PTv3
-    # inference needs. Replace it with a stripped __init__ so that
-    # `from pointcept.models.point_transformer_v3 import ...` only
-    # loads PTv3's own submodule. If you ever need DefaultSegmentor
-    # in the container, install the missing deps and revert this.
-    printf '%s\n' \
-      '# Stripped __init__ — see Dockerfile.ml for why.' \
-      '# Original imports default.py which requires peft/transformers.' \
-      > /opt/pointcept_src/pointcept/models/__init__.py
-ENV PYTHONPATH=/opt/pointcept_src:${PYTHONPATH}
+    # Promote the directory to a Python package so `from pt_v3.model
+    # import ...` works and the `.serialization` relative import inside
+    # model.py resolves.
+    touch __init__.py
+ENV PYTHONPATH=/opt:${PYTHONPATH}
 
 # Application source
 COPY . .
