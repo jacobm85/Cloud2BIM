@@ -31,8 +31,11 @@ services:
       - SPCONV_DISABLE_JIT=1
 
     volumes:
-      # Scans copied to /opt/Cloud2BIM/data on the host (read-only)
-      - ./data:/data:ro
+      # Scan source — defaults to ./data on the host. Override with
+      # CLOUD2BIM_DATA_DIR in .env or the shell to point at a mounted
+      # SMB share, NFS path, or anywhere the host can read scans from.
+      # Example: CLOUD2BIM_DATA_DIR=/mnt/scan2bim docker compose -f ... up
+      - ${CLOUD2BIM_DATA_DIR:-./data}:/data:ro
       # Persist downloaded model weights across rebuilds (~160 MB for PTv3)
       - cloud2bim-models:/models
       # Persist job outputs and uploads across rebuilds

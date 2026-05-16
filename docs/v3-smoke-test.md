@@ -33,15 +33,32 @@ Expect ~10 minutes the first time: pulls the 4 GB pytorch base image,
 installs spconv-cu120 and Pointcept from source. Subsequent rebuilds
 hit the layer cache.
 
-### Prepare test data
+### Point the container at your scans
 
-The compose file bind-mounts `/opt/Cloud2BIM/data` (host) as `/data`
-(container, read-only). Drop the scan there:
+The compose file mounts a host directory into the container as
+`/data` (read-only). It defaults to `./data` relative to the compose
+file, but you can override it with `CLOUD2BIM_DATA_DIR` — handy when
+your scans already live on an SMB/NFS share mounted on the host:
 
 ```bash
-mkdir -p /opt/Cloud2BIM/data
-cp /path/to/vasakronan-temp.e57 /opt/Cloud2BIM/data/
+# Permanent (recommended): create .env next to docker-compose.ml.yml
+echo 'CLOUD2BIM_DATA_DIR=/mnt/scan2bim' > .env
+
+# Or one-shot for a single up command:
+CLOUD2BIM_DATA_DIR=/mnt/scan2bim docker compose -f docker-compose.ml.yml up -d
 ```
+
+If the share isn't mounted on the host yet, mount it once (CIFS example):
+
+```bash
+sudo mkdir -p /mnt/scan2bim
+sudo mount -t cifs //192.168.2.79/ssd250/scan2bim /mnt/scan2bim \
+    -o ro,vers=3.0,credentials=/etc/cifs-credentials,uid=$(id -u),gid=$(id -g)
+# Add to /etc/fstab for boot-time mounting.
+```
+
+You don't need to copy files — the container reads from the mount
+directly via the bind-mount.
 
 ### Run
 
@@ -53,8 +70,10 @@ docker compose -f docker-compose.ml.yml logs -f cloud2bim-ml
 Web UI: `http://<host>:8001`
 
 In the wizard:
-1. Step 1 → "Network path" → `/data/vasakronan-temp.e57`
-   (the in-container path; host file is bind-mounted there)
+1. Step 1 → "Network path" → in-container path under `/data`, e.g.
+   `/data/pointclouds/vasakronan temp.e57`. (The wizard always sees the
+   container's filesystem, never the host. Whatever directory you bound
+   to `/data` appears there.)
 2. Step 2 → **Pipeline-läge** = "Hybrid" (or "ML-only" once trusted)
 3. Step 2 → **Backend** = PointTransformer V3
 4. Step 2 → **Has RGB** = Auto
