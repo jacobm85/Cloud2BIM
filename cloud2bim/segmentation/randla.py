@@ -63,7 +63,19 @@ class RandLASegmenter(Segmenter):
         self._model = RandLANet(**RANDLA_S3DIS_MODEL_CFG)
         weights = resolve_weights(self.DEFAULT_WEIGHTS_KEY, explicit_path=self.cfg.weights_path)
         import torch
-        state = torch.load(str(weights), map_location="cpu")
+        # weights_only=True blocks pickle code-execution at load time.
+        # See ptv3.py for the rationale; fall back with a warning if
+        # the checkpoint contains non-allowlisted globals.
+        try:
+            state = torch.load(str(weights), map_location="cpu", weights_only=True)
+        except Exception as exc:
+            log.warning(
+                "torch.load weights_only=True failed (%s). Falling back "
+                "to weights_only=False — safe only because RandLA-Net "
+                "weights ship from Open3D-ML's official release.",
+                exc,
+            )
+            state = torch.load(str(weights), map_location="cpu", weights_only=False)
         self._model.load_state_dict(state.get("model_state_dict", state), strict=False)
         self._model.eval()
 

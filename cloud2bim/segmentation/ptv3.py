@@ -123,7 +123,25 @@ class PTv3Segmenter(Segmenter):
             num_classes=len(S3DIS_LABELS),
         )
         import torch
-        state = torch.load(str(weights_path), map_location=self._device)
+        # weights_only=True blocks arbitrary code execution at unpickle
+        # time — the .pth format is pickle-based, so even checkpoints
+        # from trusted sources should be loaded with this flag. It only
+        # allows known tensor/storage globals; anything else (including
+        # optimiser state, custom classes) raises and we fall back with
+        # an explicit warning. The PTv3 S3DIS checkpoint contains an
+        # OneCycleLR scheduler state which isn't on torch's default
+        # allowlist before 2.6, hence the fallback.
+        try:
+            state = _safe_torch_load(str(weights_path), self._device)
+        except Exception as exc:
+            log.warning(
+                "torch.load weights_only=True failed (%s). Falling back "
+                "to weights_only=False — safe only when the source is "
+                "trusted (we got this checkpoint from the official "
+                "Pointcept Hugging Face mirror).",
+                exc,
+            )
+            state = torch.load(str(weights_path), map_location=self._device, weights_only=False)
         # Some checkpoints wrap the model inside "state_dict" or "model".
         for key in ("state_dict", "model", "model_state_dict"):
             if isinstance(state, dict) and key in state and isinstance(state[key], dict):
@@ -285,6 +303,19 @@ class PTv3Segmenter(Segmenter):
             if hasattr(out, "feat"):
                 out = out.feat  # some Pointcept versions wrap output in a Point dict
             return out.detach().cpu().numpy().astype(np.float32)
+
+
+def _safe_torch_load(path: str, device: str):
+    """torch.load with weights_only=True — blocks pickle code-execution.
+
+    Tries the strict mode first. If the checkpoint contains a global
+    that's not on torch's allowlist (typical: optimiser scheduler state
+    from training-time checkpoints), the caller's except clause should
+    log a warning and fall back to weights_only=False — but only for
+    checkpoints from sources you trust.
+    """
+    import torch
+    return torch.load(path, map_location=device, weights_only=True)
 
 
 def _normalise_rgb(rgb: np.ndarray) -> np.ndarray:

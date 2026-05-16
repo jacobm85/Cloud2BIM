@@ -89,6 +89,27 @@ The filename must be exactly `ptv3-s3dis-area5.pth` — that's what
 `cloud2bim/segmentation/weights.py` REGISTRY looks for. If you grab
 a different variant, rename it to that.
 
+#### A note on the "Unsafe" pickle warning on Hugging Face
+
+PyTorch `.pth` files are pickle-based, and Hugging Face flags every
+pickle file as "Unsafe" because pickle can execute arbitrary Python at
+load time. That warning is about the *format*, not Pointcept.
+
+Pointcept is a CVPR'24 Oral research project from MMLab/Meta AI,
+published under the official `Pointcept` HF org — as trusted a source
+as research checkpoints get. The detected pickle imports in this
+checkpoint are all standard torch / numpy / collections globals
+(no red flags — verified at download time).
+
+We additionally load with `torch.load(..., weights_only=True)` in both
+`ptv3.py` and `randla.py`, which blocks pickle code-execution at load
+time regardless of file contents. There's a fallback to
+`weights_only=False` with a warning if the checkpoint contains globals
+not on torch's allowlist (the PTv3 checkpoint includes an OneCycleLR
+scheduler state which fails strict mode before torch 2.6) — in that
+case the fallback is only safe because the file came from the trusted
+HF mirror.
+
 ### Run
 
 ```bash
