@@ -49,11 +49,57 @@ class SegmentationConfig(BaseModel):
     backend: Literal["ptv3", "randla", "none"] = "ptv3"
     weights_path: Optional[Path] = Field(
         default=None,
-        description="Path to model weights. None = use bundled default for backend.",
+        description=(
+            "Path to model weights. None = auto-download a pretrained "
+            "S3DIS checkpoint for the chosen backend and cache it in "
+            "%LOCALAPPDATA%/cloud2bim/models (Windows) or "
+            "~/.cache/cloud2bim/models (Linux/Mac)."
+        ),
     )
-    voxel_size: float = Field(default=0.05, gt=0, description="Voxel size for ML input (m)")
+    ml_voxel_size: float = Field(
+        default=0.05,
+        gt=0,
+        description=(
+            "Voxel size for ML inference (m). Default 5 cm matches the "
+            "S3DIS training resolution of the pretrained PTv3/RandLA "
+            "weights — using a smaller voxel (e.g. 1 cm) makes inference "
+            "much slower AND degrades accuracy because the model is "
+            "out-of-distribution. Geometric precision in the final BIM "
+            "is set by geometry_resolution, not this. Override only if "
+            "your custom weights were trained at a different scale."
+        ),
+    )
+    geometry_resolution: float = Field(
+        default=0.01,
+        gt=0,
+        description=(
+            "Resolution (m) for RANSAC plane fitting, slab boundary "
+            "extraction and opening detection. This is what controls "
+            "final BIM precision. Default 1 cm is appropriate for most "
+            "high-density indoor scans."
+        ),
+    )
+    has_rgb: Literal["auto", "true", "false"] = Field(
+        default="auto",
+        description=(
+            "Whether to feed RGB to the model. 'auto' inspects the "
+            "input file and uses RGB when available, falling back to "
+            "height-above-floor as the single scalar feature. Override "
+            "to 'false' if the cloud has RGB but the colour is noise "
+            "(e.g. uniform grey from a structured-light scanner)."
+        ),
+    )
     device: Literal["cuda", "cpu", "auto"] = "auto"
     batch_size: int = Field(default=4, ge=1)
+    max_voxels_per_batch: int = Field(
+        default=200_000,
+        ge=10_000,
+        description=(
+            "Chunk inference into batches of at most this many voxels. "
+            "PTv3 OOMs around 500k voxels on a 12 GB card; tune to your "
+            "GPU memory."
+        ),
+    )
     cache_labels: bool = Field(
         default=True,
         description="Save labels.npy to work_dir so re-runs skip inference",
@@ -63,9 +109,15 @@ class SegmentationConfig(BaseModel):
     wall_classes: List[str] = Field(default=["wall"])
     floor_classes: List[str] = Field(default=["floor"])
     ceiling_classes: List[str] = Field(default=["ceiling"])
+    column_classes: List[str] = Field(default=["column"])
     clutter_classes: List[str] = Field(default=["clutter", "chair", "table", "sofa", "bookcase"])
     door_classes: List[str] = Field(default=["door"])
     window_classes: List[str] = Field(default=["window"])
+
+    # Backwards-compat: code still calling .voxel_size gets the ML voxel.
+    @property
+    def voxel_size(self) -> float:
+        return self.ml_voxel_size
 
 
 # ─── Slabs ────────────────────────────────────────────────────────────────────
@@ -318,7 +370,32 @@ class Config(BaseModel):
             "Wall + slab detection variant. 'v1' = original Cloud2BIM "
             "(VaclavNezerka/Cloud2BIM), kept as known-good baseline. "
             "'v2' = current rewrite with experimental geometric tweaks; "
-            "use only after verifying it beats v1 on your data."
+            "use only after verifying it beats v1 on your data. Only "
+            "consulted when pipeline_mode includes a geometric stage."
+        ),
+    )
+
+    pipeline_mode: Literal["geometric", "hybrid", "ml"] = Field(
+        default="hybrid",
+        description=(
+            "How extraction is run. 'geometric' = histogram-only (v1/v2 "
+            "path, no ML required, fast but cluttered interiors degrade). "
+            "'hybrid' (default) = ML-driven extraction with geometric "
+            "fallback per storey when ML finds too few wall/floor points. "
+            "'ml' = ML-only, no fallback — pick when the segmentation is "
+            "known good and you want the cleanest separation from "
+            "furniture. Segmentation is only loaded for hybrid/ml."
+        ),
+    )
+
+    hybrid_min_class_points: int = Field(
+        default=5_000,
+        ge=100,
+        description=(
+            "Hybrid mode falls back to geometric extraction for any "
+            "storey where the ML returns fewer than this many points "
+            "for the relevant class (e.g. 'wall'). Lower = trust ML "
+            "more aggressively; higher = trust geometric fallback more."
         ),
     )
 
