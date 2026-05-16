@@ -89,7 +89,16 @@ class PTv3Segmenter(Segmenter):
             return requested
         try:
             import torch
-            return "cuda" if torch.cuda.is_available() else "cpu"
+            if torch.cuda.is_available():
+                # Log GPU info so the operator can size max_voxels_per_batch.
+                name = torch.cuda.get_device_name(0)
+                free, total = torch.cuda.mem_get_info(0)
+                log.info(
+                    "CUDA detected: %s — %.1f GB free of %.1f GB total",
+                    name, free / 1024**3, total / 1024**3,
+                )
+                return "cuda"
+            return "cpu"
         except ImportError:
             return "cpu"
 
@@ -401,22 +410,46 @@ class PTv3Segmenter(Segmenter):
         # Reset grid to start at origin per chunk (PTv3 internals assume non-negative).
         grid_coord -= grid_coord.min(axis=0)
 
-        with torch.no_grad():
-            data_dict = {
-                "coord": torch.from_numpy(voxel_xyz.astype(np.float32)).to(self._device),
-                "feat": torch.from_numpy(feat).to(self._device),
-                "grid_coord": torch.from_numpy(grid_coord).to(self._device),
-                # Pointcept expects ``offset`` to be the cumulative point
-                # count per batch element. Single chunk → single entry.
-                "offset": torch.tensor([len(voxel_xyz)], dtype=torch.long, device=self._device),
-            }
-            # Backbone produces per-voxel embeddings; the standalone PTv3
-            # model wraps them in a Point object (.feat is the tensor).
-            out = self._model(data_dict)
-            features = out.feat if hasattr(out, "feat") else out
-            # Classification head → per-voxel logits over S3DIS classes.
-            logits = self._seg_head(features)
-            return logits.detach().cpu().numpy().astype(np.float32)
+        # Pre-flight GPU memory log so we see exactly when an OOM hits.
+        if self._device == "cuda":
+            free, total = torch.cuda.mem_get_info(0)
+            log.info(
+                "PTv3 chunk: %d voxels → forward (GPU free %.1f / %.1f GB)",
+                len(voxel_xyz), free / 1024**3, total / 1024**3,
+            )
+
+        try:
+            with torch.no_grad():
+                data_dict = {
+                    "coord": torch.from_numpy(voxel_xyz.astype(np.float32)).to(self._device),
+                    "feat": torch.from_numpy(feat).to(self._device),
+                    "grid_coord": torch.from_numpy(grid_coord).to(self._device),
+                    # Pointcept expects ``offset`` to be the cumulative point
+                    # count per batch element. Single chunk → single entry.
+                    "offset": torch.tensor([len(voxel_xyz)], dtype=torch.long, device=self._device),
+                }
+                # Backbone produces per-voxel embeddings; the standalone PTv3
+                # model wraps them in a Point object (.feat is the tensor).
+                out = self._model(data_dict)
+                features = out.feat if hasattr(out, "feat") else out
+                # Classification head → per-voxel logits over S3DIS classes.
+                logits = self._seg_head(features)
+                result = logits.detach().cpu().numpy().astype(np.float32)
+        except torch.cuda.OutOfMemoryError as exc:
+            torch.cuda.empty_cache()
+            log.error(
+                "GPU OOM on chunk of %d voxels (current max_voxels_per_batch=%d). "
+                "Lower segmentation.max_voxels_per_batch in config until it fits.",
+                len(voxel_xyz), self.cfg.max_voxels_per_batch,
+            )
+            raise
+        finally:
+            # Free intermediate tensors before the next chunk so the seam
+            # overlap doesn't double-allocate. Cheap and prevents drift.
+            if self._device == "cuda":
+                torch.cuda.empty_cache()
+
+        return result
 
 
 def _safe_torch_load(path: str, device: str):

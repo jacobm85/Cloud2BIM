@@ -92,12 +92,14 @@ class SegmentationConfig(BaseModel):
     device: Literal["cuda", "cpu", "auto"] = "auto"
     batch_size: int = Field(default=4, ge=1)
     max_voxels_per_batch: int = Field(
-        default=200_000,
-        ge=10_000,
+        default=60_000,
+        ge=5_000,
         description=(
             "Chunk inference into batches of at most this many voxels. "
-            "PTv3 OOMs around 500k voxels on a 12 GB card; tune to your "
-            "GPU memory."
+            "PTv3 with RPE builds large attention matrices; ~60k voxels "
+            "fits comfortably on a 12 GB card and ~150k on a 24 GB card. "
+            "Raise if you have headroom — chunking has a small accuracy "
+            "cost from seam-voting between tiles."
         ),
     )
     cache_labels: bool = Field(
