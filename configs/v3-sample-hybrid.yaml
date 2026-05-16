@@ -1,0 +1,90 @@
+# Cloud2BIM v3 — sample config for the hybrid pipeline mode.
+#
+# Run with:
+#     python -m cloud2bim run configs/v3-sample-hybrid.yaml
+#
+# Hybrid mode tries the ML-driven extraction first and falls back to
+# the histogram path per storey if the segmentation model finds too few
+# wall/floor points. Safest default for unknown scans.
+
+io:
+  # Edit to point at your scan. Network paths work on Windows when the
+  # share is reachable (the example below is the one the team uses):
+  #   - \\192.168.2.79\ssd250\scan2bim\pointclouds\vasakronan temp.e57
+  input_files:
+    - "C:/path/to/scan.e57"
+  output_ifc: "C:/path/to/output.ifc"
+  work_dir: "C:/path/to/work"
+  dilute: true
+  dilution_factor: 10
+  center_coordinates: true
+
+# Pipeline mode: geometric | hybrid (default) | ml
+pipeline_mode: hybrid
+hybrid_min_class_points: 5000
+
+# Geometric fallback algorithm — v1 (original) or v2 (rewrite).
+algorithm: v1
+exterior_scan: false
+
+segmentation:
+  enabled: true
+  backend: ptv3          # ptv3 (GPU) / randla (CPU) / none
+  # weights_path: leave null to auto-download from the registered URL into
+  # %LOCALAPPDATA%\cloud2bim\models (Windows) or ~/.cache/cloud2bim/models.
+  weights_path: null
+  ml_voxel_size: 0.05     # 5 cm — matches S3DIS training; don't shrink without retraining
+  geometry_resolution: 0.01  # 1 cm — final BIM precision
+  has_rgb: auto           # auto | true | false
+  device: auto            # auto = CUDA if available, else CPU
+  max_voxels_per_batch: 200000
+  cache_labels: true
+
+  # Class → element mapping. Only edit if your custom-trained model uses
+  # a different vocabulary than S3DIS.
+  wall_classes: [wall]
+  floor_classes: [floor]
+  ceiling_classes: [ceiling]
+  column_classes: [column]
+  door_classes: [door]
+  window_classes: [window]
+  clutter_classes: [clutter, chair, table, sofa, bookcase]
+
+slabs:
+  enabled: true
+  bottom_floor_thickness: 0.3
+  top_floor_thickness: 0.4
+  pc_resolution: 0.002
+  grid_coefficient: 5
+  z_step: 0.15
+  max_slab_thickness: 0.5
+  peak_height_ratio: 0.25
+
+walls:
+  enabled: true
+  min_length: 0.10
+  min_thickness: 0.05
+  max_thickness: 0.75
+  exterior_thickness: 0.30
+  use_ml_filter: true
+  max_walls_per_storey: 300
+
+openings:
+  enabled: true
+  min_window_width: 0.40
+  min_window_height: 0.60
+  door_min_height: 1.60
+
+columns:
+  enabled: false
+stairs:
+  enabled: false
+roofs:
+  enabled: false
+
+ifc:
+  project:
+    name: "v3 Smoke Test"
+    long_name: "Cloud2BIM v3-ml hybrid"
+  default_material: Concrete
+  revit_compatible: true
