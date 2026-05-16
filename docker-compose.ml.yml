@@ -1,10 +1,9 @@
 # GPU compose for Cloud2BIM v3-ml.
+# Same volume layout as docker-compose.yml — only the build target,
+# image tag, GPU allocation and the model-weights volume differ.
 #
-# Run on the .74 server (CUDA 12.5 host, Ubuntu 24 LTS):
-#   cd /opt/Cloud2BIM
+# Run on a CUDA 12.x host with nvidia-container-toolkit installed:
 #   docker compose -f docker-compose.ml.yml up -d --build
-#
-# Scans go in /opt/Cloud2BIM/data on the host. Web UI on :8001.
 
 services:
   cloud2bim-ml:
@@ -13,6 +12,8 @@ services:
       dockerfile: Dockerfile.ml
     image: cloud2bim:ml
     container_name: cloud2bim-ml
+    ports:
+      - "8001:8001"
 
     # GPU allocation — needs nvidia-container-toolkit on the host.
     deploy:
@@ -23,34 +24,46 @@ services:
               count: all
               capabilities: [gpu]
 
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      - CLOUD2BIM_MODELS_DIR=/models
-      # Disable spconv's CUDA-cache prompting at import time.
-      - SPCONV_DISABLE_JIT=1
-
     volumes:
-      # Scan source — defaults to ./data on the host. Override with
-      # CLOUD2BIM_DATA_DIR in .env or the shell to point at a mounted
-      # SMB share, NFS path, or anywhere the host can read scans from.
-      # Example: CLOUD2BIM_DATA_DIR=/mnt/scan2bim docker compose -f ... up
-      - ${CLOUD2BIM_DATA_DIR:-./data}:/data:ro
-      # Persist downloaded model weights across rebuilds (~160 MB for PTv3)
+      # ── Datamappar ───────────────────────────────────────────────────────────
+      # Ändra vänster sida av : till din lokala sökväg.
+      # Skapa mapparna första gången med:
+      #   mkdir -p /mnt/SSD250/scan2bim/{uploads,jobs,output_xyz,images,pointclouds}
+      #
+      - /mnt/SSD250/scan2bim/uploads:/app/web/uploads
+      - /mnt/SSD250/scan2bim/jobs:/app/web/jobs
+      - /mnt/SSD250/scan2bim/output_xyz:/app/output_xyz
+      - /mnt/SSD250/scan2bim/images:/app/images
+
+      # ── Nätverksdiskar ───────────────────────────────────────────────────────
+      # Varje mapp monterad under /drives/<Namn> visas automatiskt i
+      # filbläddraren med <Namn> som visningsnamn.
+      #
+      - /mnt/SSD250/scan2bim/pointclouds:/drives/Punktmoln
+      # - /mnt/annanNas/projekt:/drives/NAS_Projekt:ro
+      # - /mnt/annanNas/skanningar:/drives/Skanningar:ro
+
+      # ── ML-modellvikter ──────────────────────────────────────────────────────
+      # Persisterar nedladdade PTv3/RandLA vikter (~160 MB) över container-
+      # rebuilds. Named volume — Docker hanterar lagring på hosten.
+      #
       - cloud2bim-models:/models
-      # Persist job outputs and uploads across rebuilds
-      - cloud2bim-jobs:/app/web/jobs
-      - cloud2bim-uploads:/app/web/uploads
 
-    ports:
-      - "8001:8001"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      OPEN3D_CPU_RENDERING: "true"
+      MPLBACKEND: "Agg"
+      # Cache pretrained weights here (matches the /models volume above).
+      CLOUD2BIM_MODELS_DIR: /models
+      # Disable spconv's CUDA-cache prompting at import time.
+      SPCONV_DISABLE_JIT: "1"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
 
-    # Larger shared memory because torch's data loaders use /dev/shm
+    # Larger shared memory because torch's data loaders use /dev/shm.
     shm_size: "2gb"
 
     restart: unless-stopped
 
 volumes:
   cloud2bim-models:
-  cloud2bim-jobs:
-  cloud2bim-uploads:

@@ -35,30 +35,35 @@ hit the layer cache.
 
 ### Point the container at your scans
 
-The compose file mounts a host directory into the container as
-`/data` (read-only). It defaults to `./data` relative to the compose
-file, but you can override it with `CLOUD2BIM_DATA_DIR` — handy when
-your scans already live on an SMB/NFS share mounted on the host:
+`docker-compose.ml.yml` uses the same volume layout as the v2
+`docker-compose.yml`:
 
-```bash
-# Permanent (recommended): create .env next to docker-compose.ml.yml
-echo 'CLOUD2BIM_DATA_DIR=/mnt/scan2bim' > .env
+- `/app/web/{uploads,jobs}`, `/app/output_xyz`, `/app/images` — local
+  data dirs, edit the left side of `:` to your host paths.
+- `/drives/<Namn>` — anything mounted here is auto-discovered by the
+  wizard's file browser and shown with `<Namn>` as the display label
+  (the scan logic lives in `web/main.py` at `_DRIVES_ROOT`).
 
-# Or one-shot for a single up command:
-CLOUD2BIM_DATA_DIR=/mnt/scan2bim docker compose -f docker-compose.ml.yml up -d
+Default mounts in the file:
+
+```yaml
+- /mnt/SSD250/scan2bim/pointclouds:/drives/Punktmoln
+# - /mnt/annanNas/projekt:/drives/NAS_Projekt:ro
+# - /mnt/annanNas/skanningar:/drives/Skanningar:ro
 ```
 
-If the share isn't mounted on the host yet, mount it once (CIFS example):
+If the share isn't mounted on the host yet, the standard CIFS mount
+works:
 
 ```bash
-sudo mkdir -p /mnt/scan2bim
-sudo mount -t cifs //192.168.2.79/ssd250/scan2bim /mnt/scan2bim \
+sudo mkdir -p /mnt/SSD250/scan2bim/pointclouds
+sudo mount -t cifs //192.168.2.79/ssd250/scan2bim/pointclouds \
+    /mnt/SSD250/scan2bim/pointclouds \
     -o ro,vers=3.0,credentials=/etc/cifs-credentials,uid=$(id -u),gid=$(id -g)
 # Add to /etc/fstab for boot-time mounting.
 ```
 
-You don't need to copy files — the container reads from the mount
-directly via the bind-mount.
+The container reads from the mount directly — no file copying.
 
 ### Run
 
@@ -70,10 +75,9 @@ docker compose -f docker-compose.ml.yml logs -f cloud2bim-ml
 Web UI: `http://<host>:8001`
 
 In the wizard:
-1. Step 1 → "Network path" → in-container path under `/data`, e.g.
-   `/data/pointclouds/vasakronan temp.e57`. (The wizard always sees the
-   container's filesystem, never the host. Whatever directory you bound
-   to `/data` appears there.)
+1. Step 1 → pick the scan from the file browser. Anything mounted under
+   `/drives/<Namn>` is listed automatically — `vasakronan temp.e57`
+   under `Punktmoln` with the default compose layout.
 2. Step 2 → **Pipeline-läge** = "Hybrid" (or "ML-only" once trusted)
 3. Step 2 → **Backend** = PointTransformer V3
 4. Step 2 → **Has RGB** = Auto
