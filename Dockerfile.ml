@@ -10,7 +10,13 @@
 
 # pytorch/pytorch already ships torch 2.5.1+cu124 + cudnn 9 — saves us
 # from compiling CUDA bindings or pulling a 4 GB torch wheel manually.
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+#
+# Using the -devel variant (not -runtime) because spconv's GEMM kernels
+# are compiled at first run by NVRTC, which needs CUDA development
+# headers like cuda/std/cassert. The runtime image strips those out and
+# you get "cannot open source file 'cuda/std/cassert'" mid-inference.
+# devel adds ~5 GB to the image but is the standard fix.
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 
 # System libs: open3d, opencv-headless, matplotlib, plus git+curl for
 # the Pointcept pip install and the viewer asset download.
