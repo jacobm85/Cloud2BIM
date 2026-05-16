@@ -100,8 +100,10 @@ class PTv3Segmenter(Segmenter):
             from pointcept.models.point_transformer_v3 import PointTransformerV3
         except ImportError as exc:
             raise ImportError(
-                "Pointcept / PointTransformerV3 not installed. "
-                "Run: pip install torch spconv-cu118 git+https://github.com/Pointcept/Pointcept.git"
+                f"PointTransformerV3 import failed ({exc}). The Docker.ml image "
+                "bundles this stack — rebuild with `docker compose -f "
+                "docker-compose.ml.yml build --no-cache cloud2bim-ml`. For "
+                "local installs see docs/v3-smoke-test.md (pip section)."
             ) from exc
 
         weights_path = self._resolve_weights_path()
