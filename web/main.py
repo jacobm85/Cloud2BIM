@@ -306,6 +306,26 @@ async def delete_job(job_id: str):
     return {"deleted": job_id}
 
 
+@app.delete("/api/jobs")
+async def delete_all_jobs():
+    """Remove every job directory + in-memory job entry. Used by the
+    'Rensa alla' button on the reuse panel — handy after a series of
+    failed runs leaves dozens of dead jobs cluttering the list."""
+    import shutil
+    deleted: list[str] = []
+    if JOBS_DIR.exists():
+        for job_dir in JOBS_DIR.iterdir():
+            if not job_dir.is_dir():
+                continue
+            try:
+                shutil.rmtree(job_dir)
+                deleted.append(job_dir.name)
+            except Exception:
+                pass
+    job_manager._jobs.clear()
+    return {"deleted_count": len(deleted), "deleted": deleted}
+
+
 @app.post("/api/jobs")
 async def create_job(request: CreateJobRequest):
     if not request.source_job_id and not request.upload_id and not request.network_path:

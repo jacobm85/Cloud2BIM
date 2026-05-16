@@ -272,6 +272,33 @@ async function loadReusableJobs() {
 }
 window.onNext1 = onNext1;
 
+// Wire the "Rensa alla jobb" button. Confirms, hits DELETE /api/jobs,
+// then reloads the reuse list.
+document.addEventListener('DOMContentLoaded', () => {
+  const btn = document.getElementById('btn-clear-all-jobs');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    if (!confirm('Ta bort ALLA tidigare jobb och deras filer?\n\nDetta kan inte ångras.')) return;
+    btn.disabled = true;
+    btn.textContent = 'Rensar…';
+    try {
+      const res = await fetch('/api/jobs', { method: 'DELETE' });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      state.sourceJobId = null;
+      const nextBtn = document.getElementById('btn-next-1');
+      if (nextBtn) nextBtn.disabled = true;
+      await loadReusableJobs();
+      alert(`${data.deleted_count} jobb borttagna.`);
+    } catch (err) {
+      alert('Kunde inte rensa jobb: ' + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '🗑 Rensa alla jobb';
+    }
+  });
+});
+
 // ── Network browser ───────────────────────────────────────────────────────
 let browserHistory = [];
 
