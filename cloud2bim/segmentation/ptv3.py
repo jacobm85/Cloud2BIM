@@ -326,6 +326,29 @@ class PTv3Segmenter(Segmenter):
         self._model.to(self._device).eval()
         self._seg_head.to(self._device).eval()
 
+        # On CPU, spconv's default MaskImplicitGemm algo asserts is_cuda
+        # and crashes. The "Native" algorithm is CPU-compatible but
+        # slower. Apply it to every sparse-conv layer in PTv3 — the
+        # standalone PointTransformerV3 model constructs layers without
+        # specifying algo, so we have to monkey-patch after the fact.
+        if self._device == "cpu":
+            self._force_native_spconv_algo()
+
+    def _force_native_spconv_algo(self) -> None:
+        """Set algo=Native on every spconv layer (required for CPU)."""
+        try:
+            import spconv.pytorch as spconv
+            from spconv.core import ConvAlgo
+        except ImportError:
+            log.warning("spconv not importable — can't force Native algo")
+            return
+        patched = 0
+        for m in self._model.modules():
+            if hasattr(m, "algo"):
+                m.algo = ConvAlgo.Native
+                patched += 1
+        log.info("Forced spconv ConvAlgo.Native on %d layers (CPU mode)", patched)
+
     def _resolve_weights_path(self) -> Path:
         return resolve_weights(self.DEFAULT_WEIGHTS_KEY, explicit_path=self.cfg.weights_path)
 
