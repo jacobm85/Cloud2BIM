@@ -470,6 +470,7 @@ function collectConfig() {
   const b = id => !!(document.getElementById(id) || {}).checked;
   const mode = (document.querySelector('input[name="run-mode"]:checked') || {}).value || 'full';
   const algorithm = (document.querySelector('input[name="algorithm"]:checked') || {}).value || 'v1';
+  const pipelineMode = (document.querySelector('input[name="pipeline-mode"]:checked') || {}).value || 'geometric';
   return {
     upload_id: state.sourceType === 'upload' ? state.uploadId : null,
     network_path: state.sourceType === 'network' ? state.networkPath : null,
@@ -477,9 +478,14 @@ function collectConfig() {
     e57_input: false,  // auto-detected on backend from file extension
     mode,
     algorithm,
+    pipeline_mode: pipelineMode,
+    hybrid_min_class_points: parseInt(v('hybrid-threshold')) || 5000,
     seg_enabled: b('seg-enabled'),
     seg_backend: v('seg-backend') || 'ptv3',
     seg_weights: v('seg-weights') || null,
+    ml_voxel_size: n('ml-voxel-size') || 0.05,
+    geometry_resolution: n('geometry-resolution') || 0.01,
+    has_rgb: v('has-rgb') || 'auto',
     slabs_enabled: b('slabs-enabled'),
     walls_enabled: b('walls-enabled'),
     openings_enabled: b('openings-enabled'),

@@ -184,10 +184,17 @@ class CreateJobRequest(BaseModel):
     pc_resolution: float = 0.002
     grid_coefficient: int = 5
 
+    # Pipeline mode: geometric (histogram) / hybrid (ML + fallback) / ml (ML only)
+    pipeline_mode: str = "geometric"
+    hybrid_min_class_points: int = 5_000
+
     # ML semantic segmentation
     seg_enabled: bool = False
     seg_backend: str = "ptv3"
     seg_weights: Optional[str] = None
+    ml_voxel_size: float = 0.05       # 5 cm — matches S3DIS training
+    geometry_resolution: float = 0.01  # 1 cm — final BIM precision
+    has_rgb: str = "auto"             # auto / true / false
 
     # Element-type toggles (controls whether each detection stage runs)
     slabs_enabled: bool = True
@@ -362,10 +369,12 @@ async def create_job(request: CreateJobRequest):
             "center_coordinates": True,
         },
         "segmentation": {
-            "enabled": request.seg_enabled,
+            "enabled": request.seg_enabled or request.pipeline_mode in ("ml", "hybrid"),
             "backend": request.seg_backend,
             "weights_path": request.seg_weights,
-            "voxel_size": 0.05,
+            "ml_voxel_size": request.ml_voxel_size,
+            "geometry_resolution": request.geometry_resolution,
+            "has_rgb": request.has_rgb if request.has_rgb in ("auto", "true", "false") else "auto",
             "device": "auto",
             "cache_labels": True,
         },
@@ -418,6 +427,8 @@ async def create_job(request: CreateJobRequest):
         },
         "exterior_scan": request.exterior_scan,
         "algorithm": request.algorithm if request.algorithm in ("v1", "v2") else "v1",
+        "pipeline_mode": request.pipeline_mode if request.pipeline_mode in ("geometric", "hybrid", "ml") else "geometric",
+        "hybrid_min_class_points": request.hybrid_min_class_points,
     }
 
     config_path = job_dir / "config.yaml"

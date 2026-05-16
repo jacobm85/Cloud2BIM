@@ -103,7 +103,41 @@
         centreras automatiskt så att SWEREF/RT90 hanteras korrekt.
       </div>
 
-      <div class="section-label">Detekteringsalgoritm</div>
+      <div class="section-label">Pipeline-läge (v3)</div>
+      <div class="mode-picker" style="margin-bottom:8px">
+        <label class="mode-option">
+          <input type="radio" name="pipeline-mode" value="geometric" checked>
+          <div class="mode-card">
+            <div class="mode-title">📐 Geometrisk</div>
+            <div class="mode-desc">Histogrambaserad detektion (v1/v2). Snabbast och
+              kräver ingen ML — men möbler och inredning kan störa väggdetektering.</div>
+          </div>
+        </label>
+        <label class="mode-option">
+          <input type="radio" name="pipeline-mode" value="hybrid">
+          <div class="mode-card">
+            <div class="mode-title">🤝 Hybrid (rekommenderas)</div>
+            <div class="mode-desc">ML-segmentering filtrerar bort möbler innan
+              extraktion. Faller tillbaka till geometrisk per våning om ML hittar
+              för få väggpunkter — säkraste valet för verkliga inomhusscanningar.</div>
+          </div>
+        </label>
+        <label class="mode-option">
+          <input type="radio" name="pipeline-mode" value="ml">
+          <div class="mode-card">
+            <div class="mode-title">🧠 ML-only</div>
+            <div class="mode-desc">Ren ML-driven extraktion (PointTransformer V3 +
+              klassvis RANSAC). Renaste separation från inredning men kräver bra
+              segmenteringsmodell. Ingen fallback.</div>
+          </div>
+        </label>
+      </div>
+      <div class="alert alert-info" style="font-size:12px;margin-bottom:20px">
+        ℹ️ Hybrid och ML-only aktiverar ML-segmentering automatiskt. Modellval och
+        RGB-hantering konfigureras längre ned under "Semantisk segmentering".
+      </div>
+
+      <div class="section-label">Fallback-algoritm (för geometric / hybrid)</div>
       <div class="mode-picker" style="margin-bottom:20px">
         <label class="mode-option">
           <input type="radio" name="algorithm" value="v1" checked>
@@ -171,25 +205,50 @@
       <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:12px">
         <label class="toggle-group">
           <span class="toggle"><input type="checkbox" id="seg-enabled"><span class="toggle-slider"></span></span>
-          Aktivera ML-segmentering (filtrerar bort möbler innan väggdetektering)
+          Aktivera ML-segmentering (auto-på i Hybrid / ML-only)
         </label>
       </div>
       <div class="form-grid" style="margin-bottom:8px">
         <div class="form-group">
           <label for="seg-backend">Backend</label>
           <select id="seg-backend">
-            <option value="ptv3">PointTransformer V3 (rekommenderas)</option>
-            <option value="randla">RandLA-Net (lättare)</option>
+            <option value="ptv3">PointTransformer V3 (rekommenderas, kräver CUDA)</option>
+            <option value="randla">RandLA-Net (lättare, fungerar på CPU)</option>
             <option value="none">Ingen (passthrough)</option>
           </select>
         </div>
         <div class="form-group">
           <label for="seg-weights">Sökväg till modellvikter (valfritt)</label>
-          <input type="text" id="seg-weights" placeholder="/data/models/ptv3-s3dis.pth">
+          <input type="text" id="seg-weights" placeholder="auto-nedladdas till %LOCALAPPDATA%\cloud2bim\models">
+        </div>
+      </div>
+      <div class="form-grid" style="margin-bottom:8px">
+        <div class="form-group">
+          <label for="has-rgb">Använd RGB-färg i ML-input</label>
+          <select id="has-rgb">
+            <option value="auto" selected>Auto (detekteras från fil)</option>
+            <option value="true">Tvinga på (även om färg saknas → använder grå)</option>
+            <option value="false">Tvinga av (ignorera RGB även om det finns)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="ml-voxel-size">Voxelstorlek ML-inferens (m)</label>
+          <input type="number" id="ml-voxel-size" value="0.05" step="0.01" min="0.01" max="0.20">
+        </div>
+        <div class="form-group">
+          <label for="geometry-resolution">Geometrisk upplösning slut-BIM (m)</label>
+          <input type="number" id="geometry-resolution" value="0.01" step="0.005" min="0.005" max="0.10">
+        </div>
+        <div class="form-group">
+          <label for="hybrid-threshold">Hybrid-tröskel (min ML-punkter / våning)</label>
+          <input type="number" id="hybrid-threshold" value="5000" step="500" min="500">
         </div>
       </div>
       <div class="alert alert-info" style="font-size:12px;margin-bottom:16px">
-        ℹ️ Kräver att <code>requirements-ml.txt</code> är installerade och GPU/torch är tillgängligt i containern.
+        ℹ️ Voxelstorlek = upplösning ML-modellen ser. 5 cm matchar S3DIS-träningen
+        — mindre värden blir både långsammare och sämre (out-of-distribution).
+        Geometrisk upplösning = noggrannhet i slut-BIM via RANSAC. Modellvikter
+        laddas ned automatiskt vid första körning.
       </div>
 
       <div class="section-label">Element att detektera</div>
