@@ -47,6 +47,7 @@ class PTv3Segmenter(Segmenter):
     def __init__(self, cfg: SegmentationConfig):
         self.cfg = cfg
         self._model = None  # lazy-init on first segment() call
+        self._seg_head = None  # classification head — built alongside model
         self._device = self._resolve_device(cfg.device)
         log.info("PTv3 segmenter initialised (device=%s, voxel=%.3f m)", self._device, cfg.ml_voxel_size)
 
@@ -111,6 +112,15 @@ class PTv3Segmenter(Segmenter):
 
         weights_path = self._resolve_weights_path()
         log.info("Loading PTv3 weights: %s", weights_path)
+        # Backbone kwargs taken verbatim from the Pointcept config
+        # s3dis-semseg-pt-v3m1-0-rpe (which our checkpoint was trained
+        # with). Critical non-default settings: enable_rpe=True (RPE
+        # variant — without this the attention layers initialise wrong),
+        # enable_flash=False (we don't install flash_attn), upcast_*=True
+        # (numerical stability the checkpoint was trained against), and
+        # patch_size=128 instead of 1024 (locality scale Pointcept used
+        # for indoor scenes).
+        dec_channels = (64, 64, 128, 256)
         self._model = PointTransformerV3(
             in_channels=PTV3_IN_CHANNELS,
             order=("z", "z-trans", "hilbert", "hilbert-trans"),
@@ -118,22 +128,37 @@ class PTv3Segmenter(Segmenter):
             enc_depths=(2, 2, 2, 6, 2),
             enc_channels=(32, 64, 128, 256, 512),
             enc_num_head=(2, 4, 8, 16, 32),
-            enc_patch_size=(1024,) * 5,
+            enc_patch_size=(128,) * 5,
             dec_depths=(2, 2, 2, 2),
-            dec_channels=(64, 64, 128, 256),
+            dec_channels=dec_channels,
             dec_num_head=(4, 4, 8, 16),
-            dec_patch_size=(1024,) * 4,
-            num_classes=len(S3DIS_LABELS),
+            dec_patch_size=(128,) * 4,
+            mlp_ratio=4,
+            qkv_bias=True,
+            qk_scale=None,
+            attn_drop=0.0,
+            proj_drop=0.0,
+            drop_path=0.3,
+            pre_norm=True,
+            shuffle_orders=True,
+            enable_rpe=True,
+            enable_flash=False,
+            upcast_attention=True,
+            upcast_softmax=True,
+            cls_mode=False,
         )
+        # Standalone PTv3 is backbone-only — Pointcept's DefaultSegmentorV2
+        # tacks a per-point Linear classifier on top. Replicate it here
+        # with the same shape (dec_channels[0] → 13 S3DIS classes).
+        import torch.nn as nn
+        self._seg_head = nn.Linear(dec_channels[0], len(S3DIS_LABELS))
+
         import torch
         # weights_only=True blocks arbitrary code execution at unpickle
-        # time — the .pth format is pickle-based, so even checkpoints
-        # from trusted sources should be loaded with this flag. It only
-        # allows known tensor/storage globals; anything else (including
-        # optimiser state, custom classes) raises and we fall back with
-        # an explicit warning. The PTv3 S3DIS checkpoint contains an
-        # OneCycleLR scheduler state which isn't on torch's default
-        # allowlist before 2.6, hence the fallback.
+        # time. Falls back to weights_only=False with a warning if the
+        # checkpoint contains globals not on torch's allowlist (the PTv3
+        # checkpoint includes OneCycleLR scheduler state which isn't
+        # allowlisted before torch 2.6).
         try:
             state = _safe_torch_load(str(weights_path), self._device)
         except Exception as exc:
@@ -150,8 +175,44 @@ class PTv3Segmenter(Segmenter):
             if isinstance(state, dict) and key in state and isinstance(state[key], dict):
                 state = state[key]
                 break
-        self._model.load_state_dict(state, strict=False)
+
+        # Pointcept saves keys as "backbone.<...>" and "seg_head.<...>"
+        # (or sometimes "cls_head"/"head"). Split them and load each
+        # piece into its own module.
+        backbone_state = {
+            k[len("backbone."):]: v for k, v in state.items()
+            if k.startswith("backbone.")
+        }
+        if not backbone_state:
+            # Older checkpoints save backbone keys at the top level.
+            backbone_state = {k: v for k, v in state.items() if "." in k}
+        missing, unexpected = self._model.load_state_dict(backbone_state, strict=False)
+        log.info(
+            "PTv3 backbone loaded: %d params matched, %d missing, %d unexpected",
+            len(backbone_state) - len(unexpected), len(missing), len(unexpected),
+        )
+
+        head_loaded = False
+        for prefix in ("seg_head", "cls_head", "classifier", "head"):
+            w = state.get(f"{prefix}.weight")
+            b = state.get(f"{prefix}.bias")
+            if w is not None and b is not None:
+                with torch.no_grad():
+                    self._seg_head.weight.copy_(w)
+                    self._seg_head.bias.copy_(b)
+                log.info("Classification head loaded from key prefix '%s.'", prefix)
+                head_loaded = True
+                break
+        if not head_loaded:
+            log.error(
+                "No classification head weights found in checkpoint "
+                "(tried prefixes: seg_head, cls_head, classifier, head). "
+                "Predictions WILL be random. Inspect the .pth state_dict "
+                "keys and update the prefix list in ptv3.py."
+            )
+
         self._model.to(self._device).eval()
+        self._seg_head.to(self._device).eval()
 
     def _resolve_weights_path(self) -> Path:
         return resolve_weights(self.DEFAULT_WEIGHTS_KEY, explicit_path=self.cfg.weights_path)
@@ -302,10 +363,13 @@ class PTv3Segmenter(Segmenter):
                 # count per batch element. Single chunk → single entry.
                 "offset": torch.tensor([len(voxel_xyz)], dtype=torch.long, device=self._device),
             }
+            # Backbone produces per-voxel embeddings; the standalone PTv3
+            # model wraps them in a Point object (.feat is the tensor).
             out = self._model(data_dict)
-            if hasattr(out, "feat"):
-                out = out.feat  # some Pointcept versions wrap output in a Point dict
-            return out.detach().cpu().numpy().astype(np.float32)
+            features = out.feat if hasattr(out, "feat") else out
+            # Classification head → per-voxel logits over S3DIS classes.
+            logits = self._seg_head(features)
+            return logits.detach().cpu().numpy().astype(np.float32)
 
 
 def _safe_torch_load(path: str, device: str):
