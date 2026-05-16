@@ -103,6 +103,25 @@ def load_points(cfg: Config) -> tuple[np.ndarray, CoordinateOffset]:
     return data["xyz"], CoordinateOffset(float(offset[0]), float(offset[1]), float(offset[2]))
 
 
+def load_points_with_rgb(
+    cfg: Config,
+) -> tuple[np.ndarray, np.ndarray | None, CoordinateOffset]:
+    """Like ``load_points`` but also returns RGB when present in the npz."""
+    path = Path(cfg.io.work_dir) / "points.npz"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"points.npz missing — run the 'prepare' stage first ({path})"
+        )
+    data = np.load(path)
+    offset = data["offset"]
+    rgb = data["rgb"] if "rgb" in data.files else None
+    return (
+        data["xyz"],
+        rgb,
+        CoordinateOffset(float(offset[0]), float(offset[1]), float(offset[2])),
+    )
+
+
 def load_labels(cfg: Config) -> SemanticLabels:
     path = Path(cfg.io.work_dir) / "labels.npy"
     cached = load_cached_labels(path)
@@ -148,20 +167,32 @@ def load_roofs(cfg: Config) -> list:
 # ── stages ──────────────────────────────────────────────────────────────────
 
 def stage_prepare(cfg: Config) -> None:
-    """Load inputs, optionally dilute, optionally center."""
+    """Load inputs, optionally dilute, optionally center. Preserves RGB when present."""
     log.info("─── prepare ───")
     t0 = time.time()
-    chunks = []
+    xyz_chunks: list[np.ndarray] = []
+    rgb_chunks: list[np.ndarray] = []
+    all_have_rgb = True
     for path in cfg.io.input_files:
-        xyz, _ = read_pointcloud(path)
-        chunks.append(xyz)
-    if not chunks:
+        xyz, rgb = read_pointcloud(path)
+        xyz_chunks.append(xyz)
+        if rgb is None:
+            all_have_rgb = False
+        else:
+            rgb_chunks.append(rgb)
+    if not xyz_chunks:
         raise RuntimeError("No input files produced any points")
-    pts = np.vstack(chunks) if len(chunks) > 1 else chunks[0]
+    pts = np.vstack(xyz_chunks) if len(xyz_chunks) > 1 else xyz_chunks[0]
+    rgb = None
+    if all_have_rgb and rgb_chunks:
+        rgb = np.vstack(rgb_chunks) if len(rgb_chunks) > 1 else rgb_chunks[0]
+    log.info("Loaded %s points (rgb=%s)", f"{len(pts):,}", rgb is not None)
 
     if cfg.io.dilute:
         n0 = len(pts)
         pts = diluted(pts, cfg.io.dilution_factor)
+        if rgb is not None:
+            rgb = diluted(rgb, cfg.io.dilution_factor)
         log.info("Diluted %s → %s points (1/%d)", f"{n0:,}", f"{len(pts):,}", cfg.io.dilution_factor)
 
     if cfg.io.center_coordinates:
@@ -172,17 +203,26 @@ def stage_prepare(cfg: Config) -> None:
 
     out = Path(cfg.io.work_dir) / "points.npz"
     out.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(out, xyz=pts.astype(np.float32),
-             offset=np.array([offset.x, offset.y, offset.z], dtype=np.float64))
+    npz_data = {
+        "xyz": pts.astype(np.float32),
+        "offset": np.array([offset.x, offset.y, offset.z], dtype=np.float64),
+    }
+    if rgb is not None:
+        npz_data["rgb"] = rgb.astype(np.float32)
+    np.savez(out, **npz_data)
     write_state(cfg, "prepare")
     log.info("prepare: %.1fs (%s points)", time.time() - t0, f"{len(pts):,}")
 
 
 def stage_segment(cfg: Config) -> None:
-    """ML or passthrough segmentation."""
+    """ML or passthrough segmentation.
+
+    Honours ``cfg.segmentation.has_rgb`` (auto / true / false): with
+    'auto' we feed RGB to the model whenever the prepared cloud has it.
+    """
     log.info("─── segment ───")
     t0 = time.time()
-    pts, _ = load_points(cfg)
+    pts, rgb, _ = load_points_with_rgb(cfg)
     cache_path = Path(cfg.io.work_dir) / "labels.npy"
 
     if cfg.segmentation.cache_labels:
@@ -192,8 +232,17 @@ def stage_segment(cfg: Config) -> None:
             write_state(cfg, "segment")
             return
 
+    # Apply user override of RGB use (auto/true/false).
+    mode = cfg.segmentation.has_rgb
+    if mode == "false":
+        if rgb is not None:
+            log.info("segmentation.has_rgb=false — discarding input RGB by user request")
+        rgb = None
+    elif mode == "true" and rgb is None:
+        log.warning("segmentation.has_rgb=true but prepared cloud has no RGB — using synthetic grey")
+
     seg = create_segmenter(cfg.segmentation)
-    labels = seg.segment(pts)
+    labels = seg.segment(pts, rgb)
     save_cached_labels(labels, cache_path)
     write_state(cfg, "segment")
     log.info("segment: %.1fs", time.time() - t0)

@@ -46,15 +46,18 @@ def run_pipeline(cfg: Config) -> int:
     bands_lower = list(cfg.walls.cross_section_bands_lower or [])
 
     # ── 1. Read & combine inputs ────────────────────────────────────────
-    points_xyz = _load_inputs(cfg)
+    points_xyz, points_rgb = _load_inputs(cfg)
     if len(points_xyz) == 0:
         log.error("No points loaded — check input_files")
         return 1
+    log.info("Loaded %s points (rgb=%s)", f"{len(points_xyz):,}", points_rgb is not None)
 
     # ── 2. Optional dilution ────────────────────────────────────────────
     if cfg.io.dilute:
         n_before = len(points_xyz)
         points_xyz = diluted(points_xyz, cfg.io.dilution_factor)
+        if points_rgb is not None:
+            points_rgb = diluted(points_rgb, cfg.io.dilution_factor)
         log.info("Diluted: %s → %s points (1/%d)", f"{n_before:,}", f"{len(points_xyz):,}", cfg.io.dilution_factor)
 
     # ── 3. Centre coordinates (SWEREF safety) ───────────────────────────
@@ -70,14 +73,19 @@ def run_pipeline(cfg: Config) -> int:
     try:
         work = Path(cfg.io.work_dir)
         work.mkdir(parents=True, exist_ok=True)
-        np.savez(work / "points.npz",
-                 xyz=points_xyz.astype(np.float32),
-                 offset=np.array([offset.x, offset.y, offset.z], dtype=np.float64))
+        npz_data = {
+            "xyz": points_xyz.astype(np.float32),
+            "offset": np.array([offset.x, offset.y, offset.z], dtype=np.float64),
+        }
+        if points_rgb is not None:
+            npz_data["rgb"] = points_rgb.astype(np.float32)
+        np.savez(work / "points.npz", **npz_data)
     except Exception as exc:
         log.warning("Could not save points.npz for viewer overlay: %s", exc)
 
     # ── 4. Semantic segmentation ────────────────────────────────────────
-    labels = _run_segmentation(cfg, points_xyz)
+    seg_rgb = _resolve_rgb_for_segmentation(cfg, points_rgb)
+    labels = _run_segmentation(cfg, points_xyz, seg_rgb)
 
     # ── 5. Slab detection ───────────────────────────────────────────────
     log.info("─── Slab segmentation (%s) ───", cfg.algorithm)
@@ -307,17 +315,54 @@ def run_pipeline(cfg: Config) -> int:
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def _load_inputs(cfg: Config) -> np.ndarray:
-    chunks = []
+def _load_inputs(cfg: Config) -> tuple[np.ndarray, np.ndarray | None]:
+    """Read all input files, concatenate XYZ and RGB.
+
+    Returns RGB as None if any file lacks colour — mixing coloured and
+    uncoloured clouds would force us to invent RGB for half the points,
+    which then dominates the segmenter's "missing colour" fallback path
+    over the half that has real colour. Better to drop colour entirely.
+    """
+    xyz_chunks: list[np.ndarray] = []
+    rgb_chunks: list[np.ndarray] = []
+    all_have_rgb = True
     for path in cfg.io.input_files:
-        xyz, _rgb = read_pointcloud(path)
-        chunks.append(xyz)
-    if not chunks:
-        return np.empty((0, 3))
-    return np.vstack(chunks) if len(chunks) > 1 else chunks[0]
+        xyz, rgb = read_pointcloud(path)
+        xyz_chunks.append(xyz)
+        if rgb is None:
+            all_have_rgb = False
+        else:
+            rgb_chunks.append(rgb)
+    if not xyz_chunks:
+        return np.empty((0, 3)), None
+    xyz = np.vstack(xyz_chunks) if len(xyz_chunks) > 1 else xyz_chunks[0]
+    if all_have_rgb and rgb_chunks:
+        rgb = np.vstack(rgb_chunks) if len(rgb_chunks) > 1 else rgb_chunks[0]
+    else:
+        rgb = None
+    return xyz, rgb
 
 
-def _run_segmentation(cfg: Config, points: np.ndarray) -> SemanticLabels:
+def _resolve_rgb_for_segmentation(cfg: Config, rgb: np.ndarray | None) -> np.ndarray | None:
+    """Apply the user's has_rgb override (auto / true / false)."""
+    mode = cfg.segmentation.has_rgb
+    if mode == "true":
+        if rgb is None:
+            log.warning("segmentation.has_rgb=true but input has no RGB — using synthetic grey")
+        return rgb  # may be None; segmenter substitutes grey
+    if mode == "false":
+        if rgb is not None:
+            log.info("segmentation.has_rgb=false — discarding input RGB by user request")
+        return None
+    # auto — use RGB when present
+    return rgb
+
+
+def _run_segmentation(
+    cfg: Config,
+    points: np.ndarray,
+    rgb: np.ndarray | None = None,
+) -> SemanticLabels:
     cache_path = Path(cfg.io.work_dir) / "labels.npy"
     if cfg.segmentation.cache_labels:
         cached = load_cached_labels(cache_path)
@@ -327,7 +372,7 @@ def _run_segmentation(cfg: Config, points: np.ndarray) -> SemanticLabels:
 
     seg = create_segmenter(cfg.segmentation)
     t0 = time.time()
-    labels = seg.segment(points)
+    labels = seg.segment(points, rgb)
     log.info("Segmentation: %.1fs", time.time() - t0)
 
     if cfg.segmentation.cache_labels:
