@@ -563,7 +563,7 @@ const STAGE_INFO = {
   },
   walls: {
     title: 'Väggar',
-    desc: 'För varje våning tas ett horisontellt snitt 130–160 cm över golvet och 2D-histogrammet ger väggsegment. Du kan välja Z-snittet manuellt här om bjälklagsdetektionen blev fel.',
+    desc: 'v1/v2: ett horisontellt snitt 130–160 cm över golvet ger väggsegment via 2D-histogram. v3 (vertikal kontinuitet): hela kolumnen golv→tak skannas och pixlar som är fyllda en stor del av höjden räknas som vägg.',
   },
   openings: {
     title: 'Öppningar',
@@ -593,8 +593,10 @@ const wizard = {
   sse: null,
   slabsData: null,
   slabCount: 0,
-  bands: [],        // [{z_min, z_max} | null] per storey — used for wall detection
-  bands_lower: [],  // [{z_min, z_max} | null] per storey — low diagnostic preview
+  algorithm: 'v1',  // 'v1' | 'v2' | 'vertical' — captured at wizardStart
+  bands: [],        // [{z_min, z_max} | null] per storey — used for v1/v2 wall detection
+  bands_lower: [],  // [{z_min, z_max} | null] per storey — low diagnostic preview (v1/v2)
+  v3Params: null,   // {slice_thickness, min_fill, min_points} — v3 only
 };
 
 function wizardLog(text) {
@@ -656,7 +658,13 @@ async function wizardStart() {
   const data = await res.json();
   wizard.jobId = data.job_id;
   state.jobId = data.job_id;
-  wizardLog(`[Job ${data.job_id.slice(0, 8)}] Wizard startad`);
+  wizard.algorithm = cfg.algorithm || 'v1';
+  wizard.v3Params = {
+    slice_thickness: cfg.vertical_slice_thickness || 0.05,
+    min_fill: cfg.vertical_min_fill || 0.70,
+    min_points: cfg.vertical_min_points_per_slice || 5,
+  };
+  wizardLog(`[Job ${data.job_id.slice(0, 8)}] Wizard startad (algoritm: ${wizard.algorithm})`);
 
   wizardStreamLogs();
   wizardPollState();
@@ -977,7 +985,7 @@ async function applySlabSelection() {
 
 async function renderWallsReview() {
   const extra = document.getElementById('stage-extra');
-  // Make sure we have slab data — needed for default bands
+  // Make sure we have slab data — needed for default bands (v1/v2) and storey count
   if (!wizard.slabsData) {
     try {
       wizard.slabsData = await fetch('/api/jobs/' + wizard.jobId + '/slabs').then(r => r.json());
@@ -999,6 +1007,14 @@ async function renderWallsReview() {
     wizard.bands_lower.push({ z_min: floor + 0.30, z_max: floor + 0.35 });
   }
   const numStoreys = Math.max(0, wizard.slabCount - 1);
+
+  if (wizard.algorithm === 'vertical') {
+    return renderWallsReviewVertical(extra, numStoreys);
+  }
+  return renderWallsReviewHistogram(extra, numStoreys);
+}
+
+async function renderWallsReviewHistogram(extra, numStoreys) {
   extra.innerHTML = `
     <div class="stage-preview-row" style="margin-bottom:12px">
       <div style="flex:0 0 320px">
@@ -1088,6 +1104,250 @@ async function renderWallsReview() {
     ]);
     refreshHistogramWithBands();
   });
+}
+
+// ── v3 vertical-continuity review ────────────────────────────────────────────
+// Result-oriented: shows what v3 detected per storey (top-down density +
+// red wall axes) plus an on-demand vertical cross-section the user draws
+// in the top-down. Z-band/lågsnitt controls are intentionally absent —
+// v3 reads the full floor→ceiling column, not a horizontal slice.
+
+async function renderWallsReviewVertical(extra, numStoreys) {
+  const p = wizard.v3Params || { slice_thickness: 0.05, min_fill: 0.70, min_points: 5 };
+  extra.innerHTML = `
+    <div style="margin-bottom:14px;padding:12px;background:var(--surface2);border-radius:8px">
+      <div style="font-weight:600;font-size:13px;margin-bottom:6px">v3 — vertikal kontinuitet</div>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
+        Här används <strong>inget horisontellt snitt</strong> — algoritmen skannar hela
+        kolumnen från golv till tak per XY-pixel. En pixel räknas som vägg om den är
+        fylld i minst <em>min fyllnadsgrad</em> av alla Z-snitt. Justera parametrarna
+        nedan och klicka "Kör om" för att se hur det påverkar väggdetekteringen.
+      </p>
+      <div class="form-grid" style="margin-bottom:0">
+        <div class="form-group">
+          <label for="v3-slice-thickness">Z-snittstjocklek (m)</label>
+          <input type="number" id="v3-slice-thickness" value="${p.slice_thickness.toFixed(3)}" step="0.01" min="0.01">
+        </div>
+        <div class="form-group">
+          <label for="v3-min-fill">Min fyllningsgrad (0–1)</label>
+          <input type="number" id="v3-min-fill" value="${p.min_fill.toFixed(2)}" step="0.05" min="0.10" max="1.0">
+        </div>
+        <div class="form-group">
+          <label for="v3-min-points">Min punkter per snitt</label>
+          <input type="number" id="v3-min-points" value="${p.min_points}" step="1" min="1">
+        </div>
+      </div>
+    </div>
+    <div id="storey-overlays"></div>
+    <div id="walls-dxf-section" style="margin-top:14px"></div>`;
+  renderWallsDxfButtons();
+
+  const list = document.getElementById('storey-overlays');
+  if (numStoreys === 0) {
+    list.innerHTML = '<div class="alert alert-danger">Inga våningar — bjälklagsdetektionen gav färre än 2 bjälklag. Kör om "Bjälklag"-steget med andra inställningar.</div>';
+    return;
+  }
+
+  // Stash live parameter edits back into wizard.v3Params so the "Kör om"
+  // button picks them up via wizardRunStage.
+  ['v3-slice-thickness', 'v3-min-fill', 'v3-min-points'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', () => {
+      wizard.v3Params = {
+        slice_thickness: parseFloat(document.getElementById('v3-slice-thickness').value) || 0.05,
+        min_fill: parseFloat(document.getElementById('v3-min-fill').value) || 0.70,
+        min_points: parseInt(document.getElementById('v3-min-points').value, 10) || 5,
+      };
+    });
+  });
+
+  for (let i = 0; i < numStoreys; i++) {
+    const block = document.createElement('div');
+    block.className = 'storey-band';
+    block.style.flexDirection = 'column';
+    block.style.alignItems = 'stretch';
+    block.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <strong>Våning ${i} — detekterade väggar</strong>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-outline" data-storey="${i}" data-action="refresh-overlay" style="font-size:12px;padding:4px 10px">↻ Uppdatera</button>
+          <button class="btn btn-outline" data-storey="${i}" data-action="toggle-section" style="font-size:12px;padding:4px 10px">📐 Visa vertikalt snitt</button>
+        </div>
+      </div>
+      <div id="walls-overlay-${i}" style="background:#0f1117;border-radius:6px;padding:6px;text-align:center;color:var(--text-dim);font-size:12px">Renderar topp-vy…</div>
+      <div id="walls-section-panel-${i}" style="display:none;margin-top:8px;padding:10px;background:var(--surface);border-radius:6px"></div>`;
+    list.appendChild(block);
+    renderWallsTopdownOverlay(i);
+  }
+
+  list.addEventListener('click', e => {
+    const action = e.target.dataset.action;
+    const storey = parseInt(e.target.dataset.storey, 10);
+    if (Number.isNaN(storey)) return;
+    if (action === 'refresh-overlay') renderWallsTopdownOverlay(storey);
+    else if (action === 'toggle-section') toggleVerticalSectionPanel(storey);
+  });
+}
+
+async function renderWallsTopdownOverlay(storey) {
+  const target = document.getElementById('walls-overlay-' + storey);
+  if (!target) return;
+  target.innerHTML = 'Renderar topp-vy…';
+  try {
+    const res = await fetch('/api/jobs/' + wizard.jobId + '/walls/topdown_overlay', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ storey_idx: storey }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const meta = await res.json();
+    target.dataset.bounds = JSON.stringify(meta.bounds);
+    target.innerHTML = `
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">
+        ${meta.n_walls} väggar, Z ${meta.z_floor.toFixed(2)}–${meta.z_ceiling.toFixed(2)} m,
+        ${meta.n_points.toLocaleString()} punkter
+      </div>
+      <img src="${meta.image_url}?t=${Date.now()}" alt="Väggar våning ${storey}" style="max-width:100%;display:block;margin:0 auto">`;
+  } catch (e) {
+    target.innerHTML = '<div class="alert alert-danger" style="margin:0">Kunde inte rendera överblick: ' + e.message + '</div>';
+  }
+}
+
+function toggleVerticalSectionPanel(storey) {
+  const panel = document.getElementById('walls-section-panel-' + storey);
+  if (!panel) return;
+  if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+
+  const overlayWrap = document.getElementById('walls-overlay-' + storey);
+  const boundsRaw = overlayWrap ? overlayWrap.dataset.bounds : null;
+  if (!boundsRaw) {
+    panel.innerHTML = '<div class="alert alert-info">Vänta tills topp-vyn renderats, försök sedan igen.</div>';
+    return;
+  }
+  const bounds = JSON.parse(boundsRaw);
+
+  panel.innerHTML = `
+    <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px">
+      Klicka två punkter i topp-vyn ovan för att dra en snittlinje. Linjen visas i rött.
+      Tjocklek runt linjen (m): <input type="number" id="vsec-thick-${storey}" value="0.20" step="0.05" min="0.05" max="2.0" style="width:80px">
+      <button class="btn btn-primary" data-storey="${storey}" id="vsec-go-${storey}" style="margin-left:8px;font-size:12px;padding:4px 12px" disabled>Rendera snitt</button>
+      <button class="btn btn-outline" id="vsec-clear-${storey}" style="margin-left:6px;font-size:12px;padding:4px 10px">Rensa linje</button>
+    </div>
+    <div id="vsec-image-${storey}" style="background:#0f1117;border-radius:6px;min-height:60px;text-align:center;padding:10px;color:var(--text-dim);font-size:12px">
+      Dra en linje för att rendera vertikalt snitt.
+    </div>`;
+
+  setupVerticalSectionPicker(storey, bounds);
+}
+
+function setupVerticalSectionPicker(storey, bounds) {
+  const overlayWrap = document.getElementById('walls-overlay-' + storey);
+  if (!overlayWrap) return;
+  const img = overlayWrap.querySelector('img');
+  if (!img) return;
+
+  // Mount a thin canvas overlay on top of the image, sized to match.
+  if (overlayWrap.querySelector('canvas[data-vsec="' + storey + '"]')) {
+    // Already wired
+    return;
+  }
+  overlayWrap.style.position = 'relative';
+  // Wrap the image so the canvas can absolutely position over only the image area
+  if (!img.parentElement.classList.contains('vsec-wrap')) {
+    const wrap = document.createElement('div');
+    wrap.className = 'vsec-wrap';
+    wrap.style.position = 'relative';
+    wrap.style.display = 'inline-block';
+    wrap.style.maxWidth = '100%';
+    img.parentNode.insertBefore(wrap, img);
+    wrap.appendChild(img);
+  }
+  const wrap = img.parentElement;
+  const canvas = document.createElement('canvas');
+  canvas.dataset.vsec = String(storey);
+  canvas.style.position = 'absolute';
+  canvas.style.left = '0';
+  canvas.style.top = '0';
+  canvas.style.cursor = 'crosshair';
+  wrap.appendChild(canvas);
+
+  const pts = [];
+  const sync = () => {
+    canvas.width = img.naturalWidth || img.clientWidth;
+    canvas.height = img.naturalHeight || img.clientHeight;
+    canvas.style.width = img.clientWidth + 'px';
+    canvas.style.height = img.clientHeight + 'px';
+    redraw();
+  };
+  img.addEventListener('load', sync);
+  if (img.complete) sync();
+  window.addEventListener('resize', sync);
+
+  function pixelToWorld(px, py) {
+    const [xmin, ymin, xmax, ymax] = bounds;
+    const wx = xmin + (px / canvas.width) * (xmax - xmin);
+    const wy = ymax - (py / canvas.height) * (ymax - ymin);
+    return [wx, wy];
+  }
+
+  function redraw() {
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const goBtn = document.getElementById('vsec-go-' + storey);
+    if (goBtn) goBtn.disabled = pts.length < 2;
+    if (pts.length === 0) return;
+    ctx.strokeStyle = '#ff6b6b';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.stroke();
+    for (const p of pts) {
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], 4, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff';
+      ctx.fill();
+      ctx.strokeStyle = '#ff6b6b';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+
+  canvas.addEventListener('click', e => {
+    const rect = canvas.getBoundingClientRect();
+    const px = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const py = (e.clientY - rect.top) * (canvas.height / rect.height);
+    if (pts.length >= 2) pts.length = 0;
+    pts.push([px, py]);
+    redraw();
+  });
+
+  const clearBtn = document.getElementById('vsec-clear-' + storey);
+  if (clearBtn) clearBtn.onclick = () => { pts.length = 0; redraw(); };
+
+  const goBtn = document.getElementById('vsec-go-' + storey);
+  if (goBtn) goBtn.onclick = async () => {
+    if (pts.length < 2) return;
+    const [x1, y1] = pixelToWorld(pts[0][0], pts[0][1]);
+    const [x2, y2] = pixelToWorld(pts[1][0], pts[1][1]);
+    const thickEl = document.getElementById('vsec-thick-' + storey);
+    const thickness = thickEl ? parseFloat(thickEl.value) || 0.20 : 0.20;
+    const target = document.getElementById('vsec-image-' + storey);
+    if (target) target.innerHTML = 'Renderar vertikalt snitt…';
+    try {
+      const res = await fetch('/api/jobs/' + wizard.jobId + '/walls/vertical_section', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ storey_idx: storey, x1, y1, x2, y2, thickness }),
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      if (target) target.innerHTML = `<img src="${url}" alt="Vertikalt snitt" style="max-width:100%;display:block;margin:0 auto">`;
+    } catch (e) {
+      if (target) target.innerHTML = '<div class="alert alert-danger" style="margin:0">Kunde inte rendera snittet: ' + e.message + '</div>';
+    }
+  };
 }
 
 async function renderWallsDxfButtons() {
@@ -1229,6 +1489,27 @@ function wizardOpenStageOverrides(stage) {
           <input type="number" id="ovr-tfs" value="${v('tfs-thickness') || '0.4'}" step="0.05">
         </div>
       </div>`;
+  } else if (stage === 'walls' && wizard.algorithm === 'vertical') {
+    const p = wizard.v3Params || { slice_thickness: 0.05, min_fill: 0.70, min_points: 5 };
+    formHtml = `
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
+        v3 — vertikal kontinuitet. Inget horisontellt snitt, hela kolumnen
+        golv→tak skannas per XY-pixel.
+      </div>
+      <div class="form-grid" style="margin-top:8px">
+        <div class="form-group"><label>Z-snittstjocklek (m)</label><input type="number" id="ovr-v3-slice" value="${p.slice_thickness.toFixed(3)}" step="0.01" min="0.01"></div>
+        <div class="form-group"><label>Min fyllningsgrad (0–1)</label><input type="number" id="ovr-v3-fill" value="${p.min_fill.toFixed(2)}" step="0.05" min="0.10" max="1.0"></div>
+        <div class="form-group"><label>Min punkter per snitt</label><input type="number" id="ovr-v3-minpts" value="${p.min_points}" step="1" min="1"></div>
+        <div class="form-group"><label>Min vägglängd (m)</label><input type="number" id="ovr-min-wl" value="0.10" step="0.05"></div>
+        <div class="form-group"><label>Min väggtjocklek (m)</label><input type="number" id="ovr-min-wt" value="0.05" step="0.01"></div>
+        <div class="form-group"><label>Max väggtjocklek (m)</label><input type="number" id="ovr-max-wt" value="0.75" step="0.05"></div>
+        <div class="form-group"><label>Yttervägg-tjocklek (m)</label><input type="number" id="ovr-ext-wt" value="0.3" step="0.05"></div>
+        <div class="form-group"><label>Max väggar per våning (cap)</label><input type="number" id="ovr-max-walls" value="300" min="1"></div>
+      </div>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:8px">
+        Sänk fyllningsgraden för rum med många fönster (fönster bryter kolonnen);
+        höj den för att vara strängare mot möbler som fyller halva höjden.
+      </div>`;
   } else if (stage === 'walls') {
     formHtml = `
       <div class="form-grid" style="margin-top:12px">
@@ -1293,13 +1574,27 @@ async function wizardRunStage(stage) {
   const wMaxT = num('ovr-max-wt'); if (wMaxT !== null) overrides.max_wall_thickness = wMaxT;
   const wExtT = num('ovr-ext-wt'); if (wExtT !== null) overrides.exterior_walls_thickness = wExtT;
   const wMaxN = num('ovr-max-walls'); if (wMaxN !== null) overrides.max_walls_per_storey = Math.round(wMaxN);
-  // Cross-section bands (for walls stage)
-  if (stage === 'walls' && wizard.bands.length > 0) {
-    overrides.cross_section_bands = wizard.bands.map(b => b ? [b.z_min, b.z_max] : null);
-    overrides.cross_section_bands_lower = wizard.bands_lower.map(b => b ? [b.z_min, b.z_max] : null);
-  }
-  // Low-section support filter toggle
-  if (stage === 'walls') {
+  // Wall-stage extras differ by algorithm: v1/v2 use horizontal Z-bands
+  // and an optional low-section support filter; v3 uses the vertical-
+  // continuity parameters (slice thickness / min fill / min points).
+  if (stage === 'walls' && wizard.algorithm === 'vertical') {
+    const vSlice = num('ovr-v3-slice'); if (vSlice !== null) overrides.vertical_slice_thickness = vSlice;
+    const vFill = num('ovr-v3-fill'); if (vFill !== null) overrides.vertical_min_fill = vFill;
+    const vMinPts = num('ovr-v3-minpts'); if (vMinPts !== null) overrides.vertical_min_points_per_slice = Math.round(vMinPts);
+    // Mirror the new values into wizard.v3Params so subsequent reviews
+    // pre-fill the inputs with what the user just ran.
+    if (vSlice !== null || vFill !== null || vMinPts !== null) {
+      wizard.v3Params = {
+        slice_thickness: vSlice !== null ? vSlice : (wizard.v3Params?.slice_thickness ?? 0.05),
+        min_fill: vFill !== null ? vFill : (wizard.v3Params?.min_fill ?? 0.70),
+        min_points: vMinPts !== null ? Math.round(vMinPts) : (wizard.v3Params?.min_points ?? 5),
+      };
+    }
+  } else if (stage === 'walls') {
+    if (wizard.bands.length > 0) {
+      overrides.cross_section_bands = wizard.bands.map(b => b ? [b.z_min, b.z_max] : null);
+      overrides.cross_section_bands_lower = wizard.bands_lower.map(b => b ? [b.z_min, b.z_max] : null);
+    }
     const lowEl = document.getElementById('ovr-lower-support');
     if (lowEl) overrides.require_lower_support = !!lowEl.checked;
     const lowFrac = num('ovr-lower-frac');

@@ -229,6 +229,157 @@ def render_cross_section(
     log.info("Cross-section preview saved: %s", output_path)
 
 
+def render_walls_topdown_overlay(
+    output_path: Path,
+    points_xy: np.ndarray,
+    walls: Iterable[Wall],
+    bounds: tuple[float, float, float, float] | None = None,
+    title: str = "",
+) -> tuple[float, float, float, float]:
+    """Top-down view of one storey: faint point density + detected wall axes.
+
+    Used in v3 (vertical-continuity) wizard review so the operator sees
+    *what was detected* against the actual point cloud, rather than a
+    horizontal slice configuration UI that v3 doesn't use.
+
+    Returns the (xmin, ymin, xmax, ymax) world bounds so the caller can
+    translate pixel clicks back to world coords.
+    """
+    fig, ax = plt.subplots(figsize=(10, 10))
+    fig.patch.set_facecolor("#1a1d27")
+    ax.set_facecolor("#0f1117")
+
+    if len(points_xy) > 250_000:
+        stride = max(1, len(points_xy) // 250_000)
+        points_xy = points_xy[::stride]
+
+    if len(points_xy) > 0:
+        ax.scatter(points_xy[:, 0], points_xy[:, 1], s=0.3,
+                   color="#5a6a8a", alpha=0.35)
+
+    walls_list = list(walls)
+    for w in walls_list:
+        sp, ep = w.start, w.end
+        is_ext = w.label.startswith("exterior")
+        color = "#ff6b6b" if not is_ext else "#ff9b3b"
+        lw = max(1.5, w.thickness * 35)
+        ax.plot([sp[0], ep[0]], [sp[1], ep[1]],
+                color=color, linewidth=lw, alpha=0.85,
+                solid_capstyle="round", zorder=3)
+
+    if bounds is not None:
+        ax.set_xlim(bounds[0], bounds[2])
+        ax.set_ylim(bounds[1], bounds[3])
+    elif len(points_xy) > 0:
+        bounds = (
+            float(points_xy[:, 0].min()), float(points_xy[:, 1].min()),
+            float(points_xy[:, 0].max()), float(points_xy[:, 1].max()),
+        )
+        ax.set_xlim(bounds[0], bounds[2])
+        ax.set_ylim(bounds[1], bounds[3])
+    else:
+        bounds = (0.0, 0.0, 1.0, 1.0)
+
+    ax.set_aspect("equal")
+    ax.axis("off")
+    if title:
+        ax.set_title(title, color="white", fontsize=11)
+
+    fig.subplots_adjust(left=0, right=1, bottom=0, top=0.95 if title else 1)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=100, facecolor=fig.get_facecolor())
+    plt.close(fig)
+    log.info("Walls top-down overlay saved: %s", output_path)
+    return bounds
+
+
+def render_walls_vertical_section(
+    output_path: Path,
+    points_xyz: np.ndarray,
+    line_start: tuple[float, float],
+    line_end: tuple[float, float],
+    z_floor: float,
+    z_ceiling: float,
+    thickness: float,
+    wall_hits: list[tuple[float, float, str]] | None = None,
+    title: str = "",
+) -> None:
+    """Vertical slice along a user-drawn XY line.
+
+    X-axis = signed distance along the line from start. Y-axis = world Z.
+    Points within ``thickness`` of the line on either side are projected
+    onto the line and plotted; storey floor + ceiling are drawn as
+    horizontal markers; ``wall_hits`` (intersections of detected wall
+    axes with the line) become vertical bands so the operator can see
+    where v3 said "filled top to bottom".
+    """
+    sx, sy = line_start
+    ex, ey = line_end
+    dx, dy = ex - sx, ey - sy
+    seg_len = float(np.hypot(dx, dy))
+    if seg_len < 1e-6:
+        seg_len = 1.0
+    ux, uy = dx / seg_len, dy / seg_len
+    nx, ny = -uy, ux  # left-hand normal
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    fig.patch.set_facecolor("#1a1d27")
+    ax.set_facecolor("#0f1117")
+
+    if len(points_xyz) > 0:
+        # Project onto line: t along, d perpendicular
+        rx = points_xyz[:, 0] - sx
+        ry = points_xyz[:, 1] - sy
+        t = rx * ux + ry * uy
+        d = rx * nx + ry * ny
+        mask = (np.abs(d) <= thickness) & (t >= -thickness) & (t <= seg_len + thickness)
+        sel = points_xyz[mask]
+        sel_t = t[mask]
+        if len(sel) > 200_000:
+            stride = max(1, len(sel) // 200_000)
+            sel = sel[::stride]
+            sel_t = sel_t[::stride]
+        if len(sel) > 0:
+            ax.scatter(sel_t, sel[:, 2], s=0.5,
+                       color="#76c8e8", alpha=0.55, zorder=2)
+
+    # Storey floor + ceiling lines
+    ax.axhline(z_floor, color="#aa8866", linewidth=1.2, linestyle="--",
+               alpha=0.8, zorder=3, label=f"Golv Z={z_floor:.2f} m")
+    ax.axhline(z_ceiling, color="#aa8866", linewidth=1.2, linestyle="--",
+               alpha=0.8, zorder=3, label=f"Tak Z={z_ceiling:.2f} m")
+
+    # Wall hits as vertical bands
+    if wall_hits:
+        for i, (t_hit, w_thick, label) in enumerate(wall_hits):
+            half = max(0.05, w_thick / 2)
+            ax.axvspan(t_hit - half, t_hit + half,
+                       color="#ff6b6b", alpha=0.30, zorder=1,
+                       label=("Detekterad vägg" if i == 0 else None))
+
+    ax.set_xlim(-thickness, seg_len + thickness)
+    z_pad = max(0.3, 0.05 * (z_ceiling - z_floor))
+    ax.set_ylim(z_floor - z_pad, z_ceiling + z_pad)
+    ax.set_xlabel(f"Avstånd längs linjen (m) — total {seg_len:.2f} m",
+                  color="white", fontsize=10)
+    ax.set_ylabel("Z (m)", color="white", fontsize=10)
+    ax.tick_params(colors="#aaaaaa")
+    for spine in ax.spines.values():
+        spine.set_color("#2e3350")
+    leg = ax.legend(facecolor="#1a1d27", labelcolor="white",
+                    edgecolor="#2e3350", fontsize=9, loc="upper right")
+    if leg:
+        leg.get_frame().set_alpha(0.9)
+    if title:
+        ax.set_title(title, color="white", fontsize=11)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=100, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    log.info("Walls vertical section saved: %s", output_path)
+
+
 def render_storey_walls(
     output_path: Path,
     walls: Iterable[Wall],

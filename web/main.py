@@ -1018,6 +1018,10 @@ class RunStageRequest(BaseModel):
     # When true, walls without point support in the low band are dropped.
     require_lower_support: Optional[bool] = None
     lower_support_fraction: Optional[float] = None
+    # v3 vertical-continuity wall algorithm parameters.
+    vertical_slice_thickness: Optional[float] = None
+    vertical_min_fill: Optional[float] = None
+    vertical_min_points_per_slice: Optional[int] = None
 
 
 @app.get("/api/jobs/{job_id}/state")
@@ -1074,6 +1078,12 @@ def _apply_overrides_to_config(config_path: Path, req: RunStageRequest) -> None:
         walls["require_lower_support"] = req.require_lower_support
     if req.lower_support_fraction is not None:
         walls["lower_support_fraction"] = req.lower_support_fraction
+    if req.vertical_slice_thickness is not None:
+        walls["vertical_slice_thickness"] = req.vertical_slice_thickness
+    if req.vertical_min_fill is not None:
+        walls["vertical_min_fill"] = req.vertical_min_fill
+    if req.vertical_min_points_per_slice is not None:
+        walls["vertical_min_points_per_slice"] = req.vertical_min_points_per_slice
 
     with open(config_path, "w") as fh:
         yaml.dump(cfg, fh, allow_unicode=True)
@@ -1299,6 +1309,162 @@ async def cross_section_preview(job_id: str, req: CrossSectionRequest):
         render_cross_section(out, xy, title=title)
 
     await asyncio.to_thread(_render)
+    return FileResponse(str(out), media_type="image/png")
+
+
+class WallsTopdownRequest(BaseModel):
+    storey_idx: int = 0
+
+
+@app.post("/api/jobs/{job_id}/walls/topdown_overlay")
+async def walls_topdown_overlay(job_id: str, req: WallsTopdownRequest):
+    """Render one storey's point density with detected wall axes overlaid.
+
+    Used by the v3 (vertical-continuity) wizard review — instead of letting
+    the operator pick a horizontal slice (irrelevant for v3, which reads
+    the full storey height), we show *what was detected* against the cloud.
+    """
+    job_dir = JOBS_DIR / job_id
+    pts_path = job_dir / "points.npz"
+    walls_pkl = job_dir / "walls.pkl"
+    slabs_pkl = job_dir / "slabs.pkl"
+    if not pts_path.exists():
+        raise HTTPException(404, "points.npz missing — run prepare stage first")
+    if not walls_pkl.exists():
+        raise HTTPException(404, "walls.pkl missing — run walls stage first")
+    if not slabs_pkl.exists():
+        raise HTTPException(404, "slabs.pkl missing — run slabs stage first")
+
+    out = job_dir / f"walls_overlay_{req.storey_idx}.png"
+
+    def _render():
+        import pickle
+        import numpy as _np
+        from cloud2bim.preview import render_walls_topdown_overlay
+        with slabs_pkl.open("rb") as fh:
+            slabs = pickle.load(fh)
+        with walls_pkl.open("rb") as fh:
+            storey_walls = pickle.load(fh)
+        if req.storey_idx < 0 or req.storey_idx >= len(slabs) - 1:
+            raise ValueError(f"storey_idx {req.storey_idx} out of range (0..{len(slabs)-2})")
+        z_floor = float(slabs[req.storey_idx].bottom_z + slabs[req.storey_idx].thickness)
+        z_ceiling = float(slabs[req.storey_idx + 1].bottom_z)
+        data = _np.load(str(pts_path))
+        xyz = data["xyz"]
+        mask = (xyz[:, 2] >= z_floor) & (xyz[:, 2] <= z_ceiling)
+        xy = xyz[mask, :2]
+        walls = storey_walls[req.storey_idx] if req.storey_idx < len(storey_walls) else []
+        title = (f"Våning {req.storey_idx} — Z {z_floor:.2f}–{z_ceiling:.2f} m  "
+                 f"({len(walls)} väggar, {int(mask.sum()):,} pts)")
+        bounds = render_walls_topdown_overlay(out, xy, walls, title=title)
+        return {
+            "bounds": list(bounds),
+            "z_floor": z_floor,
+            "z_ceiling": z_ceiling,
+            "n_walls": len(walls),
+            "n_points": int(mask.sum()),
+        }
+
+    try:
+        meta = await asyncio.to_thread(_render)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {
+        "image_url": f"/api/jobs/{job_id}/walls/overlay_image/{req.storey_idx}",
+        **meta,
+    }
+
+
+@app.get("/api/jobs/{job_id}/walls/overlay_image/{storey_idx}")
+async def walls_overlay_image(job_id: str, storey_idx: int):
+    out = JOBS_DIR / job_id / f"walls_overlay_{storey_idx}.png"
+    if not out.exists():
+        raise HTTPException(404, "Overlay not yet generated — POST /walls/topdown_overlay first")
+    return FileResponse(str(out), media_type="image/png")
+
+
+class WallsVerticalSectionRequest(BaseModel):
+    storey_idx: int
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    thickness: float = 0.20  # ± half-width around the line, in metres
+
+
+@app.post("/api/jobs/{job_id}/walls/vertical_section")
+async def walls_vertical_section(job_id: str, req: WallsVerticalSectionRequest):
+    """Render a vertical slice along a user-drawn XY line on the storey.
+
+    Shows the column from floor to ceiling so the operator can see
+    *why* v3 marked a region as wall (or didn't): is the cloud actually
+    filled top-to-bottom, or is it furniture? Detected wall axes that
+    the line crosses are highlighted as vertical bands.
+    """
+    job_dir = JOBS_DIR / job_id
+    pts_path = job_dir / "points.npz"
+    slabs_pkl = job_dir / "slabs.pkl"
+    if not pts_path.exists():
+        raise HTTPException(404, "points.npz missing — run prepare stage first")
+    if not slabs_pkl.exists():
+        raise HTTPException(404, "slabs.pkl missing — run slabs stage first")
+
+    walls_pkl = job_dir / "walls.pkl"
+    out = job_dir / f"walls_section_{req.storey_idx}.png"
+
+    def _render():
+        import pickle
+        import numpy as _np
+        from cloud2bim.preview import render_walls_vertical_section
+        with slabs_pkl.open("rb") as fh:
+            slabs = pickle.load(fh)
+        if req.storey_idx < 0 or req.storey_idx >= len(slabs) - 1:
+            raise ValueError(f"storey_idx {req.storey_idx} out of range (0..{len(slabs)-2})")
+        z_floor = float(slabs[req.storey_idx].bottom_z + slabs[req.storey_idx].thickness)
+        z_ceiling = float(slabs[req.storey_idx + 1].bottom_z)
+        data = _np.load(str(pts_path))
+        xyz = data["xyz"]
+
+        # Compute wall_hits before rendering: intersection of each wall axis
+        # with the section line, expressed as distance along the line.
+        wall_hits: list[tuple[float, float, str]] = []
+        if walls_pkl.exists():
+            with walls_pkl.open("rb") as fh:
+                storey_walls = pickle.load(fh)
+            if req.storey_idx < len(storey_walls):
+                sx, sy = req.x1, req.y1
+                ex, ey = req.x2, req.y2
+                dx, dy = ex - sx, ey - sy
+                seg_len = float(_np.hypot(dx, dy)) or 1.0
+                ux, uy = dx / seg_len, dy / seg_len
+                for w in storey_walls[req.storey_idx]:
+                    # Intersect segment line vs wall axis using parametric form
+                    wsx, wsy = w.start[0], w.start[1]
+                    wex, wey = w.end[0], w.end[1]
+                    wdx, wdy = wex - wsx, wey - wsy
+                    denom = dx * (-wdy) - dy * (-wdx)
+                    if abs(denom) < 1e-9:
+                        continue
+                    t_line = ((wsx - sx) * (-wdy) - (wsy - sy) * (-wdx)) / denom
+                    t_wall = (dx * (wsy - sy) - dy * (wsx - sx)) / denom
+                    if 0.0 <= t_line <= 1.0 and 0.0 <= t_wall <= 1.0:
+                        # Distance from segment start to the intersection
+                        dist = t_line * seg_len
+                        wall_hits.append((dist, float(w.thickness), w.label))
+
+        title = (f"Vertikalt snitt våning {req.storey_idx} — "
+                 f"längd {_np.hypot(req.x2 - req.x1, req.y2 - req.y1):.2f} m, "
+                 f"bredd ±{req.thickness:.2f} m")
+        render_walls_vertical_section(
+            out, xyz, (req.x1, req.y1), (req.x2, req.y2),
+            z_floor, z_ceiling, req.thickness, wall_hits=wall_hits, title=title,
+        )
+        return {"n_wall_hits": len(wall_hits)}
+
+    try:
+        await asyncio.to_thread(_render)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
     return FileResponse(str(out), media_type="image/png")
 
 
