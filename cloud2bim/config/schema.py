@@ -302,6 +302,39 @@ class WallConfig(BaseModel):
             "create a wall column."
         ),
     )
+    vertical_sample_count: int = Field(
+        default=5,
+        ge=2,
+        le=20,
+        description=(
+            "Number of sample heights between floor and ceiling for "
+            "the sparse K-of-N variant. 5 covers 20/40/60/80/95% of "
+            "the storey height — survives a single window band knocking "
+            "out 1–2 samples. Raise for tall storeys, lower for low ones."
+        ),
+    )
+    vertical_min_hits: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Minimum number of sample heights at which a pixel must be "
+            "filled to count as a wall. With sample_count=5, hits=3 means "
+            'a wall must show up in at least 3 of the 5 height bands — '
+            "tolerates fönsterband knocking out two contiguous bands."
+        ),
+    )
+    vertical_pixel_size_cm: float = Field(
+        default=5.0,
+        gt=0,
+        description=(
+            "cm. XY pixel size for the v3 occupancy grid. Overrides the "
+            "default pc_resolution × grid_coefficient (which gives 1 cm "
+            "with typical settings — unnecessarily fine for a 10–30 cm "
+            "thick wall and noisier than 5 cm). Raise for sparse clouds "
+            "or to merge adjacent wall fragments; lower for very thin "
+            "interior walls."
+        ),
+    )
 
 
 # ─── Openings ─────────────────────────────────────────────────────────────────

@@ -86,19 +86,38 @@ def detect_walls_vertical(
                 storey_idx, int(wall_mask.sum()), n,
             )
 
-    pixel_size = pc_resolution * grid_coefficient
+    # Pixel size: v3 takes its own (in cm via config) instead of the
+    # pc_resolution × grid_coefficient default, which gives 1 cm — too
+    # fine for a 10–30 cm thick wall and noisier than 5 cm. Fall back
+    # to the legacy default if the cm field isn't set.
+    if cfg.vertical_pixel_size_cm and cfg.vertical_pixel_size_cm > 0:
+        pixel_size = cfg.vertical_pixel_size_cm / 100.0
+    else:
+        pixel_size = pc_resolution * grid_coefficient
     slice_h = cfg.vertical_slice_thickness
     min_pts = cfg.vertical_min_points_per_slice
-    min_fill = cfg.vertical_min_fill
+    n_samples = max(2, cfg.vertical_sample_count)
+    min_hits = min(max(1, cfg.vertical_min_hits), n_samples)
 
-    # ── 1. Z-slice the storey ───────────────────────────────────────────
-    n_slices = max(1, int(np.ceil((z_ceiling - z_floor) / slice_h)))
+    storey_h = z_ceiling - z_floor
+
+    # ── 1. Pick K sample heights between floor and ceiling ──────────────
+    # Evenly spaced as fractions of the storey, capped at 0.95 so we
+    # stay clear of the ceiling slab itself (which would fill every
+    # pixel that lives under the deck plate). The sparse K-of-N test
+    # tolerates fönsterband knocking out 1–2 contiguous samples — a
+    # pixel still passes as long as ≥min_hits of the K samples are
+    # filled, which is the failure mode the old N-of-N fill-ratio
+    # check (vertical_min_fill) had no way to handle.
+    fractions = np.linspace(1.0 / (n_samples + 1), 0.95, n_samples)
+    sample_zs = z_floor + fractions * storey_h
     log.info(
-        "Vertical walls storey %d: %d Z-slices of %.2f m (%.2f → %.2f)",
-        storey_idx, n_slices, slice_h, z_floor, z_ceiling,
+        "Vertical walls storey %d: %d sample heights (≥%d hits required), "
+        "slice ±%.2f m around each",
+        storey_idx, n_samples, min_hits, slice_h / 2,
     )
 
-    # ── 2. Build a shared XY grid for all slices ────────────────────────
+    # ── 2. Build a shared XY grid for all samples ───────────────────────
     xs = pts[:, 0]
     ys = pts[:, 1]
     x_min, x_max = float(xs.min()), float(xs.max())
@@ -111,29 +130,38 @@ def detect_walls_vertical(
     grid_w = len(x_edges) - 1
     grid_h = len(y_edges) - 1
 
-    # ── 3. Per slice, count fills per XY pixel ──────────────────────────
-    fill_count = np.zeros((grid_h, grid_w), dtype=np.int32)
+    # ── 3. Per sample, count fills per XY pixel ─────────────────────────
+    hit_count = np.zeros((grid_h, grid_w), dtype=np.int32)
     z_coords = pts[:, 2]
-    for s in range(n_slices):
-        s_lo = z_floor + s * slice_h
-        s_hi = s_lo + slice_h
+    sample_fills = []
+    for s_idx, z_centre in enumerate(sample_zs):
+        s_lo = z_centre - slice_h / 2
+        s_hi = z_centre + slice_h / 2
         slice_mask = (z_coords >= s_lo) & (z_coords < s_hi)
         if not slice_mask.any():
+            sample_fills.append(0)
             continue
         slice_xy = pts[slice_mask, :2]
         # histogram2d returns (W, H); transpose to (H, W) row-major
         h, _, _ = np.histogram2d(slice_xy[:, 0], slice_xy[:, 1], bins=[x_edges, y_edges])
         h = h.T
-        # Cell counts as filled if it has at least min_pts points in this slice
-        fill_count += (h >= min_pts).astype(np.int32)
+        filled = (h >= min_pts).astype(np.int32)
+        hit_count += filled
+        sample_fills.append(int(filled.sum()))
+
+    log.info(
+        "Vertical walls storey %d: per-sample fills %s",
+        storey_idx, sample_fills,
+    )
 
     # ── 4. Threshold to get wall-candidate pixels ───────────────────────
-    fill_ratio = fill_count.astype(np.float32) / float(n_slices)
-    wall_mask = (fill_ratio >= min_fill).astype(np.uint8) * 255
+    wall_mask = (hit_count >= min_hits).astype(np.uint8) * 255
     n_wall_px = int((wall_mask > 0).sum())
     log.info(
-        "Vertical walls storey %d: %d wall-candidate pixels (%.1f%% of grid)",
+        "Vertical walls storey %d: %d wall-candidate pixels (%.1f%% of grid, "
+        "≥%d of %d sample heights hit)",
         storey_idx, n_wall_px, 100.0 * n_wall_px / (grid_h * grid_w),
+        min_hits, n_samples,
     )
     if n_wall_px == 0:
         return []

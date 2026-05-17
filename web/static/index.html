@@ -392,26 +392,36 @@
           väggstubbar mellan dörrar).
         </div>
 
-        <div class="section-label">Väggar — v3 vertikal kontinuitet</div>
+        <div class="section-label">Väggar — v3 vertikal kontinuitet (sparse K-av-N)</div>
         <div class="form-grid" style="margin-bottom:16px">
           <div class="form-group">
-            <label for="vertical-slice-thickness">Z-snittstjocklek (m)</label>
+            <label for="vertical-sample-count">Antal sample-höjder (K)</label>
+            <input type="number" id="vertical-sample-count" value="5" step="1" min="2" max="20">
+          </div>
+          <div class="form-group">
+            <label for="vertical-min-hits">Min träffar (M av K)</label>
+            <input type="number" id="vertical-min-hits" value="3" step="1" min="1">
+          </div>
+          <div class="form-group">
+            <label for="vertical-pixel-size">Pixelstorlek (cm)</label>
+            <input type="number" id="vertical-pixel-size" value="5" step="1" min="1">
+          </div>
+          <div class="form-group">
+            <label for="vertical-slice-thickness">Sample-tjocklek (m, ±halva)</label>
             <input type="number" id="vertical-slice-thickness" value="0.05" step="0.01" min="0.01">
           </div>
           <div class="form-group">
-            <label for="vertical-min-fill">Min fyllningsgrad (0–1)</label>
-            <input type="number" id="vertical-min-fill" value="0.70" step="0.05" min="0.10" max="1.0">
-          </div>
-          <div class="form-group">
-            <label for="vertical-min-points">Min punkter per snitt</label>
+            <label for="vertical-min-points">Min punkter per sample</label>
             <input type="number" id="vertical-min-points" value="5" step="1" min="1">
           </div>
         </div>
         <div class="alert alert-info" style="font-size:12px;margin-bottom:16px">
-          ℹ️ <strong>Fyllningsgrad</strong> — andel av våningens höjd som en pixel
-          måste vara fylld i. 0.7 = 70%. Sänk för rum med många fönster (där
-          glaset bryter kolonnen); höj för att vara strängare mot möbler som
-          fyller halva höjden.
+          ℹ️ K=5 sample-höjder vid 20/40/60/80/95% av våningshöjden. En pixel räknas
+          som vägg om den är fylld i minst <strong>M</strong> av K. Fönsterband
+          som tar ut 1–2 sample-höjder bryter inte väggen. <strong>Fönster och
+          dörrar identifieras separat</strong> i öppningssteget — v3:s jobb är
+          bara att hitta rätt väggpixlar. Default-pixelstorlek 5 cm är robust;
+          1–3 cm för tunna innerväggar, 7–10 cm för glesa moln.
         </div>
 
         <div class="section-label">Histogramupplösning</div>

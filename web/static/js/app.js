@@ -520,6 +520,9 @@ function collectConfig() {
     vertical_slice_thickness: n('vertical-slice-thickness') || 0.05,
     vertical_min_fill: n('vertical-min-fill') || 0.70,
     vertical_min_points_per_slice: parseInt(v('vertical-min-points')) || 5,
+    vertical_sample_count: parseInt(v('vertical-sample-count')) || 5,
+    vertical_min_hits: parseInt(v('vertical-min-hits')) || 3,
+    vertical_pixel_size_cm: n('vertical-pixel-size') || 5.0,
     slabs_enabled: b('slabs-enabled'),
     walls_enabled: b('walls-enabled'),
     openings_enabled: b('openings-enabled'),
@@ -661,8 +664,10 @@ async function wizardStart() {
   wizard.algorithm = cfg.algorithm || 'v1';
   wizard.v3Params = {
     slice_thickness: cfg.vertical_slice_thickness || 0.05,
-    min_fill: cfg.vertical_min_fill || 0.70,
     min_points: cfg.vertical_min_points_per_slice || 5,
+    sample_count: cfg.vertical_sample_count || 5,
+    min_hits: cfg.vertical_min_hits || 3,
+    pixel_size_cm: cfg.vertical_pixel_size_cm || 5.0,
   };
   wizardLog(`[Job ${data.job_id.slice(0, 8)}] Wizard startad (algoritm: ${wizard.algorithm})`);
 
@@ -1113,29 +1118,45 @@ async function renderWallsReviewHistogram(extra, numStoreys) {
 // v3 reads the full floor→ceiling column, not a horizontal slice.
 
 async function renderWallsReviewVertical(extra, numStoreys) {
-  const p = wizard.v3Params || { slice_thickness: 0.05, min_fill: 0.70, min_points: 5 };
+  const p = wizard.v3Params || {
+    slice_thickness: 0.05, min_points: 5,
+    sample_count: 5, min_hits: 3, pixel_size_cm: 5.0,
+  };
   extra.innerHTML = `
     <div style="margin-bottom:14px;padding:12px;background:var(--surface2);border-radius:8px">
-      <div style="font-weight:600;font-size:13px;margin-bottom:6px">v3 — vertikal kontinuitet</div>
+      <div style="font-weight:600;font-size:13px;margin-bottom:6px">v3 — sparse K-av-N vertikal kontinuitet</div>
       <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
-        Här används <strong>inget horisontellt snitt</strong> — algoritmen skannar hela
-        kolumnen från golv till tak per XY-pixel. En pixel räknas som vägg om den är
-        fylld i minst <em>min fyllnadsgrad</em> av alla Z-snitt. Justera parametrarna
-        nedan och klicka "Kör om" för att se hur det påverkar väggdetekteringen.
+        Tar <strong>K sample-höjder</strong> jämnt fördelade mellan golv och tak
+        (20/40/60/80/95% vid K=5). En pixel räknas som vägg om den är fylld i minst
+        <em>M</em> av de K höjderna. Fönsterband som tar ut en eller två höjder bryter
+        inte väggen. Fönster/dörrar identifieras separat i nästa steg (öppningar).
       </p>
       <div class="form-grid" style="margin-bottom:0">
         <div class="form-group">
-          <label for="v3-slice-thickness">Z-snittstjocklek (m)</label>
+          <label for="v3-sample-count">Antal sample-höjder (K)</label>
+          <input type="number" id="v3-sample-count" value="${p.sample_count}" step="1" min="2" max="20">
+        </div>
+        <div class="form-group">
+          <label for="v3-min-hits">Min träffar (M av K)</label>
+          <input type="number" id="v3-min-hits" value="${p.min_hits}" step="1" min="1">
+        </div>
+        <div class="form-group">
+          <label for="v3-pixel-size">Pixelstorlek (cm)</label>
+          <input type="number" id="v3-pixel-size" value="${p.pixel_size_cm}" step="1" min="1">
+        </div>
+        <div class="form-group">
+          <label for="v3-slice-thickness">Sample-tjocklek (m, ±halva)</label>
           <input type="number" id="v3-slice-thickness" value="${p.slice_thickness.toFixed(3)}" step="0.01" min="0.01">
         </div>
         <div class="form-group">
-          <label for="v3-min-fill">Min fyllningsgrad (0–1)</label>
-          <input type="number" id="v3-min-fill" value="${p.min_fill.toFixed(2)}" step="0.05" min="0.10" max="1.0">
-        </div>
-        <div class="form-group">
-          <label for="v3-min-points">Min punkter per snitt</label>
+          <label for="v3-min-points">Min punkter per sample</label>
           <input type="number" id="v3-min-points" value="${p.min_points}" step="1" min="1">
         </div>
+      </div>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:8px">
+        ℹ️ Default: K=5, M=3, pixel=5 cm. Höj K till 7–9 för höga lokaler (typ industrilager
+        över 5 m). Höj pixelstorleken till 7–10 cm om punktmolnet är glest eller väggar
+        framstår fragmenterade; sänk till 2–3 cm bara för väldigt tunna innerväggar.
       </div>
     </div>
     <div id="storey-overlays"></div>
@@ -1150,14 +1171,16 @@ async function renderWallsReviewVertical(extra, numStoreys) {
 
   // Stash live parameter edits back into wizard.v3Params so the "Kör om"
   // button picks them up via wizardRunStage.
-  ['v3-slice-thickness', 'v3-min-fill', 'v3-min-points'].forEach(id => {
+  ['v3-sample-count', 'v3-min-hits', 'v3-pixel-size', 'v3-slice-thickness', 'v3-min-points'].forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener('input', () => {
       wizard.v3Params = {
         slice_thickness: parseFloat(document.getElementById('v3-slice-thickness').value) || 0.05,
-        min_fill: parseFloat(document.getElementById('v3-min-fill').value) || 0.70,
         min_points: parseInt(document.getElementById('v3-min-points').value, 10) || 5,
+        sample_count: parseInt(document.getElementById('v3-sample-count').value, 10) || 5,
+        min_hits: parseInt(document.getElementById('v3-min-hits').value, 10) || 3,
+        pixel_size_cm: parseFloat(document.getElementById('v3-pixel-size').value) || 5.0,
       };
     });
   });
@@ -1490,16 +1513,21 @@ function wizardOpenStageOverrides(stage) {
         </div>
       </div>`;
   } else if (stage === 'walls' && wizard.algorithm === 'vertical') {
-    const p = wizard.v3Params || { slice_thickness: 0.05, min_fill: 0.70, min_points: 5 };
+    const p = wizard.v3Params || {
+      slice_thickness: 0.05, min_points: 5,
+      sample_count: 5, min_hits: 3, pixel_size_cm: 5.0,
+    };
     formHtml = `
       <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
-        v3 — vertikal kontinuitet. Inget horisontellt snitt, hela kolumnen
-        golv→tak skannas per XY-pixel.
+        v3 — sparse K-av-N. K sample-höjder mellan golv och tak; ≥M träffar = vägg.
+        Fönster/dörrar identifieras separat i öppningssteget.
       </div>
       <div class="form-grid" style="margin-top:8px">
-        <div class="form-group"><label>Z-snittstjocklek (m)</label><input type="number" id="ovr-v3-slice" value="${p.slice_thickness.toFixed(3)}" step="0.01" min="0.01"></div>
-        <div class="form-group"><label>Min fyllningsgrad (0–1)</label><input type="number" id="ovr-v3-fill" value="${p.min_fill.toFixed(2)}" step="0.05" min="0.10" max="1.0"></div>
-        <div class="form-group"><label>Min punkter per snitt</label><input type="number" id="ovr-v3-minpts" value="${p.min_points}" step="1" min="1"></div>
+        <div class="form-group"><label>Antal sample-höjder (K)</label><input type="number" id="ovr-v3-samples" value="${p.sample_count}" step="1" min="2" max="20"></div>
+        <div class="form-group"><label>Min träffar (M av K)</label><input type="number" id="ovr-v3-hits" value="${p.min_hits}" step="1" min="1"></div>
+        <div class="form-group"><label>Pixelstorlek (cm)</label><input type="number" id="ovr-v3-pixel" value="${p.pixel_size_cm}" step="1" min="1"></div>
+        <div class="form-group"><label>Sample-tjocklek (m)</label><input type="number" id="ovr-v3-slice" value="${p.slice_thickness.toFixed(3)}" step="0.01" min="0.01"></div>
+        <div class="form-group"><label>Min punkter per sample</label><input type="number" id="ovr-v3-minpts" value="${p.min_points}" step="1" min="1"></div>
         <div class="form-group"><label>Min vägglängd (m)</label><input type="number" id="ovr-min-wl" value="0.10" step="0.05"></div>
         <div class="form-group"><label>Min väggtjocklek (m)</label><input type="number" id="ovr-min-wt" value="0.05" step="0.01"></div>
         <div class="form-group"><label>Max väggtjocklek (m)</label><input type="number" id="ovr-max-wt" value="0.75" step="0.05"></div>
@@ -1507,8 +1535,9 @@ function wizardOpenStageOverrides(stage) {
         <div class="form-group"><label>Max väggar per våning (cap)</label><input type="number" id="ovr-max-walls" value="300" min="1"></div>
       </div>
       <div style="font-size:11px;color:var(--text-dim);margin-top:8px">
-        Sänk fyllningsgraden för rum med många fönster (fönster bryter kolonnen);
-        höj den för att vara strängare mot möbler som fyller halva höjden.
+        Höj M om för många pixlar runt fönster slinker igenom som väggar; sänk M
+        om legitima väggar tappas där en fönsterband + ett möbelparti tillsammans
+        knockar ut tre höjder.
       </div>`;
   } else if (stage === 'walls') {
     formHtml = `
@@ -1579,17 +1608,19 @@ async function wizardRunStage(stage) {
   // continuity parameters (slice thickness / min fill / min points).
   if (stage === 'walls' && wizard.algorithm === 'vertical') {
     const vSlice = num('ovr-v3-slice'); if (vSlice !== null) overrides.vertical_slice_thickness = vSlice;
-    const vFill = num('ovr-v3-fill'); if (vFill !== null) overrides.vertical_min_fill = vFill;
     const vMinPts = num('ovr-v3-minpts'); if (vMinPts !== null) overrides.vertical_min_points_per_slice = Math.round(vMinPts);
+    const vSamples = num('ovr-v3-samples'); if (vSamples !== null) overrides.vertical_sample_count = Math.round(vSamples);
+    const vHits = num('ovr-v3-hits'); if (vHits !== null) overrides.vertical_min_hits = Math.round(vHits);
+    const vPixel = num('ovr-v3-pixel'); if (vPixel !== null) overrides.vertical_pixel_size_cm = vPixel;
     // Mirror the new values into wizard.v3Params so subsequent reviews
     // pre-fill the inputs with what the user just ran.
-    if (vSlice !== null || vFill !== null || vMinPts !== null) {
-      wizard.v3Params = {
-        slice_thickness: vSlice !== null ? vSlice : (wizard.v3Params?.slice_thickness ?? 0.05),
-        min_fill: vFill !== null ? vFill : (wizard.v3Params?.min_fill ?? 0.70),
-        min_points: vMinPts !== null ? Math.round(vMinPts) : (wizard.v3Params?.min_points ?? 5),
-      };
-    }
+    wizard.v3Params = {
+      slice_thickness: vSlice !== null ? vSlice : (wizard.v3Params?.slice_thickness ?? 0.05),
+      min_points: vMinPts !== null ? Math.round(vMinPts) : (wizard.v3Params?.min_points ?? 5),
+      sample_count: vSamples !== null ? Math.round(vSamples) : (wizard.v3Params?.sample_count ?? 5),
+      min_hits: vHits !== null ? Math.round(vHits) : (wizard.v3Params?.min_hits ?? 3),
+      pixel_size_cm: vPixel !== null ? vPixel : (wizard.v3Params?.pixel_size_cm ?? 5.0),
+    };
   } else if (stage === 'walls') {
     if (wizard.bands.length > 0) {
       overrides.cross_section_bands = wizard.bands.map(b => b ? [b.z_min, b.z_max] : null);

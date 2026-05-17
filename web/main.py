@@ -197,6 +197,9 @@ class CreateJobRequest(BaseModel):
     vertical_slice_thickness: float = 0.05
     vertical_min_fill: float = 0.70
     vertical_min_points_per_slice: int = 5
+    vertical_sample_count: int = 5
+    vertical_min_hits: int = 3
+    vertical_pixel_size_cm: float = 5.0
 
     # New wall pairing/merging parameters (decoupled from max_thickness)
     collinear_merge_distance: float = 1.5
@@ -435,6 +438,9 @@ async def create_job(request: CreateJobRequest):
             "vertical_slice_thickness": request.vertical_slice_thickness,
             "vertical_min_fill": request.vertical_min_fill,
             "vertical_min_points_per_slice": request.vertical_min_points_per_slice,
+            "vertical_sample_count": request.vertical_sample_count,
+            "vertical_min_hits": request.vertical_min_hits,
+            "vertical_pixel_size_cm": request.vertical_pixel_size_cm,
         },
         "openings": {"enabled": request.openings_enabled},
         "columns": {"enabled": request.columns_enabled},
@@ -1022,6 +1028,9 @@ class RunStageRequest(BaseModel):
     vertical_slice_thickness: Optional[float] = None
     vertical_min_fill: Optional[float] = None
     vertical_min_points_per_slice: Optional[int] = None
+    vertical_sample_count: Optional[int] = None
+    vertical_min_hits: Optional[int] = None
+    vertical_pixel_size_cm: Optional[float] = None
 
 
 @app.get("/api/jobs/{job_id}/state")
@@ -1084,6 +1093,12 @@ def _apply_overrides_to_config(config_path: Path, req: RunStageRequest) -> None:
         walls["vertical_min_fill"] = req.vertical_min_fill
     if req.vertical_min_points_per_slice is not None:
         walls["vertical_min_points_per_slice"] = req.vertical_min_points_per_slice
+    if req.vertical_sample_count is not None:
+        walls["vertical_sample_count"] = req.vertical_sample_count
+    if req.vertical_min_hits is not None:
+        walls["vertical_min_hits"] = req.vertical_min_hits
+    if req.vertical_pixel_size_cm is not None:
+        walls["vertical_pixel_size_cm"] = req.vertical_pixel_size_cm
 
     with open(config_path, "w") as fh:
         yaml.dump(cfg, fh, allow_unicode=True)
