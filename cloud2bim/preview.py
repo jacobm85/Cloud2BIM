@@ -161,8 +161,10 @@ def render_z_histogram(
                 bbox=dict(boxstyle="round,pad=0.25", facecolor="#444444",
                           edgecolor="#888888", alpha=0.85),
             )
-        # legend
-        ax.fill_betweenx([0, 0], 0, 0, color="#888888", alpha=0.35, label="Slab")
+        # Proxy patch for legend (avoid drawing a real artist at y=0,
+        # which would otherwise pull autoscale's ymin down to 0 and
+        # squash the actual data range).
+        slab_legend_patch = mpatches.Patch(color="#888888", alpha=0.35, label="Slab")
 
     if cross_section_bands:
         palette = ["#76c8e8", "#f5a623", "#a3e635", "#e88adf"]
@@ -186,8 +188,19 @@ def render_z_histogram(
     ax.tick_params(colors="#aaaaaa")
     for spine in ax.spines.values():
         spine.set_color("#2e3350")
+
+    # Explicit Z range from the actual histogram bins (with a small
+    # padding) so scans far from origin — e.g. SWEREF elevations at
+    # +400 m — aren't squashed into a sliver at the top of the plot.
+    if len(bin_centers) > 0:
+        z_lo, z_hi = float(bin_centers.min()), float(bin_centers.max())
+        z_pad = max(0.2, 0.03 * (z_hi - z_lo))
+        ax.set_ylim(z_lo - z_pad, z_hi + z_pad)
+
     if peak_z or slabs or cross_section_bands:
-        leg = ax.legend(facecolor="#1a1d27", labelcolor="white",
+        extra_handles = [slab_legend_patch] if slabs else []
+        leg = ax.legend(handles=ax.get_legend_handles_labels()[0] + extra_handles,
+                        facecolor="#1a1d27", labelcolor="white",
                         edgecolor="#2e3350", fontsize=9, loc="upper right")
         if leg:
             leg.get_frame().set_alpha(0.9)

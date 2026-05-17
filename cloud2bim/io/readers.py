@@ -67,19 +67,53 @@ def _read_e57(path: Path) -> tuple[np.ndarray, np.ndarray | None]:
     return xyz, rgb
 
 
-def _read_las(path: Path) -> tuple[np.ndarray, np.ndarray | None]:
+def _read_las(path: Path, chunk_size: int = 5_000_000) -> tuple[np.ndarray, np.ndarray | None]:
+    """Stream a LAS/LAZ file in chunks.
+
+    laspy.read() loads the whole file in one allocation, peaking at
+    5–10× the file size in RAM — large surveying scans get OOM-killed
+    silently in containers. chunk_iterator() reads in fixed-size blocks
+    so peak memory is bounded by ``chunk_size`` regardless of file size.
+    """
     log.info("Reading LAS: %s", path)
     try:
         import laspy
     except ImportError as exc:
         raise ImportError("laspy not installed — required for .las/.laz input") from exc
 
-    las = laspy.read(str(path))
-    xyz = np.column_stack([np.asarray(las.x), np.asarray(las.y), np.asarray(las.z)]).astype(np.float64)
-    rgb = None
-    if hasattr(las, "red") and hasattr(las, "green") and hasattr(las, "blue"):
-        rgb = np.column_stack([np.asarray(las.red), np.asarray(las.green), np.asarray(las.blue)])
-    log.info("LAS loaded: %s points", f"{len(xyz):,}")
+    xyz_chunks: list[np.ndarray] = []
+    rgb_chunks: list[np.ndarray] = []
+    has_color: bool | None = None
+
+    with laspy.open(str(path)) as reader:
+        total = reader.header.point_count
+        log.info("LAS header: %s points — streaming in %s-point chunks", f"{total:,}", f"{chunk_size:,}")
+        for chunk in reader.chunk_iterator(chunk_size):
+            xyz_chunks.append(
+                np.column_stack([
+                    np.asarray(chunk.x), np.asarray(chunk.y), np.asarray(chunk.z),
+                ]).astype(np.float64)
+            )
+            if has_color is None:
+                has_color = (
+                    hasattr(chunk, "red")
+                    and hasattr(chunk, "green")
+                    and hasattr(chunk, "blue")
+                )
+            if has_color:
+                rgb_chunks.append(
+                    np.column_stack([
+                        np.asarray(chunk.red),
+                        np.asarray(chunk.green),
+                        np.asarray(chunk.blue),
+                    ])
+                )
+
+    if not xyz_chunks:
+        return np.empty((0, 3), dtype=np.float64), None
+    xyz = np.vstack(xyz_chunks) if len(xyz_chunks) > 1 else xyz_chunks[0]
+    rgb = (np.vstack(rgb_chunks) if len(rgb_chunks) > 1 else rgb_chunks[0]) if rgb_chunks else None
+    log.info("LAS loaded: %s points (rgb=%s)", f"{len(xyz):,}", rgb is not None)
     return xyz, rgb
 
 
