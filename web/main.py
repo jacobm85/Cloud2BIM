@@ -815,6 +815,60 @@ async def pointcloud_binary(job_id: str, max_points: int = 80000):
     return Response(content=payload, media_type="application/octet-stream")
 
 
+@app.get("/api/jobs/{job_id}/segment_pointcloud.bin")
+async def segment_pointcloud_binary(job_id: str, max_points: int = 150000):
+    """Return a decimated labeled point cloud as raw Float32Array bytes.
+
+    Layout: (x, y, z, label_id) per point, packed contiguously — 4 floats
+    per point, label_id encoded as float for transport (decode with
+    Math.round() on the JS side). The segment viewer uses this to colour
+    points by semantic class so the user can visually verify what the ML
+    segmenter will keep vs strip before the wall/opening stages run.
+
+    Returns 404 with a clear message when segmentation hasn't run yet
+    (so the viewer can show "run segment first" instead of a stack trace).
+    """
+    from fastapi.responses import Response
+    job_dir = JOBS_DIR / job_id
+    pts_path = job_dir / "points.npz"
+    lbl_path = job_dir / "labels.npy"
+    if not pts_path.exists():
+        raise HTTPException(404, "points.npz missing — run prepare stage first")
+    if not lbl_path.exists():
+        raise HTTPException(404, "labels.npy missing — run segment stage first")
+
+    def _load():
+        import numpy as _np
+        data = _np.load(str(pts_path))
+        xyz = data["xyz"]
+        labels_obj = _np.load(str(lbl_path), allow_pickle=True).item()
+        labels = labels_obj["ids"]
+        if len(labels) != len(xyz):
+            # Shouldn't happen, but a length mismatch would silently
+            # mis-colour every point — guard the user against it.
+            raise HTTPException(
+                500,
+                f"Label count {len(labels)} ≠ point count {len(xyz)}; "
+                "re-run the segment stage.",
+            )
+        n = len(xyz)
+        if n > max_points and max_points > 0:
+            stride = max(1, n // max_points)
+            xyz = xyz[::stride]
+            labels = labels[::stride]
+        packed = _np.empty((len(xyz), 4), dtype=_np.float32)
+        packed[:, :3] = xyz.astype(_np.float32, copy=False)
+        packed[:, 3] = labels.astype(_np.float32)
+        return packed.tobytes(), list(labels_obj["names"])
+
+    payload, names = await asyncio.to_thread(_load)
+    return Response(
+        content=payload,
+        media_type="application/octet-stream",
+        headers={"X-Label-Names": ",".join(names)},
+    )
+
+
 @app.get("/api/jobs/{job_id}/preview")
 async def get_preview(job_id: str):
     job = job_manager.get_job(job_id)

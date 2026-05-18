@@ -787,9 +787,44 @@ function renderWizardStageReview(stage, failed) {
 
   // Stage-specific extras
   if (stage === 'prepare') renderPrepareReview();
+  else if (stage === 'segment') renderSegmentReview();
   else if (stage === 'slabs') renderSlabsReview();
   else if (stage === 'walls') renderWallsReview();
   else if (stage === 'ifc') renderIfcReview();
+}
+
+// Segment-stage review: lets the user inspect what ML classified vs
+// kept/stripped *before* committing to wall/opening extraction. Doesn't
+// render anything heavyweight inline — the 3D inspection is a separate
+// viewer tab so the user can rotate/zoom without leaving the wizard.
+function renderSegmentReview() {
+  const extra = document.getElementById('stage-extra');
+  const viewerUrl = '/static/segment-viewer.html?job=' + wizard.jobId;
+  extra.innerHTML = `
+    <div style="margin-bottom:14px;padding:12px;background:var(--surface2);border-radius:8px">
+      <div style="font-weight:600;font-size:13px;margin-bottom:6px">Inspektera segmenteringen i 3D</div>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
+        Öppna 3D-vyn för att rotera och zooma i punktmolnet. Varje punkt är
+        färglagd efter dess semantiska klass — väggar, golv, tak och öppningar
+        står i ljusa toner; möbler och clutter (som filtreras bort av hybrid-
+        pipelinen i kommande steg) i dämpade. Toggla klasser i legenden för
+        att isolera grupper. Punktmolnet glesläggs till ~200 000 punkter för
+        att hålla WebGL snabb.
+      </p>
+      <div style="display:flex;gap:10px;align-items:center">
+        <a class="btn btn-primary" href="${viewerUrl}" target="_blank" rel="noopener">
+          🔍 Öppna 3D-segmentvy
+        </a>
+        <span style="font-size:11px;color:var(--text-dim)">
+          Öppnas i ny flik — wizarden ligger kvar här.
+        </span>
+      </div>
+    </div>
+    <div style="font-size:12px;color:var(--text-dim)">
+      Om något ser fel ut — t.ex. för mycket möbler markerade som "wall", eller
+      tomma områden där golvet borde vara — klicka "Kör om detta steg" och
+      justera ML-backend, voxelstorlek eller RGB-läge.
+    </div>`;
 }
 
 async function renderPrepareReview() {
