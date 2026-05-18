@@ -59,12 +59,17 @@ REGISTRY: dict[str, WeightSpec] = {
         description="PointTransformer V3 (v3m1-0-rpe), trained on S3DIS Area 1-4+6, validated on Area 5",
     ),
     # RandLA-Net — S3DIS pretrained from Open3D-ML release.
+    # We host our own pure-PyTorch RandLA-Net implementation; the open3d-
+    # ml checkpoint uses slightly different parameter names so the load
+    # is best-effort (the loader logs the match percentage). Set
+    # segmentation.weights_path to a checkpoint trained against
+    # cloud2bim.segmentation._randla_net.RandLANet for production use.
     "randla-s3dis": WeightSpec(
         filename="randlanet_s3dis.pth",
         url="https://storage.googleapis.com/open3d-releases-master/model-zoo/randlanet_s3dis_202201071330utc.pth",
         sha256=None,
         size_mb=12.0,
-        description="RandLA-Net, Open3D-ML S3DIS pretrained checkpoint",
+        description="RandLA-Net, Open3D-ML S3DIS pretrained checkpoint (best-effort name remap)",
     ),
 }
 
