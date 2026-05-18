@@ -199,6 +199,7 @@ def _read_ptx(
             scan_xyz, scan_rgb = _ptx_read_scan_points(
                 fh, n_points, stride=stride,
                 chunk_points=scan_chunk_points,
+                progress_label=f"prepare scan {n_scans}",
             )
             if len(scan_xyz) == 0:
                 log.info("PTX scan %d: no valid points after stride/skip", n_scans)
@@ -281,21 +282,34 @@ def _ptx_read_scan_points(
     n_points: int,
     stride: int,
     chunk_points: int,
+    progress_label: str = "prepare",
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """Parse n_points lines from fh, returning (xyz, rgb_or_none) for the scan.
 
     Buffers in numpy-friendly chunks of ~``chunk_points`` rows so we
     don't keep millions of Python floats live at once. ``stride`` is
     applied per-line so a stride=10 file reads at ~1/10 the work.
+
+    Emits ``[PROGRESS] <label> done/total eta=s`` lines every ~1 % so
+    the wizard front-end can render a progress bar — important for
+    100 GB PTX exports where a single scan can take 10+ min.
     """
+    import time as _time
     xyz_buf = np.empty((chunk_points, 3), dtype=np.float64)
     rgb_buf = np.empty((chunk_points, 3), dtype=np.int32)
     buf_pos = 0
     xyz_chunks: list[np.ndarray] = []
     rgb_chunks: list[np.ndarray] = []
     has_color: bool | None = None
+    t_start = _time.time()
+    every = max(1, n_points // 100)
 
     for i in range(n_points):
+        if i and (i % every) == 0:
+            elapsed = max(0.001, _time.time() - t_start)
+            rate = (i + 1) / elapsed
+            eta_s = int((n_points - i) / rate) if rate > 0 else -1
+            log.info("[PROGRESS] %s %d/%d eta=%d", progress_label, i, n_points, eta_s)
         line = fh.readline()
         if not line:
             log.warning("PTX scan truncated at %d/%d points", i, n_points)

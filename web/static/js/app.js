@@ -421,6 +421,69 @@ function applyAlgorithmSectionVisibility() {
   if (v3) v3.style.display = (algo === 'vertical') ? '' : 'none';
   if (bt) bt.style.display = (algo === 'v2') ? '' : 'none';
 }
+// ── Progress bar (parses [PROGRESS] log lines) ───────────────────────────
+// Backend emits `[PROGRESS] <label> done/total eta=<s>` from the heaviest
+// stages (segment, PTX-read prepare). We surface that in the wizard +
+// full-mode panels so the user knows the pipeline is alive and roughly
+// when it'll finish, rather than staring at a frozen-looking log.
+const PROGRESS_RE = /\[PROGRESS\]\s+(\S+)\s+(\d+)\/(\d+)\s+eta=(-?\d+)/;
+function handleProgressLine(line, target /* 'full' | 'wizard' */) {
+  const m = line.match(PROGRESS_RE);
+  if (!m) return;
+  const [, label, done, total, eta] = m;
+  const pct = Math.round((parseInt(done) / parseInt(total)) * 100);
+  const prefix = target === 'full' ? 'full-progress' : 'wizard-progress';
+  const card = document.getElementById(prefix);
+  if (!card) return;
+  card.style.display = 'block';
+  document.getElementById(prefix + '-label').textContent =
+    `${label}: ${done}/${total} (${pct}%)`;
+  const etaSec = parseInt(eta);
+  let etaStr = '';
+  if (etaSec >= 0) {
+    if (etaSec < 60) etaStr = `~${etaSec}s kvar`;
+    else if (etaSec < 3600) etaStr = `~${Math.round(etaSec / 60)} min kvar`;
+    else etaStr = `~${(etaSec / 3600).toFixed(1)} h kvar`;
+  }
+  document.getElementById(prefix + '-eta').textContent = etaStr;
+  document.getElementById(prefix + '-fill').style.width = pct + '%';
+  if (pct >= 100) {
+    // Hide after a beat so the "100 %" is visible briefly.
+    setTimeout(() => { card.style.display = 'none'; }, 1500);
+  }
+}
+window.handleProgressLine = handleProgressLine;
+
+// ── Resource monitor (CPU / RAM / GPU) ───────────────────────────────────
+async function pollResources() {
+  try {
+    const res = await fetch('/api/resources');
+    if (!res.ok) return;
+    const r = await res.json();
+    const fmt = (used, total, pct) =>
+      (used != null && total != null)
+        ? `${used.toFixed(1)}/${total.toFixed(1)} GB (${Math.round(pct)}%)`
+        : (pct != null ? `${Math.round(pct)} %` : '—');
+    const cpuEl = document.getElementById('rm-cpu');
+    const ramEl = document.getElementById('rm-ram');
+    const gpuEl = document.getElementById('rm-gpu');
+    if (cpuEl) cpuEl.textContent = r.cpu_pct != null ? `${Math.round(r.cpu_pct)} %` : '—';
+    if (ramEl) ramEl.textContent = fmt(r.ram_used_gb, r.ram_total_gb, r.ram_pct);
+    if (gpuEl) {
+      if (r.gpu_util_pct == null && r.gpu_mem_total_gb == null) {
+        gpuEl.textContent = 'ej tillgänglig';
+        gpuEl.parentElement.title = 'Ingen GPU detekterad';
+      } else {
+        gpuEl.textContent = `${Math.round(r.gpu_util_pct || 0)}% · ${r.gpu_mem_used_gb || 0}/${r.gpu_mem_total_gb || 0} GB`;
+        gpuEl.parentElement.title = r.gpu_name || 'GPU';
+      }
+    }
+  } catch (e) { /* widget is best-effort */ }
+}
+setInterval(pollResources, 2500);
+// Kick off immediately on load.
+document.addEventListener('DOMContentLoaded', pollResources);
+
 // Fetch the running app version and render it next to the header
 // tagline. Backend returns {source, sha, date, branch}; we pick the most
 // informative pieces and fall back gracefully if the endpoint or any
@@ -564,6 +627,12 @@ document.getElementById('btn-run').addEventListener('click', async () => {
   logEl.innerHTML = '';
 
   function appendLog(text) {
+    // [PROGRESS] lines drive the bar — don't pollute the log scroll
+    // with the 100 individual progress pings.
+    if (typeof handleProgressLine === 'function' && text.includes('[PROGRESS]')) {
+      handleProgressLine(text, 'full');
+      return;
+    }
     const line = document.createElement('div');
     line.className = 'log-line';
     if (text.startsWith('---') || text.startsWith('===')) line.classList.add('section');
@@ -792,6 +861,12 @@ const wizard = {
 };
 
 function wizardLog(text) {
+  // Route [PROGRESS] pings into the progress bar so the log isn't
+  // flooded with 100 individual rows per long stage.
+  if (typeof handleProgressLine === 'function' && text.includes('[PROGRESS]')) {
+    handleProgressLine(text, 'wizard');
+    return;
+  }
   const el = document.getElementById('wizard-log');
   const line = document.createElement('div');
   line.className = 'log-line';
@@ -899,18 +974,35 @@ window.reattachFullLog = function (jobId) {
   if (logEl) logEl.innerHTML = '';
   const runBtn = document.getElementById('btn-run');
   if (runBtn) runBtn.disabled = true;
-  appendLog('[Re-attach] Job ' + jobId.slice(0, 8) + '… — strömmar logg från server');
+  // Local appender — the one inside the btn-run click handler is a
+  // closure not accessible here.
+  function _append(text) {
+    if (text.includes('[PROGRESS]')) {
+      handleProgressLine(text, 'full');
+      return;
+    }
+    const ln = document.createElement('div');
+    ln.className = 'log-line';
+    if (/error|exception/i.test(text)) ln.classList.add('error');
+    else if (/saved|complete|done/i.test(text)) ln.classList.add('success');
+    ln.textContent = text;
+    if (logEl) {
+      logEl.appendChild(ln);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+  }
+  _append('[Re-attach] Job ' + jobId.slice(0, 8) + '… — strömmar logg från server');
   setBadge('running');
   const sse = new EventSource('/api/jobs/' + jobId + '/logs');
   sse.onmessage = e => {
     const msg = JSON.parse(e.data);
-    if (msg.line !== undefined) appendLog(msg.line);
+    if (msg.line !== undefined) _append(msg.line);
     if (msg.done) {
       sse.close();
       state.jobStatus = msg.status;
       setBadge(msg.status);
       if (msg.status === 'completed') {
-        appendLog('✓ IFC-modell sparad.');
+        _append('✓ IFC-modell sparad.');
         setTimeout(() => goTo(4), 800);
       }
     }

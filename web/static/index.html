@@ -16,6 +16,11 @@
     Automatisk Scan-to-BIM pipeline
     <span id="app-version" class="app-version" title="Vilken commit som körs">…</span>
   </div>
+  <div id="resource-monitor" class="resource-monitor" title="Resurser på servern">
+    <div class="rm-item"><span class="rm-label">CPU</span><span class="rm-val" id="rm-cpu">—</span></div>
+    <div class="rm-item"><span class="rm-label">RAM</span><span class="rm-val" id="rm-ram">—</span></div>
+    <div class="rm-item"><span class="rm-label">GPU</span><span class="rm-val" id="rm-gpu">—</span></div>
+  </div>
 </header>
 
 <main>
@@ -573,6 +578,14 @@
           ℹ️ Processen kan ta flera minuter för stora filer. Stäng inte fönstret.
         </div>
 
+        <div id="full-progress" class="progress-card" style="display:none">
+          <div class="progress-card-label">
+            <span id="full-progress-label">…</span>
+            <span id="full-progress-eta" style="color:var(--text-dim);font-size:11px"></span>
+          </div>
+          <div class="progress-bar"><div class="progress-bar-fill" id="full-progress-fill"></div></div>
+        </div>
+
         <div id="log-console" class="log-console">
           <div class="log-line" style="color:var(--text-dim)">Loggar visas här när processen startar…</div>
         </div>
@@ -607,6 +620,14 @@
         </ol>
 
         <div id="wizard-stage-detail" style="margin-top:16px"></div>
+
+        <div id="wizard-progress" class="progress-card" style="display:none;margin-top:12px">
+          <div class="progress-card-label">
+            <span id="wizard-progress-label">…</span>
+            <span id="wizard-progress-eta" style="color:var(--text-dim);font-size:11px"></span>
+          </div>
+          <div class="progress-bar"><div class="progress-bar-fill" id="wizard-progress-fill"></div></div>
+        </div>
 
         <div class="collapsible-header open" id="wizard-log-toggle">
           Loggar

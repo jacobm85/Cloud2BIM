@@ -425,6 +425,56 @@ async def list_reusable_jobs():
     return result
 
 
+@app.get("/api/resources")
+async def get_resources():
+    """Return CPU, RAM and GPU utilisation for the wizard's resource widget.
+
+    Polled every couple of seconds. psutil covers CPU/RAM; GPU is
+    optional and depends on pynvml being importable inside the
+    container (it usually is when the image was built from the
+    pytorch CUDA base — the libnvidia-ml.so is part of the runtime
+    libs). Returns null for missing measurements so the widget can
+    grey them out instead of breaking.
+    """
+    def _collect():
+        out: dict = {}
+        try:
+            import psutil
+            out["cpu_pct"] = float(psutil.cpu_percent(interval=None))
+            vm = psutil.virtual_memory()
+            out["ram_used_gb"] = round(vm.used / (1024 ** 3), 2)
+            out["ram_total_gb"] = round(vm.total / (1024 ** 3), 2)
+            out["ram_pct"] = float(vm.percent)
+        except Exception:
+            out["cpu_pct"] = None
+            out["ram_used_gb"] = out["ram_total_gb"] = out["ram_pct"] = None
+        # GPU via pynvml. Skip silently if not available.
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                name = pynvml.nvmlDeviceGetName(handle)
+                if isinstance(name, bytes):
+                    name = name.decode("utf-8", errors="replace")
+                out["gpu_name"] = name
+                out["gpu_util_pct"] = float(util.gpu)
+                out["gpu_mem_used_gb"] = round(mem.used / (1024 ** 3), 2)
+                out["gpu_mem_total_gb"] = round(mem.total / (1024 ** 3), 2)
+                out["gpu_mem_pct"] = round(mem.used / mem.total * 100, 1) if mem.total else 0.0
+            finally:
+                pynvml.nvmlShutdown()
+        except Exception:
+            out["gpu_name"] = None
+            out["gpu_util_pct"] = None
+            out["gpu_mem_used_gb"] = out["gpu_mem_total_gb"] = out["gpu_mem_pct"] = None
+        return out
+
+    return await asyncio.to_thread(_collect)
+
+
 @app.get("/api/jobs/active")
 async def list_active_jobs():
     """Return jobs whose pipeline is currently running.

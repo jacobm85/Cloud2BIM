@@ -44,6 +44,27 @@ from cloud2bim.segmentation.weights import resolve_weights
 log = get_logger(__name__)
 
 
+def _emit_progress(stage: str, done: int, total: int, t_start: float) -> None:
+    """Emit a machine-parseable progress line for the wizard front-end.
+
+    Format: ``[PROGRESS] <stage> <done>/<total> eta=<seconds>``. The
+    wizard's SSE log handler regex-parses this and updates a progress
+    bar in the running-stage panel. Only logs every few tiles to keep
+    log volume reasonable.
+    """
+    import time as _time
+    # Throttle: only emit every 1 % or every tile, whichever is rarer,
+    # plus the first and last.
+    every = max(1, total // 100)
+    if done != 1 and done != total and (done % every) != 0:
+        return
+    elapsed = max(0.001, _time.time() - t_start)
+    rate = done / elapsed  # tiles per second
+    remaining = max(0, total - done)
+    eta_s = int(remaining / rate) if rate > 0 else -1
+    log.info("[PROGRESS] %s %d/%d eta=%d", stage, done, total, eta_s)
+
+
 def _shape_distribution(state: dict) -> list[str]:
     """Group tensors by shape and return ``"<shape>: <count> [examples]"`` strings.
 
@@ -315,14 +336,24 @@ class RandLASegmenter(Segmenter):
         density = n / area_xy
         cell_area = MAX_POINTS_PER_TILE / max(density, 1e-6)
         cell_side = max(float(np.sqrt(cell_area)), 2.0)
+        # Count tiles up front so we can emit a "X/Y" progress line per
+        # tile — wizard front-end parses these to drive a progress bar.
+        nx = max(1, int(np.ceil((bbox_max[0] - bbox_min[0]) / cell_side)))
+        ny = max(1, int(np.ceil((bbox_max[1] - bbox_min[1]) / cell_side)))
+        total_tiles = nx * ny
         log.info(
-            "RandLA tiling: %s points → ~%dm tiles (overlap %.1fm)",
-            f"{n:,}", int(cell_side), TILE_OVERLAP_M,
+            "RandLA tiling: %s points → %d tiles of ~%dm (%dx%d, overlap %.1fm)",
+            f"{n:,}", total_tiles, int(cell_side), nx, ny, TILE_OVERLAP_M,
         )
 
-        for tile_mask in self._tile_masks(points, bbox_min, bbox_max, cell_side):
+        import time as _time
+        t_start = _time.time()
+        for tile_idx, tile_mask in enumerate(
+            self._tile_masks(points, bbox_min, bbox_max, cell_side), start=1
+        ):
             tile_n = int(tile_mask.sum())
             if tile_n == 0:
+                _emit_progress("segment", tile_idx, total_tiles, t_start)
                 continue
             tile_pts = points[tile_mask]
             tile_feat = features[tile_mask]
@@ -331,6 +362,7 @@ class RandLASegmenter(Segmenter):
                 # Don't waste a forward pass on a too-small tile; let the
                 # neighbouring tiles' overlap cover these points. If a
                 # point is in zero non-tiny tiles we'll fill it later.
+                _emit_progress("segment", tile_idx, total_tiles, t_start)
                 continue
             if tile_n > MAX_POINTS_PER_TILE:
                 # Random subsample to MAX_POINTS within the tile; the
@@ -350,6 +382,7 @@ class RandLASegmenter(Segmenter):
 
             logits[tile_mask] += tile_logits
             counts[tile_mask] += 1
+            _emit_progress("segment", tile_idx, total_tiles, t_start)
 
         uncovered = counts == 0
         if uncovered.any():
