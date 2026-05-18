@@ -61,15 +61,15 @@ def _shape_distribution(state: dict) -> list[str]:
     return out
 
 
-# Architecture hyperparameters — keep in sync with the S3DIS RandLA-Net
-# recipe Open3D-ML ships, so weight transfer has a chance.
+# Architecture hyperparameters — must match Open3D-ML's S3DIS recipe
+# (ml3d/configs/randlanet_s3dis.yml) so its checkpoint loads cleanly.
 RANDLA_S3DIS_CFG = dict(
     num_classes=len(S3DIS_LABELS),
-    in_channels=6,                  # XYZ + RGB
+    in_channels=6,                              # XYZ + RGB
     dim_features=8,
-    dim_output=(16, 64, 128, 256),
+    dim_output=(16, 64, 128, 256, 512),         # 5 layers, not 4
     num_neighbors=16,
-    sub_sampling_ratio=(4, 4, 4, 4),
+    sub_sampling_ratio=(4, 4, 4, 4, 2),         # final layer halves, not quarters
 )
 
 # RandLA-Net was trained on 40 960-point patches (S3DIS recipe). Going

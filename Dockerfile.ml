@@ -107,6 +107,14 @@ RUN python -c "import open3d; from pathlib import Path; \
 # Application source
 COPY . .
 
+# Capture git commit info at build time. Build script passes via
+# --build-arg from `git rev-parse` on the host (.git is dockerignored
+# so we can't shell out here).
+ARG GIT_SHA=dev
+ARG GIT_DATE=
+ARG GIT_BRANCH=
+RUN printf '%s %s %s\n' "$GIT_SHA" "$GIT_DATE" "$GIT_BRANCH" > /app/VERSION
+
 # Runtime dirs the pipeline writes to (mounted via compose volumes)
 RUN mkdir -p web/uploads web/jobs /models /data
 

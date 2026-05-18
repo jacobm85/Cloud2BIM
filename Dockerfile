@@ -20,6 +20,15 @@ RUN pip install --no-cache-dir -r requirements-docker.txt
 # Copy application source
 COPY . .
 
+# Capture git commit info at build time so the GUI version pill shows
+# the actually-running build. Pass via build-args; the wrapper script
+# in scripts/build.sh fills them from `git rev-parse` on the host.
+# (.git is excluded by .dockerignore so we can't shell-out to git here.)
+ARG GIT_SHA=dev
+ARG GIT_DATE=
+ARG GIT_BRANCH=
+RUN printf '%s %s %s\n' "$GIT_SHA" "$GIT_DATE" "$GIT_BRANCH" > /app/VERSION
+
 # Pre-create directories the pipeline writes to at runtime
 RUN mkdir -p web/uploads web/jobs images/pdf images/wall_outputs_images
 

@@ -3,6 +3,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Filled by scripts/build.sh (host-side `git rev-parse`). The
+      # Dockerfile writes /app/VERSION from these so the GUI version
+      # pill always reflects the actual commit, not the last touched
+      # mtime. Defaults below keep `docker compose build` working
+      # for users who haven't set the vars.
+      args:
+        GIT_SHA: ${GIT_SHA:-dev}
+        GIT_DATE: ${GIT_DATE:-}
+        GIT_BRANCH: ${GIT_BRANCH:-}
     image: cloud2bim:latest
     container_name: cloud2bim
     ports:

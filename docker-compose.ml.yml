@@ -10,6 +10,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ml
+      # Filled by scripts/build.sh (host-side `git rev-parse`). See
+      # the non-ML compose file for rationale.
+      args:
+        GIT_SHA: ${GIT_SHA:-dev}
+        GIT_DATE: ${GIT_DATE:-}
+        GIT_BRANCH: ${GIT_BRANCH:-}
     image: cloud2bim:ml
     container_name: cloud2bim-ml
     ports:

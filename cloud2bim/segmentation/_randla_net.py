@@ -1,37 +1,37 @@
-"""Pure-PyTorch RandLA-Net architecture (no compiled extensions).
+"""Pure-PyTorch RandLA-Net, structurally mirroring Open3D-ML's RandLANet.
 
-Based on Hu et al. 2020 — "RandLA-Net: Efficient Semantic Segmentation
-of Large-Scale Point Clouds" (CVPR). Re-implemented from the published
-description rather than vendored from Open3D-ML so this module has zero
-build-time dependency on a particular torch C++ ABI. Drop-in for the
-sparse-convolution-free path on machines where PTv3 won't run.
+Re-implementation of Open3D-ML's RandLA-Net architecture so its
+S3DIS pretrained checkpoint (parameter naming convention:
+``fc0 / bn0 / encoder.k.{mlp1,lse1,pool1,lse2,pool2,mlp2,shortcut} /
+mlp / decoder.k.{conv,batch_norm} / fc1.0..3``) loads directly into a
+torch-2.x-compatible model with no compiled extensions.
 
-Architecture (matching the S3DIS recipe):
-  * Input: per-point (xyz, rgb) → 6 input channels
-  * Linear projection → 8 features
-  * Encoder: 4 levels of (DilatedResidualBlock + RandomSampling)
-      channels = 16 → 64 → 128 → 256
-      sub-sampling ratio = 4 at every level
-      neighbours K = 16 at every level
-  * Bottleneck: 1×1 conv on the most-downsampled features
-  * Decoder: 4 levels of (NN-upsample + skip + 1×1 conv)
-  * Head: 2 × (1×1 conv + dropout) → linear(num_classes)
+S3DIS recipe (matches `ml3d/configs/randlanet_s3dis.yml` in upstream):
+    in_channels       = 6
+    dim_features      = 8
+    dim_output        = (16, 64, 128, 256, 512)
+    sub_sampling_ratio= (4, 4, 4, 4, 2)
+    num_neighbors     = 16
+    num_layers        = 5
+    num_classes       = 13
 
-Differences from the canonical TF / open3d-ml implementations that
-matter for weight portability:
-  * `nn.Conv2d` with kernel=1 is used for every per-point MLP (matches
-    open3d-ml's BatchNorm2d-wrapped convs). State-dict layout uses the
-    same `module.weight / module.bias / module.bn.{weight,bias,running_*}`
-    triple per conv, which gives a reasonable chance of partial weight
-    transfer from the open3d-ml checkpoint via name remapping.
-  * KNN is computed in numpy with `scipy.cKDTree` (CPU) — fast enough
-    for the per-level point counts (≤ 40 960 / 4ⁿ) and avoids any
-    torch_cluster build dependency. Indices are stitched in on the GPU
-    side only as int64 tensors.
+Architectural notes that surprised me when reverse-engineering this:
 
-This module is intentionally self-contained — no imports from
-cloud2bim.* — so it can be unit-tested in isolation and so any future
-refactor of the Segmenter interface doesn't churn it.
+  * ``LocalFeatureAggregation`` doubles channels via ``mlp2`` from
+    ``d_out → 2*d_out``. So an encoder list of d_out [16,64,128,256,512]
+    produces actual output channels [32,128,256,512,1024]; the bottleneck
+    operates at 1024.
+  * ``fc0`` is ``nn.Linear`` over the feature dim, NOT Conv2d. The cloud
+    enters as (B, N, in_channels) and only after fc0+bn0 is it reshaped
+    to (B, C, N, 1) for the rest of the pipeline.
+  * Decoder ``SharedMLP`` uses ``ConvTranspose2d`` (``transpose=True``).
+    Same parameter shapes as Conv2d so it doesn't break weight transfer
+    — pick the right one in the class.
+  * ``AttentivePooling.score_fn`` is ``Sequential(Linear, Softmax)`` and
+    operates on the LAST dim (K neighbours), not on channels.
+
+KNN is computed CPU-side via scipy.cKDTree. Random sub-sampling picks
+points without replacement at each level.
 """
 from __future__ import annotations
 
@@ -47,39 +47,30 @@ import torch.nn.functional as F
 
 
 def knn_indices(xyz: np.ndarray, k: int) -> np.ndarray:
-    """K-nearest-neighbour indices for every point in ``xyz``.
-
-    Pure-CPU via scipy's cKDTree — RandLA-Net works on heavily
-    downsampled point sets (≤ 40 960 / 4ⁿ per layer) where this is
-    much faster than building a torch_cluster CUDA index, and it has
-    no compile-time dependency.
-
-    Returns (N, K) int32 array of indices into ``xyz``.
-    """
+    """K-nearest-neighbour indices for every point. CPU via scipy."""
     try:
         from scipy.spatial import cKDTree
     except ImportError as exc:
-        raise ImportError(
-            "scipy is required for RandLA-Net's KNN. Install scipy."
-        ) from exc
+        raise ImportError("scipy is required for RandLA-Net's KNN.") from exc
     tree = cKDTree(xyz)
-    # query returns (distances, indices); we keep only indices
     _, idx = tree.query(xyz, k=k, workers=-1)
-    if idx.ndim == 1:  # k=1 → squeezed
+    if idx.ndim == 1:
         idx = idx[:, None]
     return idx.astype(np.int32)
+
+
+def nearest_in(target: np.ndarray, query: np.ndarray) -> np.ndarray:
+    """For every point in ``query`` return the index of the closest point in ``target``."""
+    from scipy.spatial import cKDTree
+    tree = cKDTree(target)
+    _, idx = tree.query(query, k=1, workers=-1)
+    return idx.astype(np.int64)
 
 
 def random_subsample(
     xyz: np.ndarray, ratio: int
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Random sub-sample to 1/ratio points. Returns (sub_xyz, sub_idx).
-
-    RandLA-Net deliberately uses uniform random sampling — it's O(N) and
-    the network learns to compensate via attentive pooling. Picking
-    points without replacement, no replacement seed (deterministic when
-    the caller sets numpy's global state).
-    """
+    """Random sub-sample to 1/ratio points without replacement."""
     n = len(xyz)
     target = max(1, n // ratio)
     sel = np.random.choice(n, size=target, replace=False)
@@ -90,12 +81,12 @@ def random_subsample(
 
 
 class SharedMLP(nn.Module):
-    """1×1 Conv2d wrapper with optional BN + activation.
+    """1×1 Conv2d/ConvTranspose2d + optional BatchNorm + optional activation.
 
-    The 2d-conv path mirrors open3d-ml's per-point MLP wiring: features
-    are shaped (B, C, N, 1) and a 1×1 kernel operates pointwise. This
-    keeps the parameter shapes identical to the open3d-ml RandLANet so
-    a remap of names alone may transfer weights.
+    Mirrors Open3D-ML's ``SharedMLP`` exactly. Submodule names: ``conv``,
+    ``batch_norm``. ``activation_fn`` is stored on the instance but is
+    not a learnable module (no params), so it doesn't appear in
+    state_dict — safe to use as an attribute.
     """
 
     def __init__(
@@ -103,146 +94,174 @@ class SharedMLP(nn.Module):
         in_channels: int,
         out_channels: int,
         kernel_size: int = 1,
-        use_bn: bool = True,
-        activation: bool = True,
+        stride: int = 1,
+        transpose: bool = False,
+        bn: bool = False,
+        activation_fn: nn.Module | None = None,
     ):
         super().__init__()
-        self.conv = nn.Conv2d(
-            in_channels, out_channels, kernel_size=kernel_size, bias=not use_bn,
+        conv_cls = nn.ConvTranspose2d if transpose else nn.Conv2d
+        self.conv = conv_cls(in_channels, out_channels, kernel_size=kernel_size, stride=stride)
+        # Open3D-ML names the BN module ``batch_norm`` and uses
+        # eps=1e-6, momentum=0.01 in its RandLA-Net.
+        self.batch_norm = (
+            nn.BatchNorm2d(out_channels, eps=1e-6, momentum=0.01) if bn else None
         )
-        self.bn = nn.BatchNorm2d(out_channels) if use_bn else None
-        # LeakyReLU(0.2) matches the open3d-ml default; consistent across
-        # every per-point conv inside the network.
-        self.act = nn.LeakyReLU(0.2, inplace=True) if activation else None
+        self.activation_fn = activation_fn
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv(x)
-        if self.bn is not None:
-            x = self.bn(x)
-        if self.act is not None:
-            x = self.act(x)
+        if self.batch_norm is not None:
+            x = self.batch_norm(x)
+        if self.activation_fn is not None:
+            x = self.activation_fn(x)
         return x
 
 
 class LocalSpatialEncoding(nn.Module):
-    """Pack relative position + neighbour features into a richer descriptor.
+    """Encode either positional info (encode_pos=True) or feature info into
+    an (in→out) projection, then concatenate with the K-gathered neighbour
+    features. Output has 2 × out_channels per neighbour.
 
-    Inputs:
-        coords:   (B, 3, N, 1)  XYZ of the centre points
-        neigh_xyz:(B, 3, N, K)  XYZ of K neighbours per point
-        neigh_f:  (B, F, N, K)  features of those neighbours
-    Output:       (B, 2*F, N, K)  fused descriptors
+    Submodule name: ``mlp`` (SharedMLP).
     """
 
-    def __init__(self, in_features: int):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        num_neighbors: int,
+        encode_pos: bool = False,
+    ):
         super().__init__()
-        # 10 = (relative xyz 3) + (absolute xyz of neighbour 3) +
-        #      (absolute xyz of centre 3) + (euclidean distance 1)
-        self.mlp = SharedMLP(10, in_features)
+        self.num_neighbors = num_neighbors
+        self.encode_pos = encode_pos
+        self.mlp = SharedMLP(in_channels, out_channels, bn=True, activation_fn=nn.LeakyReLU(0.2))
 
     def forward(
         self,
-        coords: torch.Tensor,
-        neigh_xyz: torch.Tensor,
-        neigh_features: torch.Tensor,
+        coords: torch.Tensor,        # (B, 3, N, 1)
+        features: torch.Tensor,      # (B, d_in_features, N, 1)
+        neighbour_idx: torch.Tensor, # (B, N, K)
     ) -> torch.Tensor:
-        b, _, n, k = neigh_xyz.shape
-        centre = coords.expand(-1, -1, -1, k)
-        rel = neigh_xyz - centre
-        dist = torch.norm(rel, dim=1, keepdim=True)
-        encoded = torch.cat([rel, neigh_xyz, centre, dist], dim=1)
-        # (B, 10, N, K) → (B, F, N, K)
-        encoded = self.mlp(encoded)
-        return torch.cat([encoded, neigh_features], dim=1)
+        """Returns (B, 2*out_channels, N, K)."""
+        b, _, n, _ = coords.shape
+        k = neighbour_idx.shape[-1]
+        # Gather neighbour features
+        neigh_feats = _gather_neighbours(features, neighbour_idx)  # (B, d_in_features, N, K)
+
+        if self.encode_pos:
+            # Build 10-channel positional encoding per (centre, neighbour).
+            neigh_xyz = _gather_neighbours(coords, neighbour_idx)  # (B, 3, N, K)
+            centre = coords.expand(-1, -1, -1, k)
+            rel = neigh_xyz - centre
+            dist = torch.norm(rel, dim=1, keepdim=True)
+            encoded = torch.cat([rel, neigh_xyz, centre, dist], dim=1)  # (B, 10, N, K)
+            encoded = self.mlp(encoded)
+        else:
+            encoded = self.mlp(neigh_feats)
+
+        return torch.cat([encoded, neigh_feats], dim=1)
 
 
 class AttentivePooling(nn.Module):
-    """Learnable attention-weighted aggregation across K neighbours."""
+    """Learnable softmax-weighted pooling over the K-neighbour dim.
 
-    def __init__(self, in_features: int, out_features: int):
-        super().__init__()
-        # Score-MLP: per-(feature, neighbour) gating coefficient.
-        self.score_mlp = nn.Conv2d(in_features, in_features, kernel_size=1, bias=False)
-        # Post-aggregation projection.
-        self.out_mlp = SharedMLP(in_features, out_features)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, C, N, K)
-        scores = F.softmax(self.score_mlp(x), dim=-1)
-        # weighted sum over the K dimension → (B, C, N, 1)
-        weighted = (x * scores).sum(dim=-1, keepdim=True)
-        return self.out_mlp(weighted)
-
-
-class DilatedResidualBlock(nn.Module):
-    """Two LSE+AttentivePool stages stacked with a residual + activation.
-
-    `d` is the output feature channel count; intermediate channels are
-    `d // 2` per the RandLA-Net recipe (the paper's "expansion" stage).
+    Submodule names: ``score_fn`` (Sequential of Linear+Softmax over K),
+    ``mlp`` (SharedMLP).
     """
 
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
-        half = out_channels // 2
-        self.pre_mlp = SharedMLP(in_channels, half)
-        self.lse1 = LocalSpatialEncoding(half)
-        self.att1 = AttentivePooling(2 * half, half)
-        self.lse2 = LocalSpatialEncoding(half)
-        self.att2 = AttentivePooling(2 * half, out_channels)
-        self.shortcut = SharedMLP(in_channels, out_channels, activation=False)
-        self.act = nn.LeakyReLU(0.2, inplace=True)
+        # Linear operates on the *channel* dim because Open3D-ML's
+        # forward permutes features to (B, N, K, C) before applying it.
+        # We do the same permute below.
+        self.score_fn = nn.Sequential(
+            nn.Linear(in_channels, in_channels, bias=False),
+            nn.Softmax(dim=-2),  # softmax over the K dim (after permute)
+        )
+        self.mlp = SharedMLP(in_channels, out_channels, bn=True, activation_fn=nn.LeakyReLU(0.2))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, C, N, K)
+        # Permute to (B, N, K, C) so the Linear acts on channels.
+        b, c, n, k = x.shape
+        x_perm = x.permute(0, 2, 3, 1)  # (B, N, K, C)
+        scores = self.score_fn(x_perm)  # softmax over K (dim=-2) → (B, N, K, C)
+        weighted = (x_perm * scores).sum(dim=-2, keepdim=False)  # (B, N, C)
+        # Back to (B, C, N, 1) for the SharedMLP.
+        feat = weighted.permute(0, 2, 1).unsqueeze(-1)
+        return self.mlp(feat)
+
+
+class LocalFeatureAggregation(nn.Module):
+    """One encoder block: two LSE+AttPool stages stacked with a residual.
+
+    Submodule names mirror Open3D-ML exactly: ``mlp1``, ``lse1``, ``pool1``,
+    ``lse2``, ``pool2``, ``mlp2``, ``shortcut``, ``lrelu``.
+
+    Channels: in d_in, internal d_out//2 in the two LSE+pool stages,
+    output 2 × d_out via mlp2.
+    """
+
+    def __init__(self, d_in: int, d_out: int, num_neighbors: int):
+        super().__init__()
+        self.mlp1 = SharedMLP(d_in, d_out // 2, bn=True, activation_fn=nn.LeakyReLU(0.2))
+        self.lse1 = LocalSpatialEncoding(10, d_out // 2, num_neighbors, encode_pos=True)
+        self.pool1 = AttentivePooling(d_out, d_out // 2)
+        self.lse2 = LocalSpatialEncoding(d_out // 2, d_out // 2, num_neighbors)
+        self.pool2 = AttentivePooling(d_out, d_out)
+        self.mlp2 = SharedMLP(d_out, 2 * d_out, bn=True)
+        self.shortcut = SharedMLP(d_in, 2 * d_out, bn=True)
+        self.lrelu = nn.LeakyReLU(0.2)
 
     def forward(
         self,
-        features: torch.Tensor,    # (B, C_in, N, 1)
-        coords: torch.Tensor,      # (B, 3, N, 1)
-        neigh_idx: torch.Tensor,   # (B, N, K)  int64
+        coords: torch.Tensor,        # (B, 3, N, 1)
+        features: torch.Tensor,      # (B, d_in, N, 1)
+        neighbour_idx: torch.Tensor, # (B, N, K)
     ) -> torch.Tensor:
         shortcut = self.shortcut(features)
 
-        f = self.pre_mlp(features)            # (B, half, N, 1)
-        # Gather neighbour features + neighbour coords using neigh_idx
-        neigh_f = _gather_neighbours(f, neigh_idx)        # (B, half, N, K)
-        neigh_xyz = _gather_neighbours(coords, neigh_idx)  # (B, 3, N, K)
-        f = self.lse1(coords, neigh_xyz, neigh_f)         # (B, 2*half, N, K)
-        f = self.att1(f)                                   # (B, half, N, 1)
-
-        neigh_f = _gather_neighbours(f, neigh_idx)         # (B, half, N, K)
-        f = self.lse2(coords, neigh_xyz, neigh_f)
-        f = self.att2(f)                                   # (B, out, N, 1)
-
-        return self.act(f + shortcut)
+        f = self.mlp1(features)                           # (B, d_out//2, N, 1)
+        f = self.lse1(coords, f, neighbour_idx)           # (B, d_out, N, K)
+        f = self.pool1(f)                                 # (B, d_out//2, N, 1)
+        f = self.lse2(coords, f, neighbour_idx)           # (B, d_out, N, K)
+        f = self.pool2(f)                                 # (B, d_out, N, 1)
+        f = self.mlp2(f)                                  # (B, 2*d_out, N, 1)
+        return self.lrelu(f + shortcut)
 
 
 # ── Neighbour gather helper ───────────────────────────────────────────────────
 
 
 def _gather_neighbours(features: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
-    """Look up features at K neighbour indices per point.
-
-    features: (B, C, N, 1)
-    idx:      (B, N, K)  int64 — indices into the N dimension of features
-    returns:  (B, C, N, K)
-    """
+    """features: (B, C, N, 1); idx: (B, N, K) int64. → (B, C, N, K)."""
     b, c, n, _ = features.shape
     k = idx.shape[-1]
-    # Flatten to (B, C, N) for index_select per batch element.
     feats_flat = features.squeeze(-1)
-    # Expand idx to (B, C, N*K) for torch.gather along dim=2.
     idx_flat = idx.reshape(b, 1, n * k).expand(-1, c, -1)
     gathered = torch.gather(feats_flat, dim=2, index=idx_flat)
     return gathered.reshape(b, c, n, k)
+
+
+def _select_along_n(features: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+    """features: (B, C, N, 1); idx: (M,) int64. → (B, C, M, 1)."""
+    b, c, _, _ = features.shape
+    f = features.squeeze(-1)
+    idx_e = idx.view(1, 1, -1).expand(b, c, -1)
+    out = torch.gather(f, dim=2, index=idx_e)
+    return out.unsqueeze(-1)
 
 
 # ── Full model ────────────────────────────────────────────────────────────────
 
 
 class RandLANet(nn.Module):
-    """Pure-PyTorch RandLA-Net for semantic segmentation.
+    """Pure-PyTorch RandLA-Net, parameter-name-compatible with Open3D-ML.
 
-    Forward expects a *prepared* point set: KNN graphs at every level and
-    the sub-sample indices linking adjacent levels. ``prepare_inputs``
-    builds these from raw (xyz, feat) numpy arrays.
+    Top-level submodule names: ``fc0``, ``bn0``, ``encoder`` (ModuleList),
+    ``mlp`` (bottleneck), ``decoder`` (ModuleList), ``fc1`` (Sequential).
     """
 
     def __init__(
@@ -250,66 +269,59 @@ class RandLANet(nn.Module):
         num_classes: int = 13,
         in_channels: int = 6,
         dim_features: int = 8,
-        dim_output: Tuple[int, ...] = (16, 64, 128, 256),
-        dim_decoder: Tuple[int, ...] = (256, 128, 64, 32),
+        dim_output: Tuple[int, ...] = (16, 64, 128, 256, 512),
         num_neighbors: int = 16,
-        sub_sampling_ratio: Tuple[int, ...] = (4, 4, 4, 4),
+        sub_sampling_ratio: Tuple[int, ...] = (4, 4, 4, 4, 2),
         dropout: float = 0.5,
     ):
         super().__init__()
         if len(dim_output) != len(sub_sampling_ratio):
             raise ValueError("dim_output and sub_sampling_ratio must match length")
-        if len(dim_decoder) != len(dim_output):
-            raise ValueError("dim_decoder must have the same length as dim_output")
         self.num_classes = num_classes
         self.num_neighbors = num_neighbors
         self.sub_sampling_ratio = list(sub_sampling_ratio)
+        self.in_channels = in_channels
 
-        # Input projection: (xyz, rgb) → dim_features per point.
-        self.input_fc = SharedMLP(in_channels, dim_features)
+        # Input projection: nn.Linear over channel dim. The cloud enters
+        # as (B, N, in_channels) and only after fc0+bn0 is it reshaped to
+        # the (B, C, N, 1) layout for the rest of the pipeline.
+        self.fc0 = nn.Linear(in_channels, dim_features)
+        self.bn0 = nn.BatchNorm2d(dim_features, eps=1e-6, momentum=0.01)
 
-        # Encoder ladder: 4 DRBs at levels 0..3. Random sub-sampling
-        # between blocks happens in forward(), not here, since it's a
-        # parameterless tensor op.
-        self.encoder_blocks = nn.ModuleList()
-        in_c = dim_features
-        for out_c in dim_output:
-            self.encoder_blocks.append(DilatedResidualBlock(in_c, out_c))
-            in_c = out_c
+        # Encoder
+        encoder = []
+        encoder_dim_list: list[int] = []
+        dim_feature = dim_features
+        for i, d_out in enumerate(dim_output):
+            encoder.append(LocalFeatureAggregation(dim_feature, d_out, num_neighbors))
+            dim_feature = 2 * d_out
+            if i == 0:
+                encoder_dim_list.append(dim_feature)  # mirror Open3D-ML's
+            encoder_dim_list.append(dim_feature)      # double-append at i=0
+        self.encoder = nn.ModuleList(encoder)
 
-        # Bottleneck: 1×1 conv expanding channels (matches Open3D-ML's
-        # mid_fc which doubles 256 → 512). Operates at the deepest level.
-        self.bottleneck = SharedMLP(in_c, in_c * 2)
-        bn_out_c = in_c * 2
+        # Bottleneck (mlp)
+        self.mlp = SharedMLP(dim_feature, dim_feature, bn=True,
+                             activation_fn=nn.LeakyReLU(0.2))
 
-        # Decoder: at iteration i (0..len-1) we upsample from level
-        # (len-i) to level (len-1-i), concat with the encoder output at
-        # that finer level, and project to dim_decoder[i] channels.
-        #
-        # Channel chain for the default S3DIS recipe:
-        #   bottleneck out = 512
-        #   decoder[0]: cat(512, 256) = 768 → 256
-        #   decoder[1]: cat(256, 128) = 384 → 128
-        #   decoder[2]: cat(128,  64) = 192 →  64
-        #   decoder[3]: cat( 64,  16) =  80 →  32
-        self.decoder_blocks = nn.ModuleList()
-        rev_enc = list(reversed(dim_output))  # encoder skip channels
-        prev_c = bn_out_c
-        for i, out_c in enumerate(dim_decoder):
-            skip_c = rev_enc[i]
-            self.decoder_blocks.append(SharedMLP(prev_c + skip_c, out_c))
-            prev_c = out_c
+        # Decoder. SharedMLP with transpose=True (ConvTranspose2d). Channel
+        # chain follows ``encoder_dim_list`` walked back from the end.
+        decoder = []
+        for i in range(len(dim_output)):
+            d_in = encoder_dim_list[-i - 2] + dim_feature
+            d_out = encoder_dim_list[-i - 2]
+            decoder.append(SharedMLP(d_in, d_out, transpose=True, bn=True,
+                                     activation_fn=nn.LeakyReLU(0.2)))
+            dim_feature = d_out
+        self.decoder = nn.ModuleList(decoder)
 
-        # Per-point classification head: 2 × Conv1×1 + dropout, then a
-        # 1×1 conv classifier. Open3D-ML's RandLANet uses two fc_end
-        # layers at 32-channel width before the classifier — keep the
-        # same width here so weight transfer has a chance.
-        head_in = dim_decoder[-1]   # 32
-        head_hidden = head_in
-        self.head_mlp1 = SharedMLP(head_in, head_hidden)
-        self.head_mlp2 = SharedMLP(head_hidden, head_hidden)
-        self.head_dropout = nn.Dropout2d(dropout)
-        self.classifier = nn.Conv2d(head_hidden, num_classes, kernel_size=1)
+        # Final head: Sequential of SharedMLP, SharedMLP, Dropout, SharedMLP.
+        self.fc1 = nn.Sequential(
+            SharedMLP(dim_feature, 64, bn=True, activation_fn=nn.LeakyReLU(0.2)),
+            SharedMLP(64, 32, bn=True, activation_fn=nn.LeakyReLU(0.2)),
+            nn.Dropout(dropout),
+            SharedMLP(32, num_classes, bn=False),
+        )
 
     # ── input preparation ──────────────────────────────────────────────────
 
@@ -319,117 +331,79 @@ class RandLANet(nn.Module):
         features: np.ndarray,
         device: torch.device,
     ) -> dict:
-        """Build the multi-level KNN + sub-sample structure for one cloud.
-
-        Args:
-            xyz: (N, 3) float32 — XYZ in metres
-            features: (N, C) float32 — input features (xyz + rgb typically)
-
-        Returns a dict of torch tensors with everything ``forward`` needs.
-        """
+        """Build the multi-level KNN + sub/up-sample structure for one cloud."""
         n = len(xyz)
         if n < self.num_neighbors:
             raise ValueError(
                 f"Cloud has {n} points; need at least num_neighbors="
-                f"{self.num_neighbors}. Tile/upsample the input first."
+                f"{self.num_neighbors}."
             )
 
         levels_xyz: List[np.ndarray] = [xyz]
-        levels_idx: List[np.ndarray] = []          # KNN at every level
-        sub_indices: List[np.ndarray] = []         # downsample picks per level
-        upsample_idx: List[np.ndarray] = []        # nearest-neighbour in the
-                                                   # finer level for each
-                                                   # point of the coarser one
+        knn_per_level: List[np.ndarray] = []
+        sub_idx_per_level: List[np.ndarray] = []
+        upsample_per_level: List[np.ndarray] = []
         cur = xyz
         for ratio in self.sub_sampling_ratio:
-            levels_idx.append(knn_indices(cur, self.num_neighbors))
+            knn_per_level.append(knn_indices(cur, self.num_neighbors))
             sub_xyz, sub_sel = random_subsample(cur, ratio)
-            sub_indices.append(sub_sel)
-            # For upsampling we need: for every point of `cur`, the index
-            # in `sub_xyz` of the nearest sub-sampled point. That's 1-NN.
-            from scipy.spatial import cKDTree
-            tree = cKDTree(sub_xyz)
-            _, up = tree.query(cur, k=1, workers=-1)
-            upsample_idx.append(up.astype(np.int64))
+            sub_idx_per_level.append(sub_sel)
+            upsample_per_level.append(nearest_in(sub_xyz, cur))
             levels_xyz.append(sub_xyz)
             cur = sub_xyz
-
-        # KNN graph at the deepest level — used by the bottleneck pass.
-        levels_idx.append(knn_indices(cur, self.num_neighbors))
+        # Deepest level KNN — used by the bottleneck pass.
+        knn_per_level.append(knn_indices(cur, self.num_neighbors))
 
         def to_dev(a, dtype=torch.float32):
             return torch.from_numpy(np.ascontiguousarray(a)).to(device=device, dtype=dtype)
 
         return {
-            "features": to_dev(features).t().unsqueeze(0).unsqueeze(-1),  # (1, C, N, 1)
+            # fc0 expects (B, N, in_channels); we'll transpose into (B, C, N, 1)
+            # after fc0 + bn0 inside forward().
+            "features": to_dev(features).unsqueeze(0),     # (1, N, in_channels)
             "xyz_per_level": [
                 to_dev(x).t().unsqueeze(0).unsqueeze(-1) for x in levels_xyz
-            ],  # each (1, 3, N_l, 1)
+            ],
             "knn_per_level": [
-                to_dev(i, dtype=torch.int64).unsqueeze(0) for i in levels_idx
-            ],  # each (1, N_l, K)
+                to_dev(i, dtype=torch.int64).unsqueeze(0) for i in knn_per_level
+            ],
             "subsample_idx": [
-                to_dev(s, dtype=torch.int64) for s in sub_indices
-            ],  # each (N_l_target,) selecting from the layer above
+                to_dev(s, dtype=torch.int64) for s in sub_idx_per_level
+            ],
             "upsample_idx": [
-                to_dev(u, dtype=torch.int64) for u in upsample_idx
-            ],  # each (N_finer,) pointing into the coarser layer
+                to_dev(u, dtype=torch.int64) for u in upsample_per_level
+            ],
         }
 
     # ── forward ─────────────────────────────────────────────────────────────
 
     def forward(self, inputs: dict) -> torch.Tensor:
-        """Returns per-input-point logits, shape (B, num_classes, N, 1)."""
-        f = self.input_fc(inputs["features"])  # (B, dim_features, N, 1)
+        """Returns (B, num_classes, N, 1)."""
+        # fc0 acts on the channel dim of (B, N, in_channels).
+        feat = self.fc0(inputs["features"])                # (B, N, dim_features)
+        # Reshape to (B, dim_features, N, 1) for the rest of the pipeline.
+        feat = feat.transpose(-2, -1).unsqueeze(-1)
+        feat = self.bn0(feat)
+        feat = F.leaky_relu(feat, 0.2)
 
         encoder_outputs: List[torch.Tensor] = []
-        encoder_xyz: List[torch.Tensor] = []
-        for level, block in enumerate(self.encoder_blocks):
-            xyz_l = inputs["xyz_per_level"][level]
-            knn_l = inputs["knn_per_level"][level]
-            f = block(f, xyz_l, knn_l)
-            encoder_outputs.append(f)
-            encoder_xyz.append(xyz_l)
-            # Subsample to the next level.
-            sub_idx = inputs["subsample_idx"][level]
-            f = _select_along_n(f, sub_idx)
+        for i, block in enumerate(self.encoder):
+            xyz_l = inputs["xyz_per_level"][i]
+            knn_l = inputs["knn_per_level"][i]
+            feat = block(xyz_l, feat, knn_l)
+            encoder_outputs.append(feat)
+            sub_idx = inputs["subsample_idx"][i]
+            feat = _select_along_n(feat, sub_idx)
 
-        # Bottleneck — operates on the deepest level's coords/knn.
-        f = self.bottleneck(f)
+        feat = self.mlp(feat)
 
-        # Decoder: walk back up the ladder. At iteration i (0..N-1):
-        #   1. upsample from level (N-i) to level (N-1-i)
-        #   2. concat with encoder_outputs[N-1-i] at that finer level
-        #   3. 1×1 conv reduces channels per dim_decoder
-        n_levels = len(self.encoder_blocks)
-        for i, dec in enumerate(self.decoder_blocks):
-            # upsample_idx[k] maps level-k indices → level-(k+1) indices,
-            # so to upsample from level (N-i) to (N-1-i) we use
-            # upsample_idx[N-1-i].
+        n_levels = len(self.encoder)
+        for i, dec in enumerate(self.decoder):
             finer_level = n_levels - 1 - i
             up_idx = inputs["upsample_idx"][finer_level]
-            f = _select_along_n(f, up_idx)
+            feat = _select_along_n(feat, up_idx)
             skip = encoder_outputs[finer_level]
-            f = torch.cat([f, skip], dim=1)
-            f = dec(f)
+            feat = torch.cat([feat, skip], dim=1)
+            feat = dec(feat)
 
-        # Classification head.
-        f = self.head_mlp1(f)
-        f = self.head_mlp2(f)
-        f = self.head_dropout(f)
-        logits = self.classifier(f)  # (B, num_classes, N, 1)
-        return logits
-
-
-def _select_along_n(features: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
-    """Pick rows of features along the N dimension by index.
-
-    features: (B, C, N, 1)
-    idx:      (M,) int64
-    returns:  (B, C, M, 1)
-    """
-    b, c, _, _ = features.shape
-    f = features.squeeze(-1)  # (B, C, N)
-    idx_e = idx.view(1, 1, -1).expand(b, c, -1)
-    out = torch.gather(f, dim=2, index=idx_e)
-    return out.unsqueeze(-1)
+        return self.fc1(feat)
