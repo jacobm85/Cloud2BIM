@@ -394,8 +394,11 @@ def _build_segmentation_cfg(request) -> dict:
 async def list_reusable_jobs():
     """Return jobs that can be re-run.
 
-    v2: lists any job with cached semantic labels (skips the slow ML step).
-    v1 legacy: also lists jobs with converted_input.xyz (skips conversion).
+    Lists any job whose work_dir has cached state — either ``labels.npy``
+    (skips the slow ML step on re-run) or ``converted_input.xyz`` (v1
+    legacy XYZ that skips conversion). The ``output_ifc_exists`` flag
+    tells the wizard whether to jump straight to step 4 (results) on
+    click vs fall back to step 2 (settings for a fresh run).
     """
     result = []
     if not JOBS_DIR.exists():
@@ -410,14 +413,85 @@ async def list_reusable_jobs():
         info_path = job_dir / "job_info.json"
         info = json.loads(info_path.read_text()) if info_path.exists() else {}
         cached_size_mb = round(((labels if labels.exists() else xyz).stat().st_size) / 1_000_000, 1)
+        ifc_path = job_dir / "output.ifc"
         result.append({
             "job_id": job_dir.name,
             "created_at": info.get("created_at", ""),
             "original_filename": info.get("original_filename", job_dir.name),
             "xyz_size_mb": cached_size_mb,
             "has_labels": labels.exists(),
+            "output_ifc_exists": ifc_path.exists(),
         })
     return result
+
+
+@app.get("/api/jobs/active")
+async def list_active_jobs():
+    """Return jobs whose pipeline is currently running.
+
+    Pairs the in-memory JobManager status (most authoritative for
+    "running right now") with on-disk metadata so the wizard can
+    re-attach to a job started in another browser tab — or after
+    closing the laptop and coming back. Includes elapsed seconds so
+    the GUI can show "running for 12 min" without needing client-side
+    timer state.
+    """
+    from datetime import datetime as _dt
+    result = []
+    for job in job_manager.list_jobs():
+        if job.get("status") != "running":
+            continue
+        job_id = job["job_id"]
+        job_dir = JOBS_DIR / job_id
+        info_path = job_dir / "job_info.json"
+        info = json.loads(info_path.read_text()) if info_path.exists() else {}
+        created = job.get("created_at") or info.get("created_at", "")
+        elapsed_s = None
+        if created:
+            try:
+                elapsed_s = int((_dt.now() - _dt.fromisoformat(created)).total_seconds())
+            except Exception:
+                pass
+        result.append({
+            "job_id": job_id,
+            "mode": job.get("mode"),
+            "current_stage": job.get("current_stage"),
+            "created_at": created,
+            "elapsed_seconds": elapsed_s,
+            "original_filename": info.get("original_filename", job_id),
+        })
+    return result
+
+
+@app.get("/api/jobs/{job_id}/wizard_state")
+async def get_wizard_state(job_id: str):
+    """Return the persisted wizard JS state for this job, or {} if none."""
+    path = JOBS_DIR / job_id / "wizard_state.json"
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+@app.post("/api/jobs/{job_id}/wizard_state")
+async def set_wizard_state(job_id: str, state: dict):
+    """Persist the wizard JS state for this job.
+
+    Frontend debounces (~500 ms) so we're not hit on every keystroke.
+    Stored as plain JSON next to the job's other artefacts so a user
+    can re-attach from any browser tab and pick up where they left off,
+    including band overrides, algorithm choice, and ML settings.
+    """
+    job_dir = JOBS_DIR / job_id
+    if not job_dir.exists() or not job_dir.is_dir():
+        raise HTTPException(404, "Job not found")
+    (job_dir / "wizard_state.json").write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return {"ok": True}
 
 
 @app.delete("/api/jobs/{job_id}")

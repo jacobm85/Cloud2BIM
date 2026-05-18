@@ -49,6 +49,7 @@
       <div class="upload-tabs">
         <div class="upload-tab active" data-tab="upload">⬆ Ladda upp fil</div>
         <div class="upload-tab" data-tab="network">🗂 Nätverksdisk</div>
+        <div class="upload-tab" data-tab="active">🟢 Aktiva jobb</div>
         <div class="upload-tab" data-tab="reuse">♻ Tidigare jobb</div>
       </div>
 
@@ -80,10 +81,22 @@
         </div>
       </div>
 
+      <!-- Active jobs panel -->
+      <div id="active-panel" style="display:none">
+        <div class="alert alert-info">
+          🟢 Pipelines som körs just nu (även från andra webbläsare/sessioner).
+          Klicka "Hoppa in" för att återansluta till loggen och fortsätta där jobbet är.
+        </div>
+        <div id="active-list" style="margin-top:8px">
+          <div style="color:var(--text-dim);font-size:13px">Laddar…</div>
+        </div>
+      </div>
+
       <!-- Reuse panel -->
       <div id="reuse-panel" style="display:none">
         <div class="alert alert-info">
-          ♻ Välj ett tidigare jobb för att köra om detekteringen med nya inställningar — konverteringssteget hoppas över.
+          ♻ Slutförda jobb. Klicka för att gå direkt till resultatet — där finns en
+          knapp för att köra om med ändrade inställningar.
         </div>
         <div style="display:flex;justify-content:flex-end;margin-top:8px">
           <button type="button" id="btn-clear-all-jobs" class="btn btn-outline" style="font-size:12px;padding:6px 12px"
@@ -633,6 +646,9 @@
         </a>
         <button type="button" id="btn-open-viewer" class="btn btn-primary btn-lg" style="display:none" onclick="window.open('/static/bim-viewer.html?job='+window._state.jobId,'_blank')">
           🏗&nbsp; Öppna 3D-viewer
+        </button>
+        <button type="button" id="btn-rerun-config" class="btn btn-outline btn-lg" onclick="window.rerunWithSettings()">
+          🔁&nbsp; Kör om med nya inställningar
         </button>
       </div>
 

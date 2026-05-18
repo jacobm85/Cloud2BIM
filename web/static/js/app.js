@@ -114,10 +114,133 @@ $$('.upload-tab').forEach(tab => {
       tab.dataset.tab === 'network' ? 'block' : 'none';
     document.getElementById('reuse-panel').style.display =
       tab.dataset.tab === 'reuse' ? 'block' : 'none';
+    const activePanel = document.getElementById('active-panel');
+    if (activePanel) {
+      activePanel.style.display = tab.dataset.tab === 'active' ? 'block' : 'none';
+    }
     if (tab.dataset.tab === 'network') loadDrives();
     if (tab.dataset.tab === 'reuse') loadReusableJobs();
+    if (tab.dataset.tab === 'active') startActiveJobsPolling();
+    else stopActiveJobsPolling();
   });
 });
+
+// ── Active jobs panel ─────────────────────────────────────────────────────
+// Polls /api/jobs/active every 3 s while the tab is visible. Each row
+// has a "Hoppa in"-button that restores the wizard's JS state from the
+// persisted wizard_state.json and re-attaches to the SSE log stream.
+let _activeJobsTimer = null;
+function startActiveJobsPolling() {
+  loadActiveJobs();
+  if (_activeJobsTimer) clearInterval(_activeJobsTimer);
+  _activeJobsTimer = setInterval(loadActiveJobs, 3000);
+}
+function stopActiveJobsPolling() {
+  if (_activeJobsTimer) {
+    clearInterval(_activeJobsTimer);
+    _activeJobsTimer = null;
+  }
+}
+async function loadActiveJobs() {
+  const list = document.getElementById('active-list');
+  if (!list) return;
+  try {
+    const res = await fetch('/api/jobs/active');
+    const jobs = await res.json();
+    if (!jobs.length) {
+      list.innerHTML = '<div style="color:var(--text-dim);font-size:13px">Inga aktiva jobb just nu.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    jobs.forEach(job => {
+      const row = document.createElement('div');
+      row.className = 'browser-item';
+      row.style.cssText = 'padding:10px;border-radius:6px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;background:var(--surface2);gap:10px';
+      const elapsed = job.elapsed_seconds == null ? '—' :
+        (job.elapsed_seconds < 60 ? `${job.elapsed_seconds}s` :
+         `${Math.floor(job.elapsed_seconds / 60)}m ${job.elapsed_seconds % 60}s`);
+      const stage = job.current_stage || (job.mode === 'full' ? 'kör hela pipelinen' : '—');
+      row.innerHTML = `
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:13px">${escapeHtml(job.original_filename || job.job_id)}</div>
+          <div style="font-size:11px;color:var(--text-dim)">
+            Steg: <strong style="color:var(--accent,#4f8ef7)">${escapeHtml(stage)}</strong>
+            &nbsp;·&nbsp; ${elapsed} sedan start &nbsp;·&nbsp; ${job.job_id.slice(0,8)}…
+          </div>
+        </div>
+        <button class="btn btn-primary" style="font-size:12px;padding:6px 14px;flex-shrink:0">Hoppa in</button>`;
+      row.querySelector('button').addEventListener('click', () => attachToActiveJob(job));
+      list.appendChild(row);
+    });
+  } catch (e) {
+    list.innerHTML = '<div style="color:var(--danger);font-size:13px">Kunde inte hämta aktiva jobb: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]
+  ));
+}
+
+async function attachToActiveJob(job) {
+  stopActiveJobsPolling();
+  // Restore wizard JS state from disk (if it was persisted) so we land
+  // in the right stage with the right algorithm, bands, ML settings.
+  let savedState = {};
+  try {
+    savedState = await fetch('/api/jobs/' + job.job_id + '/wizard_state').then(r => r.json());
+  } catch (e) { /* fall through with empty state */ }
+  Object.assign(window.wizard, savedState, { jobId: job.job_id });
+  state.jobId = job.job_id;
+  if (job.mode === 'stepwise') {
+    // Reattach to the SSE log + show wizard panel for the current stage.
+    document.querySelector('input[name="run-mode"][value="stepwise"]').checked = true;
+    goTo(3);
+    // Make sure the wizard panel is the visible one (full-mode panel is the
+    // sibling); the goTo handler usually does this but we set state.jobId
+    // before so the panel switches without reset.
+    document.getElementById('run-full-panel').style.display = 'none';
+    document.getElementById('run-wizard-panel').style.display = 'block';
+    if (typeof window.reattachWizardLog === 'function') {
+      window.reattachWizardLog(job.job_id);
+    }
+  } else {
+    document.querySelector('input[name="run-mode"][value="full"]').checked = true;
+    goTo(3);
+    document.getElementById('run-wizard-panel').style.display = 'none';
+    document.getElementById('run-full-panel').style.display = 'block';
+    if (typeof window.reattachFullLog === 'function') {
+      window.reattachFullLog(job.job_id);
+    }
+  }
+}
+
+// Debounced wizard-state persister. Called from anywhere that mutates
+// the wizard object — saves to job_dir/wizard_state.json so a refresh
+// or a different browser can pick up where we left off.
+let _saveStateTimer = null;
+function saveWizardState() {
+  if (!window.wizard || !window.wizard.jobId) return;
+  if (_saveStateTimer) clearTimeout(_saveStateTimer);
+  _saveStateTimer = setTimeout(async () => {
+    try {
+      // Strip volatile DOM-only fields before serializing.
+      const snapshot = {};
+      for (const k in window.wizard) {
+        if (typeof window.wizard[k] === 'function') continue;
+        if (k === 'eventSource') continue;
+        snapshot[k] = window.wizard[k];
+      }
+      await fetch('/api/jobs/' + window.wizard.jobId + '/wizard_state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(snapshot),
+      });
+    } catch (e) { /* persistent-state save is best-effort */ }
+  }, 500);
+}
+window.saveWizardState = saveWizardState;
 
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
@@ -238,6 +361,17 @@ async function loadReusableJobs() {
         <button class="btn-delete-job" title="Ta bort jobb och alla filer"
           style="margin-left:10px;background:none;border:none;cursor:pointer;color:var(--text-dim);font-size:16px;padding:4px 6px;border-radius:4px;flex-shrink:0">🗑</button>`;
       row.querySelector('.reuse-select-area').addEventListener('click', () => {
+        if (job.output_ifc_exists) {
+          // Completed job — jump straight to step 4 (results). The
+          // "Kör om med nya inställningar"-button there sets
+          // state.sourceJobId and goes back to step 2 for tweaking.
+          state.jobId = job.job_id;
+          window._state = state;
+          goTo(4);
+          if (typeof setupResults === 'function') setupResults();
+          return;
+        }
+        // No output IFC yet — treat as a re-run source.
         $$('#reuse-list .browser-item').forEach(r => {
           r.classList.remove('selected');
           r.style.background = 'var(--surface2)';
@@ -488,6 +622,16 @@ function setBadge(status) {
   badge.textContent = { pending: 'Väntar', running: 'Kör…', completed: 'Klar', failed: 'Misslyckad' }[status] || status;
 }
 
+// "Kör om med nya inställningar" — from results back to settings,
+// using the current job as the re-run source (skips conversion/segment).
+function rerunWithSettings() {
+  if (!state.jobId) return;
+  state.sourceType = 'reuse';
+  state.sourceJobId = state.jobId;
+  goTo(2);
+}
+window.rerunWithSettings = rerunWithSettings;
+
 // ── Step 4: Results ───────────────────────────────────────────────────────
 async function setupResults() {
   const dlBtn = document.getElementById('btn-download');
@@ -714,6 +858,7 @@ async function wizardStart() {
     min_hits: cfg.vertical_min_hits || 3,
     pixel_size_cm: cfg.vertical_pixel_size_cm || 5.0,
   };
+  saveWizardState();  // persist the initial state so another tab can rejoin
   wizardLog(`[Job ${data.job_id.slice(0, 8)}] Wizard startad (algoritm: ${wizard.algorithm})`);
 
   wizardStreamLogs();
@@ -734,6 +879,44 @@ function wizardStreamLogs() {
   sse.onerror = () => { try { sse.close(); } catch (e) {} wizard.sse = null; };
   wizard.sse = sse;
 }
+
+// Re-attach to a job that's already running on the server (started in
+// another browser tab, or before the page was reloaded). Closes any
+// open SSE, clears the wizard log so we don't duplicate, and re-streams
+// — the server replays its full log_lines history on every SSE connect
+// so the user gets the complete picture, not just lines from "now".
+window.reattachWizardLog = function (jobId) {
+  wizard.jobId = jobId;
+  state.jobId = jobId;
+  document.getElementById('wizard-log').innerHTML = '';
+  wizardStreamLogs();
+  if (typeof wizardPollState === 'function') wizardPollState();
+};
+
+window.reattachFullLog = function (jobId) {
+  state.jobId = jobId;
+  const logEl = document.getElementById('log-console');
+  if (logEl) logEl.innerHTML = '';
+  const runBtn = document.getElementById('btn-run');
+  if (runBtn) runBtn.disabled = true;
+  appendLog('[Re-attach] Job ' + jobId.slice(0, 8) + '… — strömmar logg från server');
+  setBadge('running');
+  const sse = new EventSource('/api/jobs/' + jobId + '/logs');
+  sse.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.line !== undefined) appendLog(msg.line);
+    if (msg.done) {
+      sse.close();
+      state.jobStatus = msg.status;
+      setBadge(msg.status);
+      if (msg.status === 'completed') {
+        appendLog('✓ IFC-modell sparad.');
+        setTimeout(() => goTo(4), 800);
+      }
+    }
+  };
+  sse.onerror = () => { try { sse.close(); } catch (e) {} };
+};
 
 async function wizardPollState() {
   if (wizard.pollTimer) clearInterval(wizard.pollTimer);
@@ -770,6 +953,9 @@ async function wizardPollState() {
 }
 
 function renderWizardStageReview(stage, failed) {
+  wizard.currentStage = stage;
+  wizard.lastReviewFailed = !!failed;
+  saveWizardState();
   const detail = document.getElementById('wizard-stage-detail');
   const info = STAGE_INFO[stage] || { title: stage, desc: '' };
   detail.innerHTML = `
