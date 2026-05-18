@@ -38,6 +38,29 @@ from cloud2bim.segmentation.weights import resolve_weights
 log = get_logger(__name__)
 
 
+def _shape_distribution(state: dict) -> list[str]:
+    """Group tensors by shape and return ``"<shape>: <count> [examples]"`` strings.
+
+    Used in checkpoint diagnostics. Helps us see at a glance whether the
+    checkpoint and the model have the same set of tensor shapes — if
+    they do, building an explicit name remap is straightforward; if not,
+    the architectures genuinely differ and weight transfer isn't going
+    to work without retraining.
+    """
+    by_shape: dict[tuple, list[str]] = {}
+    for k, v in state.items():
+        shape = tuple(getattr(v, "shape", ()))
+        by_shape.setdefault(shape, []).append(k)
+    ranked = sorted(by_shape.items(), key=lambda kv: -len(kv[1]))
+    out = []
+    for shape, keys in ranked:
+        sample = ", ".join(keys[:2])
+        if len(keys) > 2:
+            sample += f", … (+{len(keys) - 2})"
+        out.append(f"{tuple(int(s) for s in shape)}: {len(keys)}  [{sample}]")
+    return out
+
+
 # Architecture hyperparameters — keep in sync with the S3DIS RandLA-Net
 # recipe Open3D-ML ships, so weight transfer has a chance.
 RANDLA_S3DIS_CFG = dict(
@@ -155,13 +178,49 @@ class RandLASegmenter(Segmenter):
                 best_count, best_prefix, best_state = n_match, prefix, candidate
 
         if best_count == 0:
+            # Dump enough structure that we can build a per-tensor remap
+            # without round-tripping the user through another debug run.
+            ckpt_keys = sorted(state.keys())
+            model_keys = sorted(dict(model.named_parameters()).keys())
             log.warning(
                 "RandLA-Net checkpoint had 0 matching parameter names "
-                "after prefix scanning. Model runs with random weights "
-                "— predictions will be essentially noise. Either set "
+                "after prefix scanning. Model would run with random "
+                "weights — aborting to avoid silently producing noise."
+            )
+            log.warning(
+                "Checkpoint has %d tensors; first 30 keys:\n  %s",
+                len(ckpt_keys), "\n  ".join(ckpt_keys[:30]),
+            )
+            try:
+                ckpt_shape_summary = _shape_distribution(state)
+                log.warning(
+                    "Checkpoint shape distribution (top 15):\n  %s",
+                    "\n  ".join(ckpt_shape_summary[:15]),
+                )
+            except Exception:
+                pass
+            log.warning(
+                "Model expects %d tensors; first 30 keys:\n  %s",
+                len(model_keys), "\n  ".join(model_keys[:30]),
+            )
+            try:
+                model_shape_summary = _shape_distribution(
+                    {n: p for n, p in model.named_parameters()}
+                )
+                log.warning(
+                    "Model shape distribution (top 15):\n  %s",
+                    "\n  ".join(model_shape_summary[:15]),
+                )
+            except Exception:
+                pass
+            raise RuntimeError(
+                "RandLA-Net checkpoint structure doesn't match this "
+                "code's parameter layout. See the warnings above for "
+                "the dumped key/shape inventory — paste them when "
+                "asking for a remap. Workarounds: set "
                 "segmentation.weights_path to a checkpoint trained "
-                "against this code's parameter layout, or run with "
-                "pipeline_mode=geometric / backend=none."
+                "against this implementation, or switch backend to "
+                "ptv3 / none."
             )
         else:
             missing, unexpected = model.load_state_dict(best_state, strict=False)

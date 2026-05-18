@@ -251,6 +251,7 @@ class RandLANet(nn.Module):
         in_channels: int = 6,
         dim_features: int = 8,
         dim_output: Tuple[int, ...] = (16, 64, 128, 256),
+        dim_decoder: Tuple[int, ...] = (256, 128, 64, 32),
         num_neighbors: int = 16,
         sub_sampling_ratio: Tuple[int, ...] = (4, 4, 4, 4),
         dropout: float = 0.5,
@@ -258,6 +259,8 @@ class RandLANet(nn.Module):
         super().__init__()
         if len(dim_output) != len(sub_sampling_ratio):
             raise ValueError("dim_output and sub_sampling_ratio must match length")
+        if len(dim_decoder) != len(dim_output):
+            raise ValueError("dim_decoder must have the same length as dim_output")
         self.num_classes = num_classes
         self.num_neighbors = num_neighbors
         self.sub_sampling_ratio = list(sub_sampling_ratio)
@@ -265,37 +268,48 @@ class RandLANet(nn.Module):
         # Input projection: (xyz, rgb) → dim_features per point.
         self.input_fc = SharedMLP(in_channels, dim_features)
 
-        # Encoder ladder. Each level: DRB then we'll random-subsample
-        # outside the module (random-pick is a tensor op, not a learned
-        # block).
+        # Encoder ladder: 4 DRBs at levels 0..3. Random sub-sampling
+        # between blocks happens in forward(), not here, since it's a
+        # parameterless tensor op.
         self.encoder_blocks = nn.ModuleList()
         in_c = dim_features
         for out_c in dim_output:
             self.encoder_blocks.append(DilatedResidualBlock(in_c, out_c))
             in_c = out_c
 
-        # Bottleneck — 1×1 conv after the deepest encoder level.
-        self.bottleneck = SharedMLP(in_c, in_c)
+        # Bottleneck: 1×1 conv expanding channels (matches Open3D-ML's
+        # mid_fc which doubles 256 → 512). Operates at the deepest level.
+        self.bottleneck = SharedMLP(in_c, in_c * 2)
+        bn_out_c = in_c * 2
 
-        # Decoder: mirror the encoder. At each level we (a) NN-upsample,
-        # (b) skip-connect the encoder feature at the same level via
-        # channel-wise concat, (c) 1×1 conv to merge.
+        # Decoder: at iteration i (0..len-1) we upsample from level
+        # (len-i) to level (len-1-i), concat with the encoder output at
+        # that finer level, and project to dim_decoder[i] channels.
+        #
+        # Channel chain for the default S3DIS recipe:
+        #   bottleneck out = 512
+        #   decoder[0]: cat(512, 256) = 768 → 256
+        #   decoder[1]: cat(256, 128) = 384 → 128
+        #   decoder[2]: cat(128,  64) = 192 →  64
+        #   decoder[3]: cat( 64,  16) =  80 →  32
         self.decoder_blocks = nn.ModuleList()
-        reversed_dims = list(reversed(dim_output))
-        for i, out_c in enumerate(reversed_dims):
-            # Skip features at the layer ABOVE the current decoder level
-            # have `reversed_dims[i+1]` channels (or dim_features at the
-            # top). After concat, channel count = current + skip.
-            skip_c = reversed_dims[i + 1] if i + 1 < len(reversed_dims) else dim_features
-            self.decoder_blocks.append(SharedMLP(out_c + skip_c, skip_c))
+        rev_enc = list(reversed(dim_output))  # encoder skip channels
+        prev_c = bn_out_c
+        for i, out_c in enumerate(dim_decoder):
+            skip_c = rev_enc[i]
+            self.decoder_blocks.append(SharedMLP(prev_c + skip_c, out_c))
+            prev_c = out_c
 
-        # Per-point classification head: 2 × Conv1×1 + dropout, then Linear.
-        head_channels = dim_features
-        self.head_mlp1 = SharedMLP(head_channels, 64)
-        self.head_mlp2 = SharedMLP(64, 32)
+        # Per-point classification head: 2 × Conv1×1 + dropout, then a
+        # 1×1 conv classifier. Open3D-ML's RandLANet uses two fc_end
+        # layers at 32-channel width before the classifier — keep the
+        # same width here so weight transfer has a chance.
+        head_in = dim_decoder[-1]   # 32
+        head_hidden = head_in
+        self.head_mlp1 = SharedMLP(head_in, head_hidden)
+        self.head_mlp2 = SharedMLP(head_hidden, head_hidden)
         self.head_dropout = nn.Dropout2d(dropout)
-        # Final classifier: 1×1 conv keeps the (B, C, N, 1) layout.
-        self.classifier = nn.Conv2d(32, num_classes, kernel_size=1)
+        self.classifier = nn.Conv2d(head_hidden, num_classes, kernel_size=1)
 
     # ── input preparation ──────────────────────────────────────────────────
 
@@ -383,22 +397,19 @@ class RandLANet(nn.Module):
         # Bottleneck — operates on the deepest level's coords/knn.
         f = self.bottleneck(f)
 
-        # Decoder: walk back up the ladder.
+        # Decoder: walk back up the ladder. At iteration i (0..N-1):
+        #   1. upsample from level (N-i) to level (N-1-i)
+        #   2. concat with encoder_outputs[N-1-i] at that finer level
+        #   3. 1×1 conv reduces channels per dim_decoder
+        n_levels = len(self.encoder_blocks)
         for i, dec in enumerate(self.decoder_blocks):
-            up_idx = inputs["upsample_idx"][-(i + 1)]  # finer-layer indices
-            # Upsample: pick the value at up_idx[n] for every n in the finer
-            # layer. (B, C, N_coarse, 1) → (B, C, N_fine, 1)
+            # upsample_idx[k] maps level-k indices → level-(k+1) indices,
+            # so to upsample from level (N-i) to (N-1-i) we use
+            # upsample_idx[N-1-i].
+            finer_level = n_levels - 1 - i
+            up_idx = inputs["upsample_idx"][finer_level]
             f = _select_along_n(f, up_idx)
-            # Skip connection from the encoder at the corresponding (finer)
-            # level. After upsampling we're back at the resolution where
-            # encoder_outputs[level_finer] was produced.
-            skip_level = len(self.encoder_blocks) - 2 - i
-            if skip_level >= 0:
-                skip = encoder_outputs[skip_level]
-            else:
-                # Top of the ladder — concatenate with the projected input
-                # features (pre-encoder).
-                skip = self.input_fc(inputs["features"])
+            skip = encoder_outputs[finer_level]
             f = torch.cat([f, skip], dim=1)
             f = dec(f)
 
