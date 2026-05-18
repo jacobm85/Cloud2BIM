@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 class IOConfig(BaseModel):
     """Where the point cloud comes from and where outputs go."""
 
-    input_files: List[Path] = Field(..., description="One or more E57/LAS/LAZ/XYZ paths")
+    input_files: List[Path] = Field(..., description="One or more E57/LAS/LAZ/XYZ/PTX paths")
     output_ifc: Path = Field(..., description="Target IFC path")
     work_dir: Path = Field(default=Path("."), description="Intermediate file location")
     dilute: bool = True

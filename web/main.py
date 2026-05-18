@@ -203,7 +203,7 @@ async def browse(path: Optional[str] = None):
     if not browse_path.exists():
         raise HTTPException(404, "Path not found")
 
-    SUPPORTED = {".xyz", ".e57", ".las", ".laz"}
+    SUPPORTED = {".xyz", ".e57", ".las", ".laz", ".ptx"}
     items = []
     try:
         for entry in sorted(browse_path.iterdir()):

@@ -8,8 +8,11 @@ from typing import Optional
 
 # Jobs older than this are purged from memory (output files kept on disk)
 _JOB_MAX_AGE_HOURS = 48
-# Hard timeout: kill pipeline if it runs longer than this
-_JOB_TIMEOUT_SECONDS = 7200  # 2 hours
+# Hard timeout: kill pipeline if it runs longer than this.
+# Defaults to 12 h — a 287M-point E57 read + ML segment can comfortably
+# take several hours on a single GPU. Overridable via env var for users
+# who want to tighten/relax it without code changes.
+_JOB_TIMEOUT_SECONDS = int(os.environ.get("CLOUD2BIM_JOB_TIMEOUT_SECONDS", str(12 * 60 * 60)))
 
 
 class JobManager:

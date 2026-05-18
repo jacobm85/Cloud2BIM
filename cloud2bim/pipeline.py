@@ -47,19 +47,23 @@ def run_pipeline(cfg: Config) -> int:
     bands_lower = list(cfg.walls.cross_section_bands_lower or [])
 
     # ── 1. Read & combine inputs ────────────────────────────────────────
-    points_xyz, points_rgb = _load_inputs(cfg)
+    points_xyz, points_rgb, read_diluted = _load_inputs(cfg)
     if len(points_xyz) == 0:
         log.error("No points loaded — check input_files")
         return 1
     log.info("Loaded %s points (rgb=%s)", f"{len(points_xyz):,}", points_rgb is not None)
 
     # ── 2. Optional dilution ────────────────────────────────────────────
-    if cfg.io.dilute:
+    # PTX dilutes during streaming (otherwise a 100+ GB ASCII scan would
+    # never fit in RAM), so don't double-dilute in that case.
+    if cfg.io.dilute and not read_diluted:
         n_before = len(points_xyz)
         points_xyz = diluted(points_xyz, cfg.io.dilution_factor)
         if points_rgb is not None:
             points_rgb = diluted(points_rgb, cfg.io.dilution_factor)
         log.info("Diluted: %s → %s points (1/%d)", f"{n_before:,}", f"{len(points_xyz):,}", cfg.io.dilution_factor)
+    elif read_diluted:
+        log.info("Dilution applied during read (PTX streaming) — skipping post-read dilute")
 
     # ── 3. Centre coordinates (SWEREF safety) ───────────────────────────
     if cfg.io.center_coordinates:
@@ -479,19 +483,35 @@ def _detect_openings_dispatch(
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def _load_inputs(cfg: Config) -> tuple[np.ndarray, np.ndarray | None]:
+def _load_inputs(cfg: Config) -> tuple[np.ndarray, np.ndarray | None, bool]:
     """Read all input files, concatenate XYZ and RGB.
 
-    Returns RGB as None if any file lacks colour — mixing coloured and
-    uncoloured clouds would force us to invent RGB for half the points,
-    which then dominates the segmenter's "missing colour" fallback path
-    over the half that has real colour. Better to drop colour entirely.
+    Returns (xyz, rgb_or_none, read_diluted). RGB is None if any file
+    lacks colour — mixing coloured and uncoloured clouds would force us
+    to invent RGB for half the points, which then dominates the
+    segmenter's "missing colour" fallback path over the half that has
+    real colour. Better to drop colour entirely.
+
+    ``read_diluted`` is True if any input was a PTX file diluted during
+    streaming — the caller must then skip the post-read ``diluted()``
+    pass to avoid double-diluting.
     """
     xyz_chunks: list[np.ndarray] = []
     rgb_chunks: list[np.ndarray] = []
     all_have_rgb = True
+    read_diluted = False
+    # For PTX we dilute *during* streaming — ASCII PTX files can be tens
+    # of GB on disk and reading them whole before slicing would OOM. For
+    # binary formats the post-read ``diluted()`` slice is plenty fast.
+    ptx_stride = cfg.io.dilution_factor if cfg.io.dilute else 1
     for path in cfg.io.input_files:
-        xyz, rgb = read_pointcloud(path)
+        is_ptx = str(path).lower().endswith(".ptx")
+        if is_ptx:
+            xyz, rgb = read_pointcloud(path, read_stride=ptx_stride)
+            if ptx_stride > 1:
+                read_diluted = True
+        else:
+            xyz, rgb = read_pointcloud(path)
         xyz_chunks.append(xyz)
         if rgb is None:
             all_have_rgb = False
@@ -504,7 +524,7 @@ def _load_inputs(cfg: Config) -> tuple[np.ndarray, np.ndarray | None]:
         rgb = np.vstack(rgb_chunks) if len(rgb_chunks) > 1 else rgb_chunks[0]
     else:
         rgb = None
-    return xyz, rgb
+    return xyz, rgb, read_diluted
 
 
 def _resolve_rgb_for_segmentation(cfg: Config, rgb: np.ndarray | None) -> np.ndarray | None:

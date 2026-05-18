@@ -174,8 +174,17 @@ def stage_prepare(cfg: Config) -> None:
     xyz_chunks: list[np.ndarray] = []
     rgb_chunks: list[np.ndarray] = []
     all_have_rgb = True
+    # See pipeline.py: PTX dilutes inside the reader to keep peak RAM
+    # bounded on 100+ GB ASCII exports.
+    ptx_stride = cfg.io.dilution_factor if cfg.io.dilute else 1
+    read_diluted = False
     for path in cfg.io.input_files:
-        xyz, rgb = read_pointcloud(path)
+        if str(path).lower().endswith(".ptx"):
+            xyz, rgb = read_pointcloud(path, read_stride=ptx_stride)
+            if ptx_stride > 1:
+                read_diluted = True
+        else:
+            xyz, rgb = read_pointcloud(path)
         xyz_chunks.append(xyz)
         if rgb is None:
             all_have_rgb = False
@@ -189,12 +198,14 @@ def stage_prepare(cfg: Config) -> None:
         rgb = np.vstack(rgb_chunks) if len(rgb_chunks) > 1 else rgb_chunks[0]
     log.info("Loaded %s points (rgb=%s)", f"{len(pts):,}", rgb is not None)
 
-    if cfg.io.dilute:
+    if cfg.io.dilute and not read_diluted:
         n0 = len(pts)
         pts = diluted(pts, cfg.io.dilution_factor)
         if rgb is not None:
             rgb = diluted(rgb, cfg.io.dilution_factor)
         log.info("Diluted %s → %s points (1/%d)", f"{n0:,}", f"{len(pts):,}", cfg.io.dilution_factor)
+    elif read_diluted:
+        log.info("Dilution applied during read (PTX streaming) — skipping post-read dilute")
 
     if cfg.io.center_coordinates:
         pts, offset = center_xy(pts)
