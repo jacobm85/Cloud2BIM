@@ -124,8 +124,24 @@ class SharedMLP(nn.Module):
 
 
 class LocalSpatialEncoding(nn.Module):
-    """Project either positional or feature info, then concat with K-gathered
-    neighbour features. Output has 2 × out_channels per neighbour.
+    """K-neighbour feature encoding. Open3D-ML's RandLA-Net design:
+
+    On the FIRST pass (``encode_pos=True``), builds a 10-channel
+    positional encoding ``[dist, rel_pos, centre_xyz, neigh_xyz]`` per
+    (centre, neighbour) pair, MLPs it to ``out_channels``, gathers the
+    K-neighbour features at the same indices, and returns
+    ``(cat([neigh, encoded]), encoded)``.
+
+    On the SECOND pass (``encode_pos=False``), the caller passes the
+    encoded positions that came out of the first pass as
+    ``relative_features``. This pass re-MLPs them through its OWN mlp
+    (separately-trained weights), gathers fresh neighbour features
+    from the new features tensor (which has been pooled in between),
+    and returns ``(cat([new_neigh, mlped_encoded]), mlped_encoded)``.
+
+    Returning a tuple lets LFA chain the encoded positions through
+    both LSE+pool stages without re-computing them. Concat order
+    matches Open3D-ML exactly so pre-trained pool weights align.
 
     Submodule name: ``mlp`` (SharedMLP).
     """
@@ -144,26 +160,32 @@ class LocalSpatialEncoding(nn.Module):
 
     def forward(
         self,
-        coords: torch.Tensor,        # (B, N, 3)
-        features: torch.Tensor,      # (B, d_in_features, N, 1)
-        neighbour_idx: torch.Tensor, # (B, N, K)
-    ) -> torch.Tensor:
-        """Returns (B, 2*out_channels, N, K)."""
-        b, _, n, _ = features.shape
+        coords: torch.Tensor,                    # (B, N, 3)
+        features: torch.Tensor,                  # (B, d_feat, N, 1)
+        neighbour_idx: torch.Tensor,             # (B, N, K)
+        relative_features: torch.Tensor | None = None,  # (B, d_rel, N, K)
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns (cat, relative_features) — both shaped (B, *, N, K)."""
+        b, n, _ = coords.shape
         k = neighbour_idx.shape[-1]
-        # Gather neighbour features.
-        neigh_feats = _gather_neighbours(features, neighbour_idx)  # (B, d, N, K)
+
         if self.encode_pos:
-            # 10-channel positional encoding per (centre, neighbour).
-            neigh_xyz = _gather_neighbours_xyz(coords, neighbour_idx)  # (B, 3, N, K)
-            centre = coords.transpose(1, 2).unsqueeze(-1).expand(-1, -1, -1, k)  # (B, 3, N, K)
-            rel = neigh_xyz - centre
-            dist = torch.norm(rel, dim=1, keepdim=True)
-            encoded = torch.cat([rel, neigh_xyz, centre, dist], dim=1)  # (B, 10, N, K)
-            encoded = self.mlp(encoded)
-        else:
-            encoded = self.mlp(neigh_feats)
-        return torch.cat([encoded, neigh_feats], dim=1)
+            neigh_xyz = _gather_neighbours_xyz(coords, neighbour_idx)         # (B, 3, N, K)
+            ext_xyz = coords.transpose(1, 2).unsqueeze(-1).expand(b, 3, n, k)  # (B, 3, N, K)
+            rel_pos = ext_xyz - neigh_xyz
+            rel_dist = torch.sqrt(torch.sum(rel_pos * rel_pos, dim=1, keepdim=True))
+            relative_features = torch.cat(
+                [rel_dist, rel_pos, ext_xyz, neigh_xyz], dim=1,
+            )  # (B, 10, N, K)
+        elif relative_features is None:
+            raise ValueError(
+                "LocalSpatialEncoding (encode_pos=False) requires the "
+                "relative_features tensor from the first-pass LSE."
+            )
+
+        relative_features = self.mlp(relative_features)                       # (B, out, N, K)
+        neigh_feats = _gather_neighbours(features, neighbour_idx)             # (B, d_feat, N, K)
+        return torch.cat([neigh_feats, relative_features], dim=1), relative_features
 
 
 class AttentivePooling(nn.Module):
@@ -215,14 +237,17 @@ class LocalFeatureAggregation(nn.Module):
         features: torch.Tensor,      # (B, d_in, N, 1)
         neighbour_idx: torch.Tensor, # (B, N, K)
     ) -> torch.Tensor:
-        shortcut = self.shortcut(features)
-        f = self.mlp1(features)
-        f = self.lse1(coords, f, neighbour_idx)
-        f = self.pool1(f)
-        f = self.lse2(coords, f, neighbour_idx)
-        f = self.pool2(f)
-        f = self.mlp2(f)
-        return self.lrelu(f + shortcut)
+        # Open3D-ML's LFA forward — note the relative_features hand-off
+        # from lse1 to lse2. Without this, lse2 computes a different
+        # function than the trained checkpoint expects and the head
+        # collapses to a single class.
+        x = self.mlp1(features)
+        x, neigh_pos_feats = self.lse1(coords, x, neighbour_idx)
+        x = self.pool1(x)
+        x, _ = self.lse2(coords, x, neighbour_idx,
+                         relative_features=neigh_pos_feats)
+        x = self.pool2(x)
+        return self.lrelu(self.mlp2(x) + self.shortcut(features))
 
 
 # ── Neighbour gather helpers ──────────────────────────────────────────────────

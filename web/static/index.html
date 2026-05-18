@@ -254,6 +254,15 @@
       </div>
 
       <div class="section-label">Semantisk segmentering (ML)</div>
+      <div class="alert alert-info" style="font-size:12px;margin-bottom:12px">
+        ⚠️ <strong>Färgat punktmoln rekommenderas starkt</strong> för bästa
+        ML-resultat. Både PointTransformer V3 och RandLA-Net är tränade på
+        S3DIS med RGB som hälften av input-features — färglösa scans matas
+        med syntetisk grå, vilket är "ute på distributionsmarginalen" och
+        ger märkbart sämre klassning (möbler förväxlas med väggar, allt
+        kan kollapsa till en enda klass i extremfallet). Saknar du färg:
+        använd <em>geometric</em>-läget eller acceptera degradering.
+      </div>
       <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:12px">
         <label class="toggle-group">
           <span class="toggle"><input type="checkbox" id="seg-enabled"><span class="toggle-slider"></span></span>

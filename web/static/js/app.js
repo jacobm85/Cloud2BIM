@@ -793,11 +793,10 @@ function renderWizardStageReview(stage, failed) {
   else if (stage === 'ifc') renderIfcReview();
 }
 
-// Segment-stage review: lets the user inspect what ML classified vs
-// kept/stripped *before* committing to wall/opening extraction. Two
-// inspection tools: (1) a 3D viewer in a separate tab for rotate/zoom
-// inspection, (2) an in-wizard top-down with polygon-crop so the user
-// can trim the cloud and re-run downstream without leaving the page.
+// Segment-stage review: opens a separate 3D viewer tab where the user
+// can rotate/zoom the labeled point cloud. Plan-view cropping lives in
+// the prepare stage where it belongs — the segment stage is for
+// reviewing the ML labels and re-running with different settings.
 function renderSegmentReview() {
   const extra = document.getElementById('stage-extra');
   const viewerUrl = '/static/segment-viewer.html?job=' + wizard.jobId;
@@ -816,67 +815,17 @@ function renderSegmentReview() {
         <a class="btn btn-primary" href="${viewerUrl}" target="_blank" rel="noopener">
           🔍 Öppna 3D-segmentvy
         </a>
-        <button class="btn btn-outline" id="btn-show-segment-crop">
-          ✂ Beskär i plan
-        </button>
         <span style="font-size:11px;color:var(--text-dim)">
-          3D-vyn öppnas i ny flik — wizarden ligger kvar här.
+          Öppnas i ny flik — wizarden ligger kvar här.
         </span>
       </div>
     </div>
-    <div id="segment-crop-panel" style="display:none;margin-bottom:14px"></div>
     <div style="font-size:12px;color:var(--text-dim)">
       Om något ser fel ut — t.ex. för mycket möbler markerade som "wall", eller
       tomma områden där golvet borde vara — klicka "Kör om detta steg" och
-      justera ML-backend, voxelstorlek eller RGB-läge. Crop-verktyget filtrerar
-      både punkter och deras etiketter med samma polygon, så du kan beskära
-      utan att tappa segmenteringen.
+      justera ML-backend, voxelstorlek eller RGB-läge. Behöver du beskära
+      punktmolnet, gå tillbaka till <em>Förberedelse</em>-steget.
     </div>`;
-  document.getElementById('btn-show-segment-crop').onclick = openSegmentCropPanel;
-}
-
-async function openSegmentCropPanel() {
-  const panel = document.getElementById('segment-crop-panel');
-  if (!panel) return;
-  if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
-  panel.style.display = 'block';
-  panel.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim)">Renderar planöversikt…</div>';
-  let meta;
-  try {
-    // Force-regenerate the top-down by deleting the cached PNG on the
-    // server side; /topdown already does that implicitly by overwriting.
-    const res = await fetch('/api/jobs/' + wizard.jobId + '/topdown');
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    meta = await res.json();
-  } catch (e) {
-    panel.innerHTML = '<div class="alert alert-danger">Kunde inte rendera översikt: ' + e.message + '</div>';
-    return;
-  }
-  panel.innerHTML = `
-    <div style="padding:12px;background:var(--surface2);border-radius:8px">
-      <div style="font-weight:600;margin-bottom:4px">Beskär i plan</div>
-      <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
-        ${meta.point_count.toLocaleString()} punkter just nu. Klicka för att lägga
-        till polygonpunkter, dubbelklicka eller "Tillämpa crop" för att stänga
-        polygonen. Etiketterna från segmenteringen följer med — du behöver
-        inte segmentera om.
-      </div>
-      <div id="crop-wrap" style="position:relative;display:inline-block;background:#0f1117;border:1px solid var(--border);border-radius:8px;overflow:hidden;max-width:100%">
-        <img id="topdown-img" src="${meta.image_url}&v=${Date.now()}" alt="Top-down" style="display:block;max-width:100%;user-select:none;-webkit-user-drag:none">
-        <canvas id="topdown-canvas" style="position:absolute;left:0;top:0;cursor:crosshair"></canvas>
-      </div>
-      <div class="btn-row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-outline" id="btn-crop-undo">Ångra punkt</button>
-        <button class="btn btn-outline" id="btn-crop-clear">Rensa</button>
-        <button class="btn btn-primary" id="btn-crop-apply" disabled>Tillämpa crop</button>
-        <span id="crop-status" style="font-size:12px;color:var(--text-dim);align-self:center;margin-left:6px"></span>
-      </div>
-    </div>`;
-  setupCropTool(meta.bounds, () => {
-    // After successful crop, re-render the segment review so the panel
-    // resets and the user sees the fresh point count.
-    setTimeout(() => renderWizardStageReview('segment', false), 400);
-  });
 }
 
 async function renderPrepareReview() {
