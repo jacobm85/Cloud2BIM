@@ -66,7 +66,10 @@ REGISTRY: dict[str, WeightSpec] = {
     # cloud2bim.segmentation._randla_net.RandLANet for production use.
     "randla-s3dis": WeightSpec(
         filename="randlanet_s3dis.pth",
-        url="https://storage.googleapis.com/open3d-releases-master/model-zoo/randlanet_s3dis_202201071330utc.pth",
+        # Open3D-ML release bucket — the older `open3d-releases-master`
+        # URL stopped serving at some point; this one (`open3d-releases`)
+        # still works as of 2026-05.
+        url="https://storage.googleapis.com/open3d-releases/model-zoo/randlanet_s3dis_202201071330utc.pth",
         sha256=None,
         size_mb=12.0,
         description="RandLA-Net, Open3D-ML S3DIS pretrained checkpoint (best-effort name remap)",
