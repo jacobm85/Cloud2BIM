@@ -146,36 +146,38 @@
         RGB-hantering konfigureras längre ned under "Semantisk segmentering".
       </div>
 
-      <div class="section-label">Byggnadstyp (styr standard-snitt för väggdetektion)</div>
-      <div class="mode-picker" style="margin-bottom:8px">
-        <label class="mode-option">
-          <input type="radio" name="building-type" value="office" checked>
-          <div class="mode-card">
-            <div class="mode-title">🏢 Kontor / bostad</div>
-            <div class="mode-desc">Snitt 85–120% av våningshöjden (högt band, ovanför
-              möbler). Matchar upstream-Cloud2BIM. Bra för kontor, bostäder, skolor.</div>
-          </div>
-        </label>
-        <label class="mode-option">
-          <input type="radio" name="building-type" value="industrial">
-          <div class="mode-card">
-            <div class="mode-title">🏭 Industri / lager</div>
-            <div class="mode-desc">Snitt 25–35 cm över golvet (lågt band, undviker
-              tak-monterade kabelstegar och installationer som ofta löper längs väggar).</div>
-          </div>
-        </label>
-        <label class="mode-option">
-          <input type="radio" name="building-type" value="custom">
-          <div class="mode-card">
-            <div class="mode-title">⚙️ Anpassat</div>
-            <div class="mode-desc">Inget preset — i wizard-läget plockar du snittet
-              själv från Z-histogrammet per våning.</div>
-          </div>
-        </label>
-      </div>
-      <div class="alert alert-info" style="font-size:12px;margin-bottom:20px">
-        ℹ️ I wizard-läget kan du justera snittnivån per våning från Z-histogrammet
-        oavsett vad du väljer här — byggnadstypen styr bara default-värdet.
+      <div id="building-type-section">
+        <div class="section-label">Byggnadstyp (styr standard-snitt för väggdetektion — endast v2)</div>
+        <div class="mode-picker" style="margin-bottom:8px">
+          <label class="mode-option">
+            <input type="radio" name="building-type" value="office" checked>
+            <div class="mode-card">
+              <div class="mode-title">🏢 Kontor / bostad</div>
+              <div class="mode-desc">Snitt 85–120% av våningshöjden (högt band, ovanför
+                möbler). Matchar upstream-Cloud2BIM. Bra för kontor, bostäder, skolor.</div>
+            </div>
+          </label>
+          <label class="mode-option">
+            <input type="radio" name="building-type" value="industrial">
+            <div class="mode-card">
+              <div class="mode-title">🏭 Industri / lager</div>
+              <div class="mode-desc">Snitt 25–35 cm över golvet (lågt band, undviker
+                tak-monterade kabelstegar och installationer som ofta löper längs väggar).</div>
+            </div>
+          </label>
+          <label class="mode-option">
+            <input type="radio" name="building-type" value="custom">
+            <div class="mode-card">
+              <div class="mode-title">⚙️ Anpassat</div>
+              <div class="mode-desc">Inget preset — i wizard-läget plockar du snittet
+                själv från Z-histogrammet per våning.</div>
+            </div>
+          </label>
+        </div>
+        <div class="alert alert-info" style="font-size:12px;margin-bottom:20px">
+          ℹ️ I wizard-läget kan du justera snittnivån per våning från Z-histogrammet
+          oavsett vad du väljer här — byggnadstypen styr bara default-värdet.
+        </div>
       </div>
 
       <div class="section-label">Detekteringsalgoritm (för geometric / hybrid)</div>

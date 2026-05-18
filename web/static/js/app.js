@@ -274,15 +274,18 @@ window.onNext1 = onNext1;
 
 // Wire the "Rensa alla jobb" button. Confirms, hits DELETE /api/jobs,
 // then reloads the reuse list.
-// Show/hide v2-merge and v3-vertical advanced sections based on the
-// selected wall algorithm. v1 doesn't honour either set of parameters,
-// so leaving them visible would mislead the user.
+// Show/hide v2-merge, v3-vertical and building-type sections based on
+// the selected wall algorithm. v1 and v3 ignore building_type entirely
+// (it just picks a default cross_section_band that v1 throws away via
+// **_unused and v3 doesn't read), so it only makes sense for v2.
 function applyAlgorithmSectionVisibility() {
   const algo = (document.querySelector('input[name="algorithm"]:checked') || {}).value || 'v1';
   const v2 = document.getElementById('v2-merge-section');
   const v3 = document.getElementById('v3-vertical-section');
+  const bt = document.getElementById('building-type-section');
   if (v2) v2.style.display = (algo === 'v2') ? '' : 'none';
   if (v3) v3.style.display = (algo === 'vertical') ? '' : 'none';
+  if (bt) bt.style.display = (algo === 'v2') ? '' : 'none';
 }
 // Fetch the running app version and render it next to the header
 // tagline. Backend returns {source, sha, date, branch}; we pick the most
