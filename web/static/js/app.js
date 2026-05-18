@@ -129,6 +129,11 @@ $$('.upload-tab').forEach(tab => {
 // Polls /api/jobs/active every 3 s while the tab is visible. Each row
 // has a "Hoppa in"-button that restores the wizard's JS state from the
 // persisted wizard_state.json and re-attaches to the SSE log stream.
+//
+// Also runs a slower (8 s) global poll regardless of tab visibility so
+// the "Aktiva jobb" tab itself can be muted/highlighted with a count —
+// useful so the user knows whether anything's running without having
+// to click into the tab.
 let _activeJobsTimer = null;
 function startActiveJobsPolling() {
   loadActiveJobs();
@@ -141,6 +146,25 @@ function stopActiveJobsPolling() {
     _activeJobsTimer = null;
   }
 }
+
+async function updateActiveJobsBadge() {
+  const tab = document.getElementById('tab-active');
+  if (!tab) return;
+  try {
+    const res = await fetch('/api/jobs/active');
+    if (!res.ok) return;
+    const jobs = await res.json();
+    if (jobs.length > 0) {
+      tab.classList.remove('muted');
+      tab.innerHTML = '<span class="dot"></span>Aktiva jobb (' + jobs.length + ')';
+    } else {
+      tab.classList.add('muted');
+      tab.innerHTML = 'Aktiva jobb';
+    }
+  } catch (e) { /* badge is best-effort */ }
+}
+document.addEventListener('DOMContentLoaded', updateActiveJobsBadge);
+setInterval(updateActiveJobsBadge, 8000);
 async function loadActiveJobs() {
   const list = document.getElementById('active-list');
   if (!list) return;
@@ -191,7 +215,8 @@ async function attachToActiveJob(job) {
   try {
     savedState = await fetch('/api/jobs/' + job.job_id + '/wizard_state').then(r => r.json());
   } catch (e) { /* fall through with empty state */ }
-  Object.assign(window.wizard, savedState, { jobId: job.job_id });
+  // ``wizard`` is a top-level const, not on window — assign directly.
+  Object.assign(wizard, savedState, { jobId: job.job_id });
   state.jobId = job.job_id;
   if (job.mode === 'stepwise') {
     // Reattach to the SSE log + show wizard panel for the current stage.
@@ -221,18 +246,18 @@ async function attachToActiveJob(job) {
 // or a different browser can pick up where we left off.
 let _saveStateTimer = null;
 function saveWizardState() {
-  if (!window.wizard || !window.wizard.jobId) return;
+  if (!wizard || !wizard.jobId) return;
   if (_saveStateTimer) clearTimeout(_saveStateTimer);
   _saveStateTimer = setTimeout(async () => {
     try {
       // Strip volatile DOM-only fields before serializing.
       const snapshot = {};
-      for (const k in window.wizard) {
-        if (typeof window.wizard[k] === 'function') continue;
-        if (k === 'eventSource') continue;
-        snapshot[k] = window.wizard[k];
+      for (const k in wizard) {
+        if (typeof wizard[k] === 'function') continue;
+        if (k === 'sse' || k === 'pollTimer') continue;
+        snapshot[k] = wizard[k];
       }
-      await fetch('/api/jobs/' + window.wizard.jobId + '/wizard_state', {
+      await fetch('/api/jobs/' + wizard.jobId + '/wizard_state', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(snapshot),
@@ -1024,10 +1049,17 @@ async function wizardPollState() {
       wizardUpdateStageList(completed, st.current_stage, null);
       wizardSetBadge(st.status === 'running' ? 'running' : (st.status === 'failed' ? 'failed' : (st.status === 'completed' ? 'awaiting' : st.status)));
 
-      // Detect a stage finishing so we can render its review screen
+      // Detect a stage finishing so we can render its review screen.
+      // Also handle the "re-attached after the stage already ended" case:
+      // when this is the first tick (lastStatus===null) and the job is
+      // already in a non-running state, render the review for the last
+      // completed stage immediately so the user lands in something
+      // meaningful instead of a blank wizard panel.
       const justFinished = lastStatus === 'running' && st.status !== 'running';
-      if (justFinished) {
-        // Re-attach logs in case the stream closed
+      const reattachedDone = lastStatus === null
+        && st.status !== 'running'
+        && completed.length > 0;
+      if (justFinished || reattachedDone) {
         if (!wizard.sse) wizardStreamLogs();
         const nextReview = completed[completed.length - 1];
         if (st.status === 'failed') {

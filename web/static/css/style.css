@@ -160,6 +160,20 @@ main { max-width: 960px; margin: 0 auto; padding: 32px 24px 80px; }
 }
 .upload-tab:last-child { border-right: none; }
 .upload-tab.active { background: var(--accent-dim); color: var(--text); }
+/* Muted tab — used for "Aktiva jobb" when no jobs are running.
+   Slightly faded so the user's eye isn't drawn there. */
+.upload-tab.muted { opacity: 0.55; }
+.upload-tab.muted.active { opacity: 1; }
+.upload-tab .dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: #4ade80; margin-right: 6px; vertical-align: 1px;
+  box-shadow: 0 0 0 2px rgba(74, 222, 128, 0.22);
+  animation: rm-pulse 2s ease-in-out infinite;
+}
+@keyframes rm-pulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(74, 222, 128, 0.22); }
+  50%      { box-shadow: 0 0 0 5px rgba(74, 222, 128, 0.08); }
+}
 
 .drop-zone {
   border: 2px dashed var(--border);
