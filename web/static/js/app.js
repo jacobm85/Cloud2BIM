@@ -284,7 +284,30 @@ function applyAlgorithmSectionVisibility() {
   if (v2) v2.style.display = (algo === 'v2') ? '' : 'none';
   if (v3) v3.style.display = (algo === 'vertical') ? '' : 'none';
 }
+// Fetch the running app version and render it next to the header
+// tagline. Backend returns {source, sha, date, branch}; we pick the most
+// informative pieces and fall back gracefully if the endpoint or any
+// field is missing.
+async function loadAppVersion() {
+  const el = document.getElementById('app-version');
+  if (!el) return;
+  try {
+    const res = await fetch('/api/version');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const v = await res.json();
+    const sha = (v.sha || 'dev').slice(0, 12);
+    const dateOnly = (v.date || '').slice(0, 10);
+    const branch = v.branch ? ` ${v.branch}` : '';
+    el.textContent = `${sha}${branch}${dateOnly ? ' · ' + dateOnly : ''}`;
+    el.title = `källa=${v.source} commit=${v.sha || 'dev'} datum=${v.date || '—'} branch=${v.branch || '—'}`;
+  } catch (e) {
+    el.textContent = 'okänd version';
+    el.title = 'Kunde inte hämta version: ' + e.message;
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+  loadAppVersion();
   applyAlgorithmSectionVisibility();
   document.querySelectorAll('input[name="algorithm"]').forEach(r => {
     r.addEventListener('change', applyAlgorithmSectionVisibility);

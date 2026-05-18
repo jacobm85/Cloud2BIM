@@ -70,6 +70,70 @@ async def root():
     return FileResponse(str(_PROJECT_ROOT / "web" / "static" / "index.html"))
 
 
+# ── Version info ──────────────────────────────────────────────────────────────
+# Resolved once at startup so the wizard can show "what code is running"
+# next to the tagline. Three sources, tried in order:
+#   1. VERSION file in project root (pre-build script can write the exact
+#      commit SHA + date when .git is stripped from a Docker image)
+#   2. git rev-parse on the project root (development checkout)
+#   3. mtime of cloud2bim/pipeline.py as a "build timestamp" fallback
+def _resolve_version() -> dict:
+    import datetime as _dt
+    import subprocess
+
+    version_file = _PROJECT_ROOT / "VERSION"
+    if version_file.exists():
+        try:
+            content = version_file.read_text(encoding="utf-8").strip()
+            # Accept either "sha date branch" tokens or full json
+            if content.startswith("{"):
+                return {"source": "VERSION", **json.loads(content)}
+            parts = content.split()
+            return {
+                "source": "VERSION",
+                "sha": parts[0] if parts else "unknown",
+                "date": parts[1] if len(parts) > 1 else "",
+                "branch": parts[2] if len(parts) > 2 else "",
+            }
+        except Exception:
+            pass
+
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(_PROJECT_ROOT), capture_output=True, text=True, timeout=2,
+        ).stdout.strip()
+        date = subprocess.run(
+            ["git", "log", "-1", "--format=%cI"],
+            cwd=str(_PROJECT_ROOT), capture_output=True, text=True, timeout=2,
+        ).stdout.strip()
+        branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(_PROJECT_ROOT), capture_output=True, text=True, timeout=2,
+        ).stdout.strip()
+        if sha:
+            return {"source": "git", "sha": sha, "date": date, "branch": branch}
+    except Exception:
+        pass
+
+    # Fallback: file mtime of a stable pipeline file as a build timestamp
+    try:
+        proxy = _PROJECT_ROOT / "cloud2bim" / "pipeline.py"
+        mtime = _dt.datetime.fromtimestamp(proxy.stat().st_mtime)
+        return {"source": "mtime", "sha": "dev",
+                "date": mtime.isoformat(timespec="seconds"), "branch": ""}
+    except Exception:
+        return {"source": "unknown", "sha": "dev", "date": "", "branch": ""}
+
+
+_VERSION_INFO = _resolve_version()
+
+
+@app.get("/api/version")
+async def get_version():
+    return _VERSION_INFO
+
+
 # ── Chunked upload ────────────────────────────────────────────────────────────
 
 @app.post("/api/upload/init")

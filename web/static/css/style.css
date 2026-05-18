@@ -39,6 +39,17 @@ header {
 header .logo { font-size: 20px; font-weight: 700; letter-spacing: -0.5px; }
 header .logo span { color: var(--accent); }
 header .tagline { color: var(--text-dim); font-size: 13px; }
+header .app-version {
+  margin-left: 10px;
+  padding: 2px 8px;
+  background: var(--surface2, #1a1d27);
+  border: 1px solid var(--border, #2e3350);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  vertical-align: middle;
+}
 
 main { max-width: 960px; margin: 0 auto; padding: 32px 24px 80px; }
 
