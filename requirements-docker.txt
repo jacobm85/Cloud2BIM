@@ -35,6 +35,15 @@ retrying==1.3.4
 tenacity==8.4.1
 requests==2.32.3
 
+# Resource monitor (CPU/RAM/GPU) for the wizard header widget
+# nvidia-ml-py (the official NVIDIA pynvml package) — works without a
+# CUDA SDK install because libnvidia-ml.so ships with the driver, which
+# is bind-mounted into the container by the nvidia runtime. On hosts
+# without a GPU the import succeeds but nvmlInit() raises, which the
+# /api/resources endpoint catches and renders as "GPU: ej tillgänglig".
+psutil==5.9.8
+nvidia-ml-py==12.560.30
+
 # Point cloud format support
 e57==0.2.1a1
 laspy[lazrs]==2.5.4
