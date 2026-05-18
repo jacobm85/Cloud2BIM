@@ -246,16 +246,20 @@ class RandLASegmenter(Segmenter):
 
     @staticmethod
     def _build_features(points: np.ndarray, rgb: np.ndarray | None) -> np.ndarray:
-        """Stack (xyz, rgb) into the (N, 6) feature matrix the net expects."""
-        # Re-use PTv3's RGB helpers — same normalisation policy so behaviour
-        # stays predictable when the user switches backends.
+        """Return per-point colour features only (N, 3).
+
+        The XYZ portion of the model's 6-channel input is built in
+        ``_infer_single`` because the S3DIS recipe normalises XYZ
+        per-tile (centre + scale to roughly [-1, 1]). Doing it once
+        across the whole cloud would put activations far outside the
+        training distribution for large buildings and collapse logits
+        toward whatever class dominated grey/uniform regions during
+        training (typically "floor").
+        """
         from cloud2bim.segmentation.ptv3 import SYNTHETIC_RGB, _normalise_rgb
-        xyz = points.astype(np.float32, copy=False)
         if rgb is None:
-            rgb_f = np.broadcast_to(SYNTHETIC_RGB, xyz.shape).astype(np.float32)
-        else:
-            rgb_f = _normalise_rgb(rgb)
-        return np.concatenate([xyz, rgb_f], axis=1).astype(np.float32)
+            return np.broadcast_to(SYNTHETIC_RGB, points.shape).astype(np.float32)
+        return _normalise_rgb(rgb).astype(np.float32)
 
     # ── tiled inference ────────────────────────────────────────────────────
 
@@ -362,23 +366,38 @@ class RandLASegmenter(Segmenter):
                     (points[:, 1] >= y_lo) & (points[:, 1] < y_hi)
                 )
 
-    def _infer_single(self, points: np.ndarray, features: np.ndarray) -> np.ndarray:
-        """Forward pass on one tile; returns (N, num_classes) float32 logits."""
+    def _infer_single(self, points: np.ndarray, rgb_features: np.ndarray) -> np.ndarray:
+        """Forward pass on one tile; returns (N, num_classes) float32 logits.
+
+        ``rgb_features`` is the per-point colour (N, 3). XYZ-in-features
+        is built here per-tile via centre + max-abs scale, matching
+        S3DIS training: at train time each room is centred and its
+        diagonal scaled to ~unit, so the linear projection in fc0 sees
+        consistent magnitudes regardless of building scale.
+        """
         import torch
 
         if len(points) < RANDLA_S3DIS_CFG["num_neighbors"]:
-            # Network can't build a KNN graph this small — return uniform
-            # logits so the calling tiled-inference can still vote them in.
             return np.full(
                 (len(points), len(S3DIS_LABELS)),
                 1.0 / len(S3DIS_LABELS),
                 dtype=np.float32,
             )
 
+        # Normalise XYZ for the model's 6-channel feature input. Keep
+        # the geometric `points` array in world units — KNN distances
+        # need to stay metric so the radius-of-influence learned at
+        # training matches what the encoder sees here.
+        centre = points.mean(axis=0)
+        norm_xyz = (points - centre).astype(np.float32)
+        scale = float(np.abs(norm_xyz).max())
+        if scale > 0:
+            norm_xyz /= scale  # roughly [-1, 1]
+        feat = np.concatenate([norm_xyz, rgb_features.astype(np.float32)], axis=1)
+
         device = torch.device(self._device)
-        inputs = self._model.prepare_inputs(points, features, device=device)
+        inputs = self._model.prepare_inputs(points, feat, device=device)
         with torch.no_grad():
             logits = self._model(inputs)  # (1, num_classes, N)
-        # → (N, num_classes)
         out = logits.squeeze(0).t().detach().cpu().numpy()
         return out.astype(np.float32)

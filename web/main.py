@@ -762,17 +762,45 @@ async def crop_points(job_id: str, req: CropRequest):
         data = _np.load(str(pts_path))
         xyz = data["xyz"]
         offset = data["offset"]
+        rgb = data["rgb"] if "rgb" in data.files else None
         polygon = _np.array(req.polygon, dtype=_np.float64)
         path = _MPath(polygon)
         mask = path.contains_points(xyz[:, :2])
         kept = xyz[mask]
         if len(kept) == 0:
             return {"error": "polygon contains no points"}
-        _np.savez(str(pts_path), xyz=kept.astype(_np.float32), offset=offset)
+        save_kwargs = {"xyz": kept.astype(_np.float32), "offset": offset}
+        if rgb is not None:
+            save_kwargs["rgb"] = rgb[mask].astype(_np.float32)
+        _np.savez(str(pts_path), **save_kwargs)
+
+        # Also filter labels.npy if it exists — downstream stages expect
+        # label_count == point_count. Without this, cropping after segment
+        # would silently desync the two and crash the wall stage.
+        lbl_path = job_dir / "labels.npy"
+        labels_after = None
+        if lbl_path.exists():
+            try:
+                labels_obj = _np.load(str(lbl_path), allow_pickle=True).item()
+                ids = labels_obj["ids"]
+                if len(ids) == len(xyz):
+                    labels_obj["ids"] = ids[mask]
+                    _np.save(str(lbl_path), labels_obj, allow_pickle=True)
+                    labels_after = int(len(labels_obj["ids"]))
+                else:
+                    # Length mismatch already exists — drop the file so the
+                    # user is forced to re-segment.
+                    lbl_path.unlink()
+            except Exception:
+                # Corrupt or unexpected format — drop it; re-segmentation
+                # will regenerate.
+                lbl_path.unlink(missing_ok=True)
+
         return {
             "before": int(len(xyz)),
             "after": int(len(kept)),
             "kept_fraction": float(len(kept) / len(xyz)),
+            "labels_after": labels_after,
         }
 
     result = await asyncio.to_thread(_crop)
