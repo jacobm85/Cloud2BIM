@@ -112,6 +112,27 @@
         centreras automatiskt så att SWEREF/RT90 hanteras korrekt.
       </div>
 
+      <div class="section-label">Körläge</div>
+      <div class="mode-picker" style="margin-bottom:20px">
+        <label class="mode-option">
+          <input type="radio" name="run-mode" value="full" checked>
+          <div class="mode-card">
+            <div class="mode-title">⚡ Hela pipelinen</div>
+            <div class="mode-desc">Kör alla steg automatiskt. Snabbast — använd när du
+              vet att inställningarna är rätt.</div>
+          </div>
+        </label>
+        <label class="mode-option">
+          <input type="radio" name="run-mode" value="stepwise">
+          <div class="mode-card">
+            <div class="mode-title">🧭 Stegvis (wizard)</div>
+            <div class="mode-desc">Pausa mellan varje steg, granska resultatet, justera
+              parametrar eller kör om med andra inställningar. Histogram + Z-snitt för
+              väggdetektering.</div>
+          </div>
+        </label>
+      </div>
+
       <div class="section-label">Pipeline-läge (v3)</div>
       <div class="mode-picker" style="margin-bottom:8px">
         <label class="mode-option">
@@ -146,6 +167,36 @@
         RGB-hantering konfigureras längre ned under "Semantisk segmentering".
       </div>
 
+      <div class="section-label">Detekteringsalgoritm (för geometric / hybrid)</div>
+      <div class="mode-picker" style="margin-bottom:20px">
+        <label class="mode-option">
+          <input type="radio" name="algorithm" value="v1" checked>
+          <div class="mode-card">
+            <div class="mode-title">📐 Original (v1)</div>
+            <div class="mode-desc">Algoritm från ursprungliga Cloud2BIM. Beprövad
+              baseline — använd som referens.</div>
+          </div>
+        </label>
+        <label class="mode-option">
+          <input type="radio" name="algorithm" value="v2">
+          <div class="mode-card">
+            <div class="mode-title">🧪 Förbättrad (v2)</div>
+            <div class="mode-desc">Histogrambaserad detektion med geometriska
+              finjusteringar. Stöder PCA-rotation, separata params för
+              sammanslagning och pairing.</div>
+          </div>
+        </label>
+        <label class="mode-option">
+          <input type="radio" name="algorithm" value="vertical">
+          <div class="mode-card">
+            <div class="mode-title">📏 Vertikal kontinuitet (v3)</div>
+            <div class="mode-desc">Detekterar en vägg som XY-pixel-kolumn fylld
+              från golv till tak. Robust mot möbler och diagonala byggnader. Bra
+              alternativ när histogram-metoden ger för många falska väggar.</div>
+          </div>
+        </label>
+      </div>
+
       <div id="building-type-section">
         <div class="section-label">Byggnadstyp (styr standard-snitt för väggdetektion — endast v2)</div>
         <div class="mode-picker" style="margin-bottom:8px">
@@ -178,57 +229,6 @@
           ℹ️ I wizard-läget kan du justera snittnivån per våning från Z-histogrammet
           oavsett vad du väljer här — byggnadstypen styr bara default-värdet.
         </div>
-      </div>
-
-      <div class="section-label">Detekteringsalgoritm (för geometric / hybrid)</div>
-      <div class="mode-picker" style="margin-bottom:20px">
-        <label class="mode-option">
-          <input type="radio" name="algorithm" value="v1" checked>
-          <div class="mode-card">
-            <div class="mode-title">📐 Original (v1)</div>
-            <div class="mode-desc">Algoritm från ursprungliga Cloud2BIM. Beprövad
-              baseline — använd som referens.</div>
-          </div>
-        </label>
-        <label class="mode-option">
-          <input type="radio" name="algorithm" value="v2">
-          <div class="mode-card">
-            <div class="mode-title">🧪 Förbättrad (v2)</div>
-            <div class="mode-desc">Histogrambaserad detektion med geometriska
-              finjusteringar. Stöder PCA-rotation, separata params för
-              sammanslagning och pairing.</div>
-          </div>
-        </label>
-        <label class="mode-option">
-          <input type="radio" name="algorithm" value="vertical">
-          <div class="mode-card">
-            <div class="mode-title">📏 Vertikal kontinuitet (v3)</div>
-            <div class="mode-desc">Detekterar en vägg som XY-pixel-kolumn fylld
-              från golv till tak. Robust mot möbler och diagonala byggnader. Bra
-              alternativ när histogram-metoden ger för många falska väggar.</div>
-          </div>
-        </label>
-      </div>
-
-      <div class="section-label">Körläge</div>
-      <div class="mode-picker" style="margin-bottom:20px">
-        <label class="mode-option">
-          <input type="radio" name="run-mode" value="full" checked>
-          <div class="mode-card">
-            <div class="mode-title">⚡ Hela pipelinen</div>
-            <div class="mode-desc">Kör alla steg automatiskt. Snabbast — använd när du
-              vet att inställningarna är rätt.</div>
-          </div>
-        </label>
-        <label class="mode-option">
-          <input type="radio" name="run-mode" value="stepwise">
-          <div class="mode-card">
-            <div class="mode-title">🧭 Stegvis (wizard)</div>
-            <div class="mode-desc">Pausa mellan varje steg, granska resultatet, justera
-              parametrar eller kör om med andra inställningar. Histogram + Z-snitt för
-              väggdetektering.</div>
-          </div>
-        </label>
       </div>
 
       <div class="section-label">Skanning</div>
