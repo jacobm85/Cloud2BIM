@@ -299,9 +299,12 @@ async function loadAppVersion() {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const v = await res.json();
     const sha = (v.sha || 'dev').slice(0, 12);
-    const dateOnly = (v.date || '').slice(0, 10);
+    // ISO-formaten är "2026-05-18T15:24:37+02:00" från git eller
+    // "2026-05-18T15:24:37" från mtime-fallback. Klipp till 16 tecken
+    // ("YYYY-MM-DDTHH:MM") och byt T → blanksteg för läsbarhet.
+    const dateStamp = (v.date || '').slice(0, 16).replace('T', ' ');
     const branch = v.branch ? ` ${v.branch}` : '';
-    el.textContent = `${sha}${branch}${dateOnly ? ' · ' + dateOnly : ''}`;
+    el.textContent = `${sha}${branch}${dateStamp ? ' · ' + dateStamp : ''}`;
     el.title = `källa=${v.source} commit=${v.sha || 'dev'} datum=${v.date || '—'} branch=${v.branch || '—'}`;
   } catch (e) {
     el.textContent = 'okänd version';
