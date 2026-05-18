@@ -849,6 +849,101 @@ class CropRequest(BaseModel):
     polygon: List[List[float]]
 
 
+class ZCropRequest(BaseModel):
+    """Vertical crop: keep points with z in [z_min, z_max] (world Z, metres)."""
+    z_min: float
+    z_max: float
+
+
+@app.post("/api/jobs/{job_id}/crop_z")
+async def crop_points_z(job_id: str, req: ZCropRequest):
+    """Filter points.npz to a vertical Z-band.
+
+    Same workflow as the horizontal polygon crop — overwrites points.npz
+    (and labels.npy if present, filtered with the same mask) so every
+    downstream stage automatically reads the trimmed cloud. Invalidates
+    the top-down preview cache so /topdown re-renders.
+    """
+    if req.z_max <= req.z_min:
+        raise HTTPException(400, "z_max must be > z_min")
+    job_dir = JOBS_DIR / job_id
+    pts_path = job_dir / "points.npz"
+    if not pts_path.exists():
+        raise HTTPException(404, "points.npz missing — run prepare stage first")
+
+    def _crop():
+        import numpy as _np
+        data = _np.load(str(pts_path))
+        xyz = data["xyz"]
+        offset = data["offset"]
+        rgb = data["rgb"] if "rgb" in data.files else None
+        mask = (xyz[:, 2] >= req.z_min) & (xyz[:, 2] <= req.z_max)
+        kept = xyz[mask]
+        if len(kept) == 0:
+            return {"error": "z-range contains no points"}
+        save_kwargs = {"xyz": kept.astype(_np.float32), "offset": offset}
+        if rgb is not None:
+            save_kwargs["rgb"] = rgb[mask].astype(_np.float32)
+        _np.savez(str(pts_path), **save_kwargs)
+
+        # Filter labels.npy in lock-step (same logic as the polygon crop).
+        lbl_path = job_dir / "labels.npy"
+        labels_after = None
+        if lbl_path.exists():
+            try:
+                labels_obj = _np.load(str(lbl_path), allow_pickle=True).item()
+                ids = labels_obj["ids"]
+                if len(ids) == len(xyz):
+                    labels_obj["ids"] = ids[mask]
+                    _np.save(str(lbl_path), labels_obj, allow_pickle=True)
+                    labels_after = int(len(labels_obj["ids"]))
+                else:
+                    lbl_path.unlink()
+            except Exception:
+                lbl_path.unlink(missing_ok=True)
+
+        return {
+            "before": int(len(xyz)),
+            "after": int(len(kept)),
+            "kept_fraction": float(len(kept) / len(xyz)),
+            "labels_after": labels_after,
+            "z_min": float(req.z_min),
+            "z_max": float(req.z_max),
+        }
+
+    result = await asyncio.to_thread(_crop)
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+
+    # Invalidate the top-down preview so the next /topdown call re-renders.
+    try:
+        (job_dir / "topdown.png").unlink()
+        (job_dir / "topdown.json").unlink()
+    except FileNotFoundError:
+        pass
+    return result
+
+
+@app.get("/api/jobs/{job_id}/z_bounds")
+async def get_z_bounds(job_id: str):
+    """Return the current Z extent of points.npz.
+
+    Used by the prepare-stage vertical-crop UI to pre-fill min/max
+    inputs with the actual scan bounds rather than 0/0.
+    """
+    pts_path = JOBS_DIR / job_id / "points.npz"
+    if not pts_path.exists():
+        raise HTTPException(404, "points.npz missing — run prepare stage first")
+
+    def _bounds():
+        import numpy as _np
+        data = _np.load(str(pts_path))
+        z = data["xyz"][:, 2]
+        return {"z_min": float(z.min()), "z_max": float(z.max()), "n_points": int(len(z))}
+
+    return await asyncio.to_thread(_bounds)
+
+
 @app.post("/api/jobs/{job_id}/crop")
 async def crop_points(job_id: str, req: CropRequest):
     """Filter points.npz to points inside the given XY polygon.

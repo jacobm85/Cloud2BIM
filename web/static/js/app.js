@@ -1018,35 +1018,126 @@ function renderSegmentReview() {
 async function renderPrepareReview() {
   const extra = document.getElementById('stage-extra');
   extra.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim)">Renderar planöversikt…</div>';
-  let meta;
+  let meta, zBounds;
   try {
-    const res = await fetch('/api/jobs/' + wizard.jobId + '/topdown');
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    meta = await res.json();
+    const [topdownRes, zRes] = await Promise.all([
+      fetch('/api/jobs/' + wizard.jobId + '/topdown'),
+      fetch('/api/jobs/' + wizard.jobId + '/z_bounds'),
+    ]);
+    if (!topdownRes.ok) throw new Error('topdown HTTP ' + topdownRes.status);
+    meta = await topdownRes.json();
+    zBounds = zRes.ok ? await zRes.json() : { z_min: 0, z_max: 0 };
   } catch (e) {
     extra.innerHTML = '<div class="alert alert-danger">Kunde inte rendera översikt: ' + e.message + '</div>';
     return;
   }
   extra.innerHTML = `
     <div style="margin-bottom:14px">
-      <div style="font-weight:600;margin-bottom:4px">Beskär punktmoln (valfritt)</div>
+      <div style="font-weight:600;margin-bottom:6px">Beskär punktmoln (valfritt)</div>
       <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
-        ${meta.point_count.toLocaleString()} punkter just nu. Klicka i bilden för att lägga
-        till polygonpunkter; dubbelklicka eller "Tillämpa crop" för att stänga polygonen och
-        bara behålla punkter innanför. Hoppa över helt om hela skanningen ska bearbetas.
+        ${meta.point_count.toLocaleString()} punkter just nu (Z = ${zBounds.z_min.toFixed(2)}–${zBounds.z_max.toFixed(2)} m).
+        Välj horisontell (polygon i plan) eller vertikal (Z-intervall) crop nedan. Crop:arna
+        kan kombineras — kör först en, sedan en till på resultatet.
       </div>
-      <div id="crop-wrap" style="position:relative;display:inline-block;background:#0f1117;border:1px solid var(--border);border-radius:8px;overflow:hidden;max-width:100%">
-        <img id="topdown-img" src="${meta.image_url}" alt="Top-down" style="display:block;max-width:100%;user-select:none;-webkit-user-drag:none">
-        <canvas id="topdown-canvas" style="position:absolute;left:0;top:0;cursor:crosshair"></canvas>
+      <div class="upload-tabs" style="margin-bottom:10px">
+        <div class="upload-tab active" data-crop="h">📐 Horisontell (polygon)</div>
+        <div class="upload-tab" data-crop="v">📏 Vertikal (Z-band)</div>
       </div>
-      <div class="btn-row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-outline" id="btn-crop-undo">Ångra punkt</button>
-        <button class="btn btn-outline" id="btn-crop-clear">Rensa</button>
-        <button class="btn btn-primary" id="btn-crop-apply" disabled>Tillämpa crop</button>
-        <span id="crop-status" style="font-size:12px;color:var(--text-dim);align-self:center;margin-left:6px"></span>
+
+      <div id="crop-h-panel">
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">
+          Klicka i bilden för att lägga till polygonpunkter; dubbelklicka eller
+          "Tillämpa crop" för att stänga polygonen och bara behålla punkter innanför.
+        </div>
+        <div id="crop-wrap" style="position:relative;display:inline-block;background:#0f1117;border:1px solid var(--border);border-radius:8px;overflow:hidden;max-width:100%">
+          <img id="topdown-img" src="${meta.image_url}" alt="Top-down" style="display:block;max-width:100%;user-select:none;-webkit-user-drag:none">
+          <canvas id="topdown-canvas" style="position:absolute;left:0;top:0;cursor:crosshair"></canvas>
+        </div>
+        <div class="btn-row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-outline" id="btn-crop-undo">Ångra punkt</button>
+          <button class="btn btn-outline" id="btn-crop-clear">Rensa</button>
+          <button class="btn btn-primary" id="btn-crop-apply" disabled>Tillämpa crop</button>
+          <span id="crop-status" style="font-size:12px;color:var(--text-dim);align-self:center;margin-left:6px"></span>
+        </div>
+      </div>
+
+      <div id="crop-v-panel" style="display:none">
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">
+          Ange Z-intervall (i meter) som ska behållas. Skanningens nuvarande
+          Z-spann visas som default. Bra för att klippa bort tak, källare eller
+          terräng som inte ska med i BIM-modellen.
+        </div>
+        <div style="background:#0f1117;border:1px solid var(--border);border-radius:8px;padding:12px;display:inline-block">
+          <img id="zhist-img" src="/api/jobs/${wizard.jobId}/z_histogram.png?t=${Date.now()}"
+            alt="Z-histogram" style="max-width:480px;max-height:280px;display:block;margin-bottom:10px"
+            onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
+          <div style="display:none;color:var(--text-dim);font-size:12px;margin-bottom:10px;font-style:italic">
+            (Z-histogram visas först efter bjälklagssteget — använd Z-min/Z-max nedan.)
+          </div>
+          <div style="display:flex;gap:10px;align-items:end;flex-wrap:wrap">
+            <div>
+              <label style="display:block;font-size:11px;color:var(--text-dim)">Z min (m)</label>
+              <input type="number" id="z-crop-min" step="0.1" value="${zBounds.z_min.toFixed(2)}" style="width:110px">
+            </div>
+            <div>
+              <label style="display:block;font-size:11px;color:var(--text-dim)">Z max (m)</label>
+              <input type="number" id="z-crop-max" step="0.1" value="${zBounds.z_max.toFixed(2)}" style="width:110px">
+            </div>
+            <button class="btn btn-primary" id="btn-zcrop-apply">Tillämpa Z-crop</button>
+            <span id="zcrop-status" style="font-size:12px;color:var(--text-dim);align-self:center"></span>
+          </div>
+        </div>
       </div>
     </div>`;
+
+  // Tab switcher for crop type.
+  extra.querySelectorAll('[data-crop]').forEach(el => {
+    el.addEventListener('click', () => {
+      extra.querySelectorAll('[data-crop]').forEach(t => t.classList.remove('active'));
+      el.classList.add('active');
+      const h = el.dataset.crop === 'h';
+      document.getElementById('crop-h-panel').style.display = h ? 'block' : 'none';
+      document.getElementById('crop-v-panel').style.display = h ? 'none' : 'block';
+    });
+  });
+
   setupCropTool(meta.bounds);
+  setupZCropTool();
+}
+
+function setupZCropTool() {
+  const btn = document.getElementById('btn-zcrop-apply');
+  const status = document.getElementById('zcrop-status');
+  if (!btn || !status) return;
+  btn.onclick = async () => {
+    const zMin = parseFloat(document.getElementById('z-crop-min').value);
+    const zMax = parseFloat(document.getElementById('z-crop-max').value);
+    if (!Number.isFinite(zMin) || !Number.isFinite(zMax) || zMax <= zMin) {
+      status.style.color = 'var(--danger)';
+      status.textContent = '✗ Felaktigt Z-intervall (max måste vara > min)';
+      return;
+    }
+    status.style.color = 'var(--text-dim)';
+    status.textContent = 'Beskär…';
+    try {
+      const res = await fetch('/api/jobs/' + wizard.jobId + '/crop_z', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ z_min: zMin, z_max: zMax }),
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(txt || 'HTTP ' + res.status);
+      }
+      const r = await res.json();
+      status.style.color = 'var(--success)';
+      const lbl = r.labels_after != null ? ` (${r.labels_after.toLocaleString()} etiketter följde med)` : '';
+      status.textContent = `✓ ${r.after.toLocaleString()} av ${r.before.toLocaleString()} punkter kvar (${Math.round(r.kept_fraction * 100)}%)${lbl}`;
+      setTimeout(renderPrepareReview, 400);
+    } catch (e) {
+      status.style.color = 'var(--danger)';
+      status.textContent = '✗ ' + e.message;
+    }
+  };
 }
 
 function setupCropTool(bounds, onSuccess) {
