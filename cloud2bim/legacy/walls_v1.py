@@ -1,16 +1,25 @@
-"""V1 wall detection ported from VaclavNezerka/Cloud2BIM master:aux_functions.py.
+"""V1 wall detection ported from the 20fa12e state of this repo.
 
-Reference: https://github.com/VaclavNezerka/Cloud2BIM (master branch, the
-upstream of this repo). Note: our LOCAL master branch has diverged from
-upstream — it added a PCA rotation step and lowered the slab density
-threshold. This port follows UPSTREAM, which is the version the user has
-empirically validated.
+Reference baseline: the algorithm running on master at commit 20fa12e
+(2026-05-13), which is upstream VaclavNezerka/Cloud2BIM + two local
+patches the user has empirically validated as producing the best
+results on real scans:
 
-Adaptations from the original:
+    1. PCA rotation of the cross-section so the dominant wall
+       orientation aligns with X/Y before histogramming. Applied only
+       when the building's dominant angle is > 3°. Wall axes are
+       inverse-rotated at the end so output coordinates stay in the
+       world frame.
+    2. Slab density threshold 0.4 × peak (vs upstream 0.6) — see
+       slabs_v1.py.
+
+Adaptations from the v1 codebase:
     * input: full storey ``pointcloud`` (Nx3) instead of zipped lists
     * output: ``List[Wall]`` instead of v1's tuple of parallel lists
-    * dropped the wall-point-assignment / per-wall rotation block — that
-      data was used by v1's own opening detection, which we don't share
+    * v1's wall-point assignment / per-wall rotation block lives in
+      :mod:`cloud2bim.legacy.openings_v1` instead — the v1 opening
+      detector does its own point assignment so it stays independent
+      of which wall algorithm was run upstream.
     * defensive guards added so the function returns ``[]`` cleanly on
       degenerate inputs instead of raising
     * ``_calculate_wall_axis``: replaced ``group[1 - argmax(lengths)]``
@@ -34,6 +43,7 @@ from skimage.morphology import closing, footprint_rectangle
 
 from cloud2bim.config import WallConfig
 from cloud2bim.elements.walls import Wall
+from cloud2bim.geometry.pca import dominant_angle, rotate_points_2d
 from cloud2bim.logging import get_logger
 
 log = get_logger(__name__)
@@ -336,10 +346,20 @@ def detect_walls_v1(
     log.info("Storey %d (v1): Z-band %.2f–%.2f m, %d points",
              storey_idx, z_band_lo, z_band_hi, int(z_mask.sum()))
 
-    # NOTE: upstream VaclavNezerka master:identify_walls does NOT rotate
-    # the cross-section by the dominant PCA angle — it processes points
-    # in the original frame. Slab polygon stays as-is for the swell pass.
-    if slab_polygon_xy is not None:
+    # PCA rotation: align dominant wall orientation with X/Y before
+    # histogramming. The 20fa12e state of master applied this for buildings
+    # whose walls are not axis-aligned with the scanner frame; without it
+    # diagonal walls get smeared across many bins and produce a noisy
+    # binary mask. Threshold 3° matches 20fa12e.
+    _pca_angle = float(dominant_angle(points_2d))
+    _do_rotate = abs(_pca_angle) > math.radians(3)
+    if _do_rotate:
+        log.info("Storey %d (v1): applying PCA rotation %.2f°",
+                 storey_idx, math.degrees(_pca_angle))
+        points_2d = rotate_points_2d(points_2d, -_pca_angle)
+        if slab_polygon_xy is not None:
+            slab_polygon_xy = rotate_points_2d(np.asarray(slab_polygon_xy), -_pca_angle)
+    elif slab_polygon_xy is not None:
         slab_polygon_xy = np.asarray(slab_polygon_xy)
 
     # 2D histogram → binary mask
@@ -432,7 +452,16 @@ def detect_walls_v1(
     # Snap intersections
     wall_axes = _adjust_intersections(wall_axes, cfg.max_thickness)
 
-    # No inverse PCA rotation — upstream never rotated.
+    # Inverse PCA rotation: bring wall endpoints back into the world frame
+    # so downstream (slab polygons, openings, IFC) sees coordinates that
+    # match the input scan.
+    if _do_rotate:
+        flat = np.array([pt for axis in wall_axes for pt in axis], dtype=float)
+        flat = rotate_points_2d(flat, _pca_angle)
+        wall_axes = [
+            [flat[2 * i].tolist(), flat[2 * i + 1].tolist()]
+            for i in range(len(wall_axes))
+        ]
 
     # Safety cap
     if len(wall_axes) > cfg.max_walls_per_storey:

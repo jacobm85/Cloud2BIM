@@ -1,15 +1,18 @@
-"""V1 slab detection ported from VaclavNezerka/Cloud2BIM master:aux_functions.py.
+"""V1 slab detection ported from the 20fa12e state of this repo.
 
-Reference: https://github.com/VaclavNezerka/Cloud2BIM (master branch, the
-upstream of this repo). Our LOCAL master branch lowered the density
-threshold to 40% of peak (so sparse ceilings still get detected); this
-port uses the UPSTREAM default of 60% which is what the user validated.
+Reference baseline: master at commit 20fa12e — upstream
+VaclavNezerka/Cloud2BIM ``identify_slabs`` with the local patch that
+lowers the density threshold from 0.6 to 0.4 of peak. The lower
+threshold means a ceiling that is sparser than the floor (very common
+in interior scans where the scanner sees the underside of the slab at
+a low grazing angle) still gets detected as a horizontal surface
+candidate. This is the version the user has empirically validated.
 
 Mirrors ``identify_slabs`` + ``create_hull_from_histogram`` +
 ``smooth_contour``. Differences from v2:
 
-  * Detection by **density-threshold scan** (60% of max bin density,
-    upstream default) instead of scipy ``find_peaks``. Walks the
+  * Detection by **density-threshold scan** (40% of max bin density,
+    matches 20fa12e) instead of scipy ``find_peaks``. Walks the
     Z-histogram and emits every contiguous run of bins above the
     threshold as one horizontal surface candidate.
   * Slab definition: consecutive surface candidates are paired
@@ -145,8 +148,10 @@ def detect_slabs_v1(
     if n_arr.max() <= 0:
         log.warning("V1 slabs: empty density histogram")
         return []
-    # 60% of peak density — upstream VaclavNezerka default
-    density_threshold = 0.6 * float(n_arr.max())
+    # 40% of peak density — matches the 20fa12e local patch (vs upstream
+    # 0.6). Lower threshold so a ceiling sparser than the floor still gets
+    # picked up; the user has validated this empirically on real scans.
+    density_threshold = 0.4 * float(n_arr.max())
 
     # Walk runs above threshold → horizontal-surface intervals
     candidates: list[list[float]] = []

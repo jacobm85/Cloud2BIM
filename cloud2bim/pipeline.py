@@ -28,7 +28,7 @@ from cloud2bim.elements.roofs import detect_roofs
 from cloud2bim.elements.slabs import Slab, compute_building_pca, compute_z_histogram, detect_slabs
 from cloud2bim.elements.walls import default_cross_section_band, detect_walls
 from cloud2bim.extraction import extract_openings_ml, extract_slabs_ml, extract_walls_ml
-from cloud2bim.legacy import detect_slabs_v1, detect_walls_v1
+from cloud2bim.legacy import detect_openings_v1, detect_slabs_v1, detect_walls_v1
 from cloud2bim.ifc import IfcBuilder
 from cloud2bim.io import center_xy, read_pointcloud
 from cloud2bim.io.coordinates import CoordinateOffset
@@ -459,6 +459,14 @@ def _detect_openings_dispatch(
             return openings
         log.info("Hybrid: ML openings empty — trying geometric")
 
+    if cfg.algorithm == "v1":
+        return detect_openings_v1(
+            walls=walls,
+            storey_points=storey_pts,
+            cfg=cfg.openings,
+            pc_resolution=cfg.slabs.pc_resolution,
+            grid_coefficient=cfg.slabs.grid_coefficient,
+        )
     return detect_openings(
         walls=walls,
         storey_points=storey_pts,

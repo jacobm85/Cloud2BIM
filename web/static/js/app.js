@@ -274,7 +274,22 @@ window.onNext1 = onNext1;
 
 // Wire the "Rensa alla jobb" button. Confirms, hits DELETE /api/jobs,
 // then reloads the reuse list.
+// Show/hide v2-merge and v3-vertical advanced sections based on the
+// selected wall algorithm. v1 doesn't honour either set of parameters,
+// so leaving them visible would mislead the user.
+function applyAlgorithmSectionVisibility() {
+  const algo = (document.querySelector('input[name="algorithm"]:checked') || {}).value || 'v1';
+  const v2 = document.getElementById('v2-merge-section');
+  const v3 = document.getElementById('v3-vertical-section');
+  if (v2) v2.style.display = (algo === 'v2') ? '' : 'none';
+  if (v3) v3.style.display = (algo === 'vertical') ? '' : 'none';
+}
 document.addEventListener('DOMContentLoaded', () => {
+  applyAlgorithmSectionVisibility();
+  document.querySelectorAll('input[name="algorithm"]').forEach(r => {
+    r.addEventListener('change', applyAlgorithmSectionVisibility);
+  });
+
   const btn = document.getElementById('btn-clear-all-jobs');
   if (!btn) return;
   btn.addEventListener('click', async () => {
@@ -1016,7 +1031,59 @@ async function renderWallsReview() {
   if (wizard.algorithm === 'vertical') {
     return renderWallsReviewVertical(extra, numStoreys);
   }
+  if (wizard.algorithm === 'v1') {
+    return renderWallsReviewV1(extra, numStoreys);
+  }
   return renderWallsReviewHistogram(extra, numStoreys);
+}
+
+// ── v1 review: original Cloud2BIM-algoritmen. v1 styr Z-bandet internt
+// (85–120% av storey-höjden), så vi visar inga horisontella tvärsnitt
+// här — bara en topp-vy av detekterade väggar och en kort förklaring.
+async function renderWallsReviewV1(extra, numStoreys) {
+  extra.innerHTML = `
+    <div style="margin-bottom:14px;padding:12px;background:var(--surface2);border-radius:8px">
+      <div style="font-weight:600;font-size:13px;margin-bottom:6px">v1 — original Cloud2BIM</div>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:6px">
+        v1 använder ett <strong>fast vertikalt tvärsnitt på 85–120 % av storey-höjden</strong>
+        per våning (ovanför möbler men under takkonstruktion) — du behöver inte
+        välja något själv. PCA-rotation tillämpas automatiskt om byggnaden inte
+        är axelparallell. Fönster/dörrar identifieras separat i öppningssteget
+        med v1:s ansiktsprojektion (robust mot möbler bakom glas).
+      </p>
+      <p style="font-size:11px;color:var(--text-dim);margin:0">
+        ℹ️ Justera väggparametrarna via knappen "Kör om med andra inställningar"
+        nedan om du vill ändra min vägglängd/-tjocklek eller ytterväggstjocklek.
+      </p>
+    </div>
+    <div id="storey-overlays"></div>
+    <div id="walls-dxf-section" style="margin-top:14px"></div>`;
+  renderWallsDxfButtons();
+
+  const list = document.getElementById('storey-overlays');
+  if (numStoreys === 0) {
+    list.innerHTML = '<div class="alert alert-danger">Inga våningar — bjälklagsdetektionen gav färre än 2 bjälklag. Kör om "Bjälklag"-steget med andra inställningar.</div>';
+    return;
+  }
+  for (let i = 0; i < numStoreys; i++) {
+    const block = document.createElement('div');
+    block.className = 'storey-band';
+    block.style.flexDirection = 'column';
+    block.style.alignItems = 'stretch';
+    block.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <strong>Våning ${i} — detekterade väggar (v1)</strong>
+        <button class="btn btn-outline" data-storey="${i}" data-action="refresh-overlay" style="font-size:12px;padding:4px 10px">↻ Uppdatera</button>
+      </div>
+      <div id="walls-overlay-${i}" style="background:#0f1117;border-radius:6px;padding:6px;text-align:center;color:var(--text-dim);font-size:12px">Renderar topp-vy…</div>`;
+    list.appendChild(block);
+    renderWallsTopdownOverlay(i);
+  }
+  list.addEventListener('click', e => {
+    if (e.target.dataset.action !== 'refresh-overlay') return;
+    const storey = parseInt(e.target.dataset.storey, 10);
+    if (!Number.isNaN(storey)) renderWallsTopdownOverlay(storey);
+  });
 }
 
 async function renderWallsReviewHistogram(extra, numStoreys) {
@@ -1539,6 +1606,20 @@ function wizardOpenStageOverrides(stage) {
         om legitima väggar tappas där en fönsterband + ett möbelparti tillsammans
         knockar ut tre höjder.
       </div>`;
+  } else if (stage === 'walls' && wizard.algorithm === 'v1') {
+    formHtml = `
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
+        v1 — original Cloud2BIM. Inget cross-section-val: v1 använder
+        automatiskt 85–120 % av storey-höjden. Justera bara väggparametrarna
+        nedan.
+      </div>
+      <div class="form-grid" style="margin-top:8px">
+        <div class="form-group"><label>Min vägglängd (m)</label><input type="number" id="ovr-min-wl" value="0.10" step="0.05"></div>
+        <div class="form-group"><label>Min väggtjocklek (m)</label><input type="number" id="ovr-min-wt" value="0.05" step="0.01"></div>
+        <div class="form-group"><label>Max väggtjocklek (m)</label><input type="number" id="ovr-max-wt" value="0.75" step="0.05"></div>
+        <div class="form-group"><label>Yttervägg-tjocklek (m)</label><input type="number" id="ovr-ext-wt" value="0.3" step="0.05"></div>
+        <div class="form-group"><label>Max väggar per våning (cap)</label><input type="number" id="ovr-max-walls" value="300" min="1"></div>
+      </div>`;
   } else if (stage === 'walls') {
     formHtml = `
       <div class="form-grid" style="margin-top:12px">
@@ -1621,6 +1702,10 @@ async function wizardRunStage(stage) {
       min_hits: vHits !== null ? Math.round(vHits) : (wizard.v3Params?.min_hits ?? 3),
       pixel_size_cm: vPixel !== null ? vPixel : (wizard.v3Params?.pixel_size_cm ?? 5.0),
     };
+  } else if (stage === 'walls' && wizard.algorithm === 'v1') {
+    // v1 styr cross_section internt (85–120 % av storey-höjden) och
+    // har ingen lägre-snitt-support. Skicka bara de generiska
+    // väggparametrarna (samlas redan ovan via ovr-min-wl etc).
   } else if (stage === 'walls') {
     if (wizard.bands.length > 0) {
       overrides.cross_section_bands = wizard.bands.map(b => b ? [b.z_min, b.z_max] : null);
