@@ -278,6 +278,19 @@
             <option value="none">Ingen (passthrough — pipelinen ignorerar ML-steget)</option>
           </select>
         </div>
+        <div class="form-group">
+          <label for="seg-dataset">Träningsdataset (vokabulär)</label>
+          <select id="seg-dataset">
+            <option value="s3dis" selected>S3DIS — kontor / inomhus (13 klasser: vägg, golv, tak, fönster, dörr, pelare, möbler…)</option>
+            <option value="semantickitti">SemanticKITTI — utomhus / LiDAR (19 klasser inkl. bil, cykel, mc, lastbil, byggnad, vegetation, stolpe…)</option>
+          </select>
+        </div>
+      </div>
+      <div class="alert alert-info" style="font-size:12px;margin-bottom:8px">
+        ℹ️ <strong>SemanticKITTI</strong>: använd för scans med fordon eller utomhus-objekt
+        (garage, parkering, gatumiljö). "Bygglinjer" mappas till klassen <em>building</em>,
+        markytor till <em>road/parking/sidewalk</em>, pelare till <em>pole/trunk</em>.
+        Saknar takklass — väggdetekteringen får syntetiserade tak från scan-höjden.
       </div>
       <div class="form-grid" style="margin-bottom:8px">
         <div class="form-group">

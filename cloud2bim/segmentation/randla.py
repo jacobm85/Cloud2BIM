@@ -32,7 +32,13 @@ import numpy as np
 
 from cloud2bim.config import SegmentationConfig
 from cloud2bim.logging import get_logger
-from cloud2bim.segmentation.base import S3DIS_LABELS, Segmenter, SemanticLabels
+from cloud2bim.segmentation.base import (
+    S3DIS_LABELS,
+    SEMANTICKITTI_LABELS,
+    Segmenter,
+    SemanticLabels,
+    labels_for_dataset,
+)
 from cloud2bim.segmentation.weights import resolve_weights
 
 log = get_logger(__name__)
@@ -61,16 +67,30 @@ def _shape_distribution(state: dict) -> list[str]:
     return out
 
 
-# Architecture hyperparameters — must match Open3D-ML's S3DIS recipe
-# (ml3d/configs/randlanet_s3dis.yml) so its checkpoint loads cleanly.
+# Architecture hyperparameters per dataset. Must match Open3D-ML's
+# checkpoint configs (ml3d/configs/randlanet_*.yml) so weights load.
 RANDLA_S3DIS_CFG = dict(
     num_classes=len(S3DIS_LABELS),
     in_channels=6,                              # XYZ + RGB
     dim_features=8,
-    dim_output=(16, 64, 128, 256, 512),         # 5 layers, not 4
+    dim_output=(16, 64, 128, 256, 512),         # 5 layers
     num_neighbors=16,
-    sub_sampling_ratio=(4, 4, 4, 4, 2),         # final layer halves, not quarters
+    sub_sampling_ratio=(4, 4, 4, 4, 2),         # final layer halves
 )
+RANDLA_SEMANTICKITTI_CFG = dict(
+    num_classes=len(SEMANTICKITTI_LABELS),
+    in_channels=3,                              # XYZ only — no RGB in KITTI
+    dim_features=8,
+    dim_output=(16, 64, 128, 256),              # 4 layers
+    num_neighbors=16,
+    sub_sampling_ratio=(4, 4, 4, 4),
+)
+
+
+def _config_for_dataset(dataset: str) -> dict:
+    if dataset == "semantickitti":
+        return RANDLA_SEMANTICKITTI_CFG
+    return RANDLA_S3DIS_CFG
 
 # RandLA-Net was trained on 40 960-point patches (S3DIS recipe). Going
 # above that costs memory linearly and degrades accuracy because the
@@ -86,30 +106,37 @@ TILE_OVERLAP_M = 0.5
 class RandLASegmenter(Segmenter):
     """RandLA-Net via the in-tree pure-PyTorch implementation."""
 
-    DEFAULT_WEIGHTS_KEY = "randla-s3dis"
-
     def __init__(self, cfg: SegmentationConfig):
         self.cfg = cfg
         self._model = None
         self._device = "cpu"  # set in _ensure_model based on availability
-        log.info("RandLA-Net segmenter initialised (lazy model load)")
+        self._labels = labels_for_dataset(cfg.dataset)
+        self._arch_cfg = _config_for_dataset(cfg.dataset)
+        self._weights_key = (
+            "randla-semantickitti" if cfg.dataset == "semantickitti"
+            else "randla-s3dis"
+        )
+        log.info(
+            "RandLA-Net segmenter initialised (dataset=%s, %d classes, in_channels=%d, lazy load)",
+            cfg.dataset, self._arch_cfg["num_classes"], self._arch_cfg["in_channels"],
+        )
 
     def segment(
         self, points: np.ndarray, rgb: np.ndarray | None = None
     ) -> SemanticLabels:
         self._ensure_model()
         n = len(points)
-        log.info("RandLA inference on %s points (rgb=%s, device=%s)",
-                 f"{n:,}", rgb is not None, self._device)
+        log.info("RandLA inference on %s points (rgb=%s, device=%s, dataset=%s)",
+                 f"{n:,}", rgb is not None, self._device, self.cfg.dataset)
         feat = self._build_features(points, rgb)
         labels = self._infer_tiled(points.astype(np.float32), feat)
         unique, counts = np.unique(labels, return_counts=True)
         breakdown = ", ".join(
-            f"{S3DIS_LABELS[i]}={c:,}" for i, c in zip(unique, counts)
-            if i < len(S3DIS_LABELS)
+            f"{self._labels[i]}={c:,}" for i, c in zip(unique, counts)
+            if 0 <= i < len(self._labels)
         )
         log.info("RandLA done — class breakdown: %s", breakdown)
-        return SemanticLabels(label_ids=labels, label_names=S3DIS_LABELS)
+        return SemanticLabels(label_ids=labels, label_names=self._labels)
 
     # ── model / weights setup ──────────────────────────────────────────────
 
@@ -128,10 +155,10 @@ class RandLASegmenter(Segmenter):
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         log.info("RandLA-Net device: %s", self._device)
 
-        model = RandLANet(**RANDLA_S3DIS_CFG)
+        model = RandLANet(**self._arch_cfg)
 
         weights_path = resolve_weights(
-            self.DEFAULT_WEIGHTS_KEY, explicit_path=self.cfg.weights_path,
+            self._weights_key, explicit_path=self.cfg.weights_path,
         )
         log.info("Loading RandLA-Net weights: %s", weights_path)
         try:
@@ -244,19 +271,21 @@ class RandLASegmenter(Segmenter):
 
     # ── feature construction ───────────────────────────────────────────────
 
-    @staticmethod
-    def _build_features(points: np.ndarray, rgb: np.ndarray | None) -> np.ndarray:
-        """Return per-point colour features only (N, 3).
+    def _build_features(self, points: np.ndarray, rgb: np.ndarray | None) -> np.ndarray:
+        """Build the per-point feature side of the model input.
 
-        The XYZ portion of the model's 6-channel input is built in
-        ``_infer_single`` because the S3DIS recipe normalises XYZ
-        per-tile (centre + scale to roughly [-1, 1]). Doing it once
-        across the whole cloud would put activations far outside the
-        training distribution for large buildings and collapse logits
-        toward whatever class dominated grey/uniform regions during
-        training (typically "floor").
+        For S3DIS (in_channels=6): returns (N, 3) RGB only — XYZ is
+        normalised per-tile in ``_infer_single`` and concatenated there.
+        For SemanticKITTI (in_channels=3): the model takes XYZ only.
+        We return a zero-channel placeholder; the actual XYZ comes from
+        per-tile normalisation in ``_infer_single``.
         """
         from cloud2bim.segmentation.ptv3 import SYNTHETIC_RGB, _normalise_rgb
+        if self._arch_cfg["in_channels"] == 3:
+            # KITTI variant: only XYZ goes into the model. Return an
+            # empty (N, 0) array so _infer_tiled's per-tile masking
+            # works uniformly with the S3DIS path.
+            return np.empty((len(points), 0), dtype=np.float32)
         if rgb is None:
             return np.broadcast_to(SYNTHETIC_RGB, points.shape).astype(np.float32)
         return _normalise_rgb(rgb).astype(np.float32)
@@ -269,7 +298,7 @@ class RandLASegmenter(Segmenter):
         Returns int32 labels for every input point.
         """
         n = len(points)
-        n_classes = len(S3DIS_LABELS)
+        n_classes = self._arch_cfg["num_classes"]
         logits = np.zeros((n, n_classes), dtype=np.float32)
         counts = np.zeros(n, dtype=np.int32)
 
@@ -366,34 +395,36 @@ class RandLASegmenter(Segmenter):
                     (points[:, 1] >= y_lo) & (points[:, 1] < y_hi)
                 )
 
-    def _infer_single(self, points: np.ndarray, rgb_features: np.ndarray) -> np.ndarray:
+    def _infer_single(self, points: np.ndarray, extra_features: np.ndarray) -> np.ndarray:
         """Forward pass on one tile; returns (N, num_classes) float32 logits.
 
-        ``rgb_features`` is the per-point colour (N, 3). XYZ-in-features
-        is built here per-tile via centre + max-abs scale, matching
-        S3DIS training: at train time each room is centred and its
-        diagonal scaled to ~unit, so the linear projection in fc0 sees
+        ``extra_features`` is the non-XYZ part of the model input — RGB
+        (N, 3) for S3DIS, empty (N, 0) for SemanticKITTI. XYZ-in-features
+        is built per-tile here via centre + max-abs scale so fc0 sees
         consistent magnitudes regardless of building scale.
         """
         import torch
 
-        if len(points) < RANDLA_S3DIS_CFG["num_neighbors"]:
+        num_classes = self._arch_cfg["num_classes"]
+        if len(points) < self._arch_cfg["num_neighbors"]:
             return np.full(
-                (len(points), len(S3DIS_LABELS)),
-                1.0 / len(S3DIS_LABELS),
+                (len(points), num_classes),
+                1.0 / num_classes,
                 dtype=np.float32,
             )
 
-        # Normalise XYZ for the model's 6-channel feature input. Keep
-        # the geometric `points` array in world units — KNN distances
-        # need to stay metric so the radius-of-influence learned at
-        # training matches what the encoder sees here.
+        # Normalise XYZ per tile. Geometric `points` (used for KNN) stays
+        # in world units so the encoder's receptive field matches training.
         centre = points.mean(axis=0)
         norm_xyz = (points - centre).astype(np.float32)
         scale = float(np.abs(norm_xyz).max())
         if scale > 0:
             norm_xyz /= scale  # roughly [-1, 1]
-        feat = np.concatenate([norm_xyz, rgb_features.astype(np.float32)], axis=1)
+
+        if extra_features.shape[1] > 0:
+            feat = np.concatenate([norm_xyz, extra_features.astype(np.float32)], axis=1)
+        else:
+            feat = norm_xyz
 
         device = torch.device(self._device)
         inputs = self._model.prepare_inputs(points, feat, device=device)

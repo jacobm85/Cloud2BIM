@@ -272,6 +272,7 @@ class CreateJobRequest(BaseModel):
     # ML semantic segmentation
     seg_enabled: bool = False
     seg_backend: str = "ptv3"
+    seg_dataset: str = "s3dis"        # s3dis (indoor) | semantickitti (outdoor+vehicles)
     seg_weights: Optional[str] = None
     ml_voxel_size: float = 0.05       # 5 cm — matches S3DIS training
     geometry_resolution: float = 0.01  # 1 cm — final BIM precision
@@ -344,6 +345,49 @@ def _convert_las_to_xyz(las_path: str, xyz_path: str, log_fn=None):
 
     if log_fn:
         log_fn(f"[INFO] XYZ sparat: {Path(xyz_path).name}")
+
+
+# ── Segmentation config helper ────────────────────────────────────────────────
+#
+# Maps wizard request → SegmentationConfig dict. Picks dataset-appropriate
+# default class lists (wall_classes / floor_classes / …) so a "switch
+# dataset" radio in the wizard doesn't require the user to also retype
+# seven class-mapping lists. The wizard can still send explicit overrides
+# if a user wants them, but right now buildConfig doesn't expose those —
+# the defaults below are what every job uses for the chosen dataset.
+def _build_segmentation_cfg(request) -> dict:
+    dataset = request.seg_dataset if request.seg_dataset in ("s3dis", "semantickitti") else "s3dis"
+    cfg = {
+        "enabled": request.seg_enabled or request.pipeline_mode in ("ml", "hybrid"),
+        "backend": request.seg_backend,
+        "dataset": dataset,
+        "weights_path": request.seg_weights,
+        "ml_voxel_size": request.ml_voxel_size,
+        "geometry_resolution": request.geometry_resolution,
+        "has_rgb": request.has_rgb if request.has_rgb in ("auto", "true", "false") else "auto",
+        "device": "auto",
+        "cache_labels": True,
+    }
+    if dataset == "semantickitti":
+        # SemanticKITTI was trained on outdoor LiDAR; there's no
+        # ceiling class, "building" is the wall analogue, ground-level
+        # surfaces split across several labels, and vehicles get their
+        # own classes (useful for garages).
+        cfg.update({
+            "wall_classes": ["building", "fence"],
+            "floor_classes": ["road", "parking", "sidewalk", "other-ground", "terrain"],
+            "ceiling_classes": [],
+            "column_classes": ["pole", "trunk"],
+            "clutter_classes": [
+                "car", "bicycle", "motorcycle", "truck", "other-vehicle",
+                "person", "bicyclist", "motorcyclist",
+                "vegetation", "traffic-sign",
+            ],
+            "door_classes": [],
+            "window_classes": [],
+        })
+    # S3DIS uses SegmentationConfig's built-in defaults.
+    return cfg
 
 
 @app.get("/api/jobs/reusable")
@@ -469,16 +513,7 @@ async def create_job(request: CreateJobRequest):
             "dilution_factor": request.dilution_factor,
             "center_coordinates": True,
         },
-        "segmentation": {
-            "enabled": request.seg_enabled or request.pipeline_mode in ("ml", "hybrid"),
-            "backend": request.seg_backend,
-            "weights_path": request.seg_weights,
-            "ml_voxel_size": request.ml_voxel_size,
-            "geometry_resolution": request.geometry_resolution,
-            "has_rgb": request.has_rgb if request.has_rgb in ("auto", "true", "false") else "auto",
-            "device": "auto",
-            "cache_labels": True,
-        },
+        "segmentation": _build_segmentation_cfg(request),
         "slabs": {
             "enabled": request.slabs_enabled,
             "bottom_floor_thickness": request.bfs_thickness,

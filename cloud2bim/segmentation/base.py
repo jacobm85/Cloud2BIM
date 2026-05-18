@@ -20,12 +20,33 @@ from typing import Sequence
 import numpy as np
 
 
-# S3DIS label vocabulary used by default. Custom models can override these
-# via SegmentationConfig.{wall,floor,...}_classes.
+# S3DIS label vocabulary (13 classes — indoor offices).
 S3DIS_LABELS: tuple[str, ...] = (
     "ceiling", "floor", "wall", "beam", "column", "window",
     "door", "table", "chair", "sofa", "bookcase", "board", "clutter",
 )
+
+# SemanticKITTI label vocabulary (19 classes — outdoor LiDAR, includes
+# vehicles, vegetation, traffic signs etc.). Useful for scans that have
+# vehicles or outdoor elements that S3DIS doesn't cover. Order matches
+# Open3D-ML's pretrained checkpoint output (ignored_label_inds=[0] is
+# stripped server-side; the 19 entries below are the model's actual
+# output indices 0..18).
+SEMANTICKITTI_LABELS: tuple[str, ...] = (
+    "car", "bicycle", "motorcycle", "truck", "other-vehicle",
+    "person", "bicyclist", "motorcyclist",
+    "road", "parking", "sidewalk", "other-ground",
+    "building", "fence", "vegetation", "trunk", "terrain",
+    "pole", "traffic-sign",
+)
+
+
+def labels_for_dataset(dataset: str) -> tuple[str, ...]:
+    """Return the label tuple for a dataset name."""
+    if dataset == "semantickitti":
+        return SEMANTICKITTI_LABELS
+    # Default + explicit "s3dis"
+    return S3DIS_LABELS
 
 
 @dataclass

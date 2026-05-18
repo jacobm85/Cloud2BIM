@@ -74,6 +74,18 @@ REGISTRY: dict[str, WeightSpec] = {
         size_mb=12.0,
         description="RandLA-Net, Open3D-ML S3DIS pretrained checkpoint (best-effort name remap)",
     ),
+    # RandLA-Net SemanticKITTI pretrained — 19 outdoor LiDAR classes
+    # including cars, bicycles, pedestrians, road/sidewalk, buildings,
+    # vegetation, poles. Different architecture than S3DIS variant
+    # (4 layers, in_channels=3) — the segmenter picks the right config
+    # automatically when cfg.segmentation.dataset == "semantickitti".
+    "randla-semantickitti": WeightSpec(
+        filename="randlanet_semantickitti.pth",
+        url="https://storage.googleapis.com/open3d-releases/model-zoo/randlanet_semantickitti_202201071330utc.pth",
+        sha256=None,
+        size_mb=15.0,
+        description="RandLA-Net, Open3D-ML SemanticKITTI pretrained checkpoint",
+    ),
 }
 
 

@@ -47,13 +47,27 @@ class SegmentationConfig(BaseModel):
 
     enabled: bool = True
     backend: Literal["ptv3", "randla", "none"] = "ptv3"
+    dataset: Literal["s3dis", "semantickitti"] = Field(
+        default="s3dis",
+        description=(
+            "Pretrained checkpoint vocabulary. "
+            "'s3dis' = 13 indoor office classes (wall/floor/ceiling/door/"
+            "window/column/table/chair/... ). "
+            "'semantickitti' = 19 outdoor LiDAR classes (car/bicycle/"
+            "motorcycle/truck/road/parking/sidewalk/building/fence/"
+            "vegetation/pole/... ) — useful when the scan contains "
+            "vehicles or outdoor elements. Switch the wall_/floor_/... "
+            "_classes lists below to match the chosen dataset's "
+            "vocabulary (the wizard does this automatically)."
+        ),
+    )
     weights_path: Optional[Path] = Field(
         default=None,
         description=(
             "Path to model weights. None = auto-download a pretrained "
-            "S3DIS checkpoint for the chosen backend and cache it in "
-            "%LOCALAPPDATA%/cloud2bim/models (Windows) or "
-            "~/.cache/cloud2bim/models (Linux/Mac)."
+            "checkpoint for the chosen backend × dataset combination "
+            "and cache it in %LOCALAPPDATA%/cloud2bim/models (Windows) "
+            "or ~/.cache/cloud2bim/models (Linux/Mac)."
         ),
     )
     ml_voxel_size: float = Field(
