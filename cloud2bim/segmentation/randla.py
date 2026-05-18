@@ -378,7 +378,7 @@ class RandLASegmenter(Segmenter):
         device = torch.device(self._device)
         inputs = self._model.prepare_inputs(points, features, device=device)
         with torch.no_grad():
-            logits = self._model(inputs)  # (1, num_classes, N, 1)
-        # Reshape to (N, num_classes).
-        out = logits.squeeze(-1).squeeze(0).t().detach().cpu().numpy()
+            logits = self._model(inputs)  # (1, num_classes, N)
+        # → (N, num_classes)
+        out = logits.squeeze(0).t().detach().cpu().numpy()
         return out.astype(np.float32)

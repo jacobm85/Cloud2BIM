@@ -113,7 +113,13 @@ COPY . .
 ARG GIT_SHA=dev
 ARG GIT_DATE=
 ARG GIT_BRANCH=
-RUN printf '%s %s %s\n' "$GIT_SHA" "$GIT_DATE" "$GIT_BRANCH" > /app/VERSION
+# Fall back to current build time when GIT_DATE wasn't passed. See the
+# matching block in the base Dockerfile for the rationale.
+RUN if [ -n "$GIT_DATE" ]; then \
+        printf '%s %s %s\n' "$GIT_SHA" "$GIT_DATE" "$GIT_BRANCH" > /app/VERSION; \
+    else \
+        printf '%s %s %s\n' "$GIT_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$GIT_BRANCH" > /app/VERSION; \
+    fi
 
 # Runtime dirs the pipeline writes to (mounted via compose volumes)
 RUN mkdir -p web/uploads web/jobs /models /data

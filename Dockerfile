@@ -27,7 +27,15 @@ COPY . .
 ARG GIT_SHA=dev
 ARG GIT_DATE=
 ARG GIT_BRANCH=
-RUN printf '%s %s %s\n' "$GIT_SHA" "$GIT_DATE" "$GIT_BRANCH" > /app/VERSION
+# Fall back to current build time when GIT_DATE wasn't passed (typically
+# when running `docker compose up --build` directly instead of through
+# scripts/build.sh). The GUI version pill needs *some* date string to
+# show; the build timestamp is at least informative.
+RUN if [ -n "$GIT_DATE" ]; then \
+        printf '%s %s %s\n' "$GIT_SHA" "$GIT_DATE" "$GIT_BRANCH" > /app/VERSION; \
+    else \
+        printf '%s %s %s\n' "$GIT_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$GIT_BRANCH" > /app/VERSION; \
+    fi
 
 # Pre-create directories the pipeline writes to at runtime
 RUN mkdir -p web/uploads web/jobs images/pdf images/wall_outputs_images
