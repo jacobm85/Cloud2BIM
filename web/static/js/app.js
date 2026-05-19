@@ -151,10 +151,11 @@ function stopActiveJobsPolling() {
 // dot/border. Used by both the badge (counts running vs needs-action)
 // and the row renderer so naming stays consistent.
 const JOB_STATUS_META = {
-  running:     { icon: '🟢', label: 'Pågår',     color: 'var(--accent, #4f8ef7)' },
-  failed:      { icon: '⚠️',  label: 'Misslyckades', color: 'var(--danger, #d64545)' },
-  interrupted: { icon: '⏸',  label: 'Avbrutet',   color: 'var(--warn, #d49a3a)' },
-  pending:     { icon: '⏳', label: 'Väntar',     color: 'var(--text-dim)' },
+  running:        { icon: '🟢', label: 'Pågår',          color: 'var(--accent, #4f8ef7)' },
+  awaiting_input: { icon: '⏯',  label: 'Väntar på dig',  color: 'var(--accent, #4f8ef7)' },
+  failed:         { icon: '⚠️',  label: 'Misslyckades',   color: 'var(--danger, #d64545)' },
+  interrupted:    { icon: '⏸',  label: 'Avbrutet',       color: 'var(--warn, #d49a3a)' },
+  pending:        { icon: '⏳', label: 'Väntar',         color: 'var(--text-dim)' },
 };
 
 async function updateActiveJobsBadge() {
@@ -165,25 +166,29 @@ async function updateActiveJobsBadge() {
     if (!res.ok) return;
     const jobs = await res.json();
     const running = jobs.filter(j => j.status === 'running').length;
-    const needsAction = jobs.length - running;
+    const awaiting = jobs.filter(j => j.status === 'awaiting_input').length;
+    const broken = jobs.filter(j => j.status === 'failed' || j.status === 'interrupted').length;
     if (jobs.length === 0) {
       tab.classList.add('muted');
       tab.innerHTML = 'Aktiva jobb';
       return;
     }
     tab.classList.remove('muted');
-    // Show running with the green dot; if there are also failed/
-    // interrupted jobs, append a "(+N)" so the user notices things
-    // that need their attention even when something else is also
-    // running.
+    // Running gets the live green dot. Awaiting-input is shown in
+    // accent blue (the user just has to click Fortsätt — not an
+    // emergency). Failed/interrupted is the red exclamation since
+    // those genuinely need investigation.
     let html = '';
     if (running > 0) {
       html = '<span class="dot"></span>Aktiva jobb (' + running + ')';
     } else {
       html = 'Aktiva jobb';
     }
-    if (needsAction > 0) {
-      html += ' <span style="color:var(--danger,#d64545);font-weight:600">!' + needsAction + '</span>';
+    if (awaiting > 0) {
+      html += ' <span style="color:var(--accent,#4f8ef7);font-weight:600">⏯' + awaiting + '</span>';
+    }
+    if (broken > 0) {
+      html += ' <span style="color:var(--danger,#d64545);font-weight:600">!' + broken + '</span>';
     }
     tab.innerHTML = html;
   } catch (e) { /* badge is best-effort */ }
@@ -235,7 +240,12 @@ function renderActiveJobRow(container, job) {
     detail += ` &nbsp;·&nbsp; ${word}: <strong style="color:var(--accent,#4f8ef7)">${escapeHtml(stageLabel)}</strong>`;
   }
   if (job.completed_stages && job.completed_stages.length > 0) {
-    detail += ` &nbsp;·&nbsp; Klart: ${job.completed_stages.length} steg`;
+    const last = job.completed_stages[job.completed_stages.length - 1];
+    if (job.status === 'awaiting_input') {
+      detail += ` &nbsp;·&nbsp; Klar med: <strong>${escapeHtml(last)}</strong>`;
+    } else {
+      detail += ` &nbsp;·&nbsp; Klart: ${job.completed_stages.length} steg`;
+    }
   }
   detail += ` &nbsp;·&nbsp; ${elapsed} sedan start &nbsp;·&nbsp; ${job.job_id.slice(0,8)}…`;
 
@@ -243,6 +253,13 @@ function renderActiveJobRow(container, job) {
   let buttons = '';
   if (job.status === 'running') {
     buttons = `<button class="btn btn-primary btn-jump" style="font-size:12px;padding:6px 14px;flex-shrink:0">Hoppa in</button>`;
+  } else if (job.status === 'awaiting_input') {
+    // Last stage finished — jumping in drops the user back into the
+    // wizard's review screen for that stage, with Fortsätt / Kör om.
+    buttons = `
+      <button class="btn btn-primary btn-jump" style="font-size:12px;padding:6px 14px;flex-shrink:0">Fortsätt →</button>
+      <button class="btn btn-outline btn-delete" title="Ta bort jobb och alla filer"
+        style="font-size:12px;padding:6px 8px;flex-shrink:0;color:var(--text-dim)">🗑</button>`;
   } else if (job.status === 'failed' || job.status === 'interrupted') {
     const retryLabel = job.next_stage ? `Försök igen (${job.next_stage})` : 'Försök igen';
     buttons = `

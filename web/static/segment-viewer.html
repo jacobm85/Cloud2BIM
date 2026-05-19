@@ -100,32 +100,76 @@ function showError(msg) {
 if (!jobId) { showError('Inget jobb-ID (?job=…)'); throw new Error(); }
 
 // ── Class palette ─────────────────────────────────────────────────────────
-// Distinct colours per S3DIS class. "Keep" classes (used downstream by the
-// wall / opening / column extractors) are bright; "strip" classes (clutter
-// and furniture filtered out of the geometric pipeline) are dimmer so the
-// user can tell at a glance which points will survive into the IFC.
+// Distinct colours per class for both S3DIS (indoor) and SemanticKITTI
+// (outdoor) vocabularies. "Keep" classes feed the downstream BIM
+// extractors (walls / openings / columns); "strip" classes are clutter
+// the geometric pipeline filters out. SemanticKITTI's defaults are a
+// best-guess for BIM use — everything outdoor that isn't "building" or
+// vertical structure is stripped, but every class still gets its own
+// colour so the user can verify the segmenter actually separated them.
 const CLASS_INFO = {
-  // S3DIS labels are: ceiling, floor, wall, beam, column, window, door,
-  // table, chair, sofa, bookcase, board, clutter.
-  // Default to "strip" for any class not enumerated here.
-  ceiling:  { color: 0xd7d7df, group: 'keep'  },
-  floor:    { color: 0x8c8c9e, group: 'keep'  },
-  wall:     { color: 0x7fa8cc, group: 'keep'  },
-  beam:     { color: 0xa48ee6, group: 'keep'  },
-  column:   { color: 0xa48ee6, group: 'keep'  },
-  window:   { color: 0x8dd3ff, group: 'keep'  },
-  door:     { color: 0xc79e80, group: 'keep'  },
-  table:    { color: 0x8b3a3a, group: 'strip' },
-  chair:    { color: 0xa84d4d, group: 'strip' },
-  sofa:     { color: 0xb86c4d, group: 'strip' },
-  bookcase: { color: 0x8a6d3b, group: 'strip' },
-  board:    { color: 0x5e7a8a, group: 'strip' },
-  clutter:  { color: 0x4a4a52, group: 'strip' },
+  // ── S3DIS (13 indoor classes) ────────────────────────────────────────
+  ceiling:        { color: 0xd7d7df, group: 'keep'  },
+  floor:          { color: 0x8c8c9e, group: 'keep'  },
+  wall:           { color: 0x7fa8cc, group: 'keep'  },
+  beam:           { color: 0xa48ee6, group: 'keep'  },
+  column:         { color: 0xa48ee6, group: 'keep'  },
+  window:         { color: 0x8dd3ff, group: 'keep'  },
+  door:           { color: 0xc79e80, group: 'keep'  },
+  table:          { color: 0x8b3a3a, group: 'strip' },
+  chair:          { color: 0xa84d4d, group: 'strip' },
+  sofa:           { color: 0xb86c4d, group: 'strip' },
+  bookcase:       { color: 0x8a6d3b, group: 'strip' },
+  board:          { color: 0x5e7a8a, group: 'strip' },
+  clutter:        { color: 0x4a4a52, group: 'strip' },
+
+  // ── SemanticKITTI (19 outdoor classes) ───────────────────────────────
+  // Architectural — keep as primary BIM input.
+  building:       { color: 0x7fa8cc, group: 'keep'  },
+  fence:          { color: 0xa48ee6, group: 'keep'  },
+  // Vertical structures — useful as columns / lamp posts.
+  pole:           { color: 0xc1a35a, group: 'keep'  },
+  trunk:          { color: 0x8a6d3b, group: 'keep'  },
+  'traffic-sign': { color: 0xe0c060, group: 'strip' },
+  // Ground surfaces — strip by default, but each gets its own colour.
+  road:           { color: 0x4a4a52, group: 'strip' },
+  parking:        { color: 0x5e5b58, group: 'strip' },
+  sidewalk:       { color: 0x6b6873, group: 'strip' },
+  'other-ground': { color: 0x55555e, group: 'strip' },
+  terrain:        { color: 0x4e6b3a, group: 'strip' },
+  // Nature.
+  vegetation:     { color: 0x3e8a3e, group: 'strip' },
+  // Vehicles.
+  car:            { color: 0xc0392b, group: 'strip' },
+  bicycle:        { color: 0xd64545, group: 'strip' },
+  motorcycle:     { color: 0xe07b50, group: 'strip' },
+  truck:          { color: 0x8b3a3a, group: 'strip' },
+  'other-vehicle': { color: 0xa84d4d, group: 'strip' },
+  // People.
+  person:         { color: 0xffb6c1, group: 'strip' },
+  bicyclist:      { color: 0xff9aa2, group: 'strip' },
+  motorcyclist:   { color: 0xff7f7f, group: 'strip' },
+
   // Generic / fallback labels:
-  unknown:  { color: 0x4f8ef7, group: 'keep'  },
+  unknown:        { color: 0x4f8ef7, group: 'keep'  },
 };
+
+// Pool of well-separated fallback colours used when the segmenter
+// emits a class name we don't recognise. Cycled so each unknown class
+// still gets a distinct colour rather than all of them sharing magenta.
+const FALLBACK_COLORS = [
+  0xff7f50, 0x6495ed, 0xdda0dd, 0x90ee90, 0xffa07a, 0x20b2aa,
+  0xee82ee, 0xf0e68c, 0xadd8e6, 0xb0c4de, 0xda70d6, 0xff6347,
+];
+const _fallbackForName = new Map();
 function infoFor(name) {
-  return CLASS_INFO[name] || { color: 0xff00ff, group: 'strip' };
+  if (CLASS_INFO[name]) return CLASS_INFO[name];
+  // Stable colour per unrecognised name, so re-renders look the same.
+  if (!_fallbackForName.has(name)) {
+    const color = FALLBACK_COLORS[_fallbackForName.size % FALLBACK_COLORS.length];
+    _fallbackForName.set(name, { color, group: 'strip' });
+  }
+  return _fallbackForName.get(name);
 }
 
 // ── Three.js setup ─────────────────────────────────────────────────────────

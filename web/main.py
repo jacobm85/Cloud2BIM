@@ -554,6 +554,15 @@ def _describe_jobs_for_active_list() -> list:
             # ("Avbrutet") is honest about what we know.
             status = "interrupted" if mem.get("rehydrated") else "failed"
             current_stage = mem.get("current_stage")
+        elif mem and mem.get("status") == "completed":
+            # A stage finished cleanly but the whole pipeline isn't done
+            # (no output.ifc yet). The wizard is parked between stages
+            # waiting for the user to inspect the review and click
+            # Fortsätt — exactly the case we used to lose from the
+            # active list because the in-memory status moved from
+            # 'running' to 'completed'.
+            status = "awaiting_input"
+            current_stage = None
         elif not completed_stages:
             status = "pending"
             current_stage = None
@@ -614,7 +623,13 @@ def _describe_jobs_for_active_list() -> list:
 
     # Sort: running first (so the busy stuff is at the top), then
     # newest-created — feels right when checking back later.
-    _status_order = {"running": 0, "failed": 1, "interrupted": 2, "pending": 3}
+    _status_order = {
+        "running": 0,
+        "awaiting_input": 1,
+        "failed": 2,
+        "interrupted": 3,
+        "pending": 4,
+    }
     result.sort(key=lambda r: (_status_order.get(r["status"], 9), r.get("created_at") or "", r["job_id"]))
     return result
 
