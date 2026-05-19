@@ -409,11 +409,12 @@ def _build_segmentation_cfg(request) -> dict:
 async def list_reusable_jobs():
     """Return jobs that can be re-run.
 
-    Lists any job whose work_dir has cached state — either ``labels.npy``
-    (skips the slow ML step on re-run) or ``converted_input.xyz`` (v1
-    legacy XYZ that skips conversion). The ``output_ifc_exists`` flag
-    tells the wizard whether to jump straight to step 4 (results) on
-    click vs fall back to step 2 (settings for a fresh run).
+    Any job_dir that holds a prepared point cloud is eligible — either
+    ``points.npz`` (v2/v3 workflows, including post-crop), ``labels.npy``
+    (ML pre-cache) or ``converted_input.xyz`` (v1 legacy XYZ). Re-runs
+    skip the prepare stage entirely by copying points.npz across. The
+    ``output_ifc_exists`` flag tells the wizard whether to jump straight
+    to step 4 (results) or fall back to step 2 (settings).
     """
     result = []
     if not JOBS_DIR.exists():
@@ -421,13 +422,22 @@ async def list_reusable_jobs():
     for job_dir in sorted(JOBS_DIR.iterdir(), key=lambda d: d.stat().st_mtime, reverse=True):
         if not job_dir.is_dir():
             continue
+        npz = job_dir / "points.npz"
         labels = job_dir / "labels.npy"
         xyz = job_dir / "converted_input.xyz"
-        if not labels.exists() and not xyz.exists():
+        if not (npz.exists() or labels.exists() or xyz.exists()):
             continue
         info_path = job_dir / "job_info.json"
         info = json.loads(info_path.read_text()) if info_path.exists() else {}
-        cached_size_mb = round(((labels if labels.exists() else xyz).stat().st_size) / 1_000_000, 1)
+        # Show the size of whichever cached artefact is the meaty one
+        # — npz is the most useful (preserves crops); fall back to
+        # labels/xyz when the job pre-dates the npz pipeline.
+        if npz.exists():
+            cached_size_mb = round(npz.stat().st_size / 1_000_000, 1)
+        elif labels.exists():
+            cached_size_mb = round(labels.stat().st_size / 1_000_000, 1)
+        else:
+            cached_size_mb = round(xyz.stat().st_size / 1_000_000, 1)
         ifc_path = job_dir / "output.ifc"
         result.append({
             "job_id": job_dir.name,
@@ -716,18 +726,38 @@ async def create_job(request: CreateJobRequest):
         raise HTTPException(400, "Either source_job_id, upload_id or network_path is required")
 
     preprocess_fn = None
+    # When True the new job inherits the prepared (and possibly cropped)
+    # points.npz from the source job, so the prepare stage is skipped
+    # and the wizard auto-starts at segment.
+    reuse_prepared_points = False
 
-    # ── Re-use an existing converted XYZ from a previous job ─────────────
+    # ── Re-use a previous job's prepared point cloud ─────────────────────
+    # Two compatible paths:
+    #   1. points.npz exists  (v2/v3 jobs — the modern path)
+    #   2. converted_input.xyz exists  (legacy v1 jobs)
+    # We prefer (1) because it preserves the user's polygon/Z crops from
+    # the source job; (2) re-runs prepare from raw XYZ.
     if request.source_job_id:
-        source_xyz = JOBS_DIR / request.source_job_id / "converted_input.xyz"
-        if not source_xyz.exists():
-            raise HTTPException(404, "Source job XYZ not found")
-        source_info_path = JOBS_DIR / request.source_job_id / "job_info.json"
+        source_dir = JOBS_DIR / request.source_job_id
+        source_npz = source_dir / "points.npz"
+        source_xyz = source_dir / "converted_input.xyz"
+        if not source_npz.exists() and not source_xyz.exists():
+            raise HTTPException(404, "Source job har varken points.npz eller converted_input.xyz — det finns inget att återanvända")
+        source_info_path = source_dir / "job_info.json"
         source_info = json.loads(source_info_path.read_text()) if source_info_path.exists() else {}
-        input_path = str(source_xyz)
         original_filename = source_info.get("original_filename", request.source_job_id)
-        e57_input = False
-        pipeline_input = input_path
+        if source_npz.exists():
+            reuse_prepared_points = True
+            # input_files is purely metadata at this point — prepare is
+            # skipped, so the file isn't actually re-read. We keep the
+            # original filename for display + stash a sentinel path so
+            # downstream code that introspects io.input_files doesn't
+            # see a None.
+            input_path = source_info.get("original_filename", "")
+            pipeline_input = input_path
+        else:
+            input_path = str(source_xyz)
+            pipeline_input = input_path
 
     # ── Resolve uploaded or network file ─────────────────────────────────
     elif request.upload_id:
@@ -839,15 +869,44 @@ async def create_job(request: CreateJobRequest):
     with open(config_path, "w") as fh:
         yaml.dump(config, fh, allow_unicode=True)
 
+    # If we're re-running an old job with new settings, copy its prepared
+    # points.npz into the new job dir and pre-mark the prepare stage as
+    # done in state.json. The user's polygon/Z crops carry over without
+    # them needing to redo the prepare review.
+    if reuse_prepared_points:
+        import shutil
+        from datetime import datetime as _dt2
+        src_npz = JOBS_DIR / request.source_job_id / "points.npz"
+        shutil.copy2(src_npz, job_dir / "points.npz")
+        (job_dir / "state.json").write_text(json.dumps(
+            {"prepare": _dt2.now().isoformat()}, indent=2,
+        ))
+
     job_manager.create_job(job_id, input_path, mode=request.mode)
 
     if request.mode == "stepwise":
-        # Run only `prepare` automatically; pause so the user can crop the
-        # point cloud with a polygon on the top-down preview before the rest
-        # of the pipeline runs.
+        # Re-run case: prepare is already done (we just copied points.npz).
+        # Start at segment so the wizard picks up at the first stage the
+        # new settings can actually affect.
+        # Fresh-job case: run prepare; pause for the user to crop before
+        # the rest of the pipeline runs.
+        first_stage = "segment" if reuse_prepared_points else "prepare"
         thread = threading.Thread(
             target=job_manager.run_stages_async,
-            args=(job_id, str(config_path), ["prepare"]),
+            args=(job_id, str(config_path), [first_stage]),
+            daemon=True,
+        )
+    elif reuse_prepared_points:
+        # Full-mode re-run with a reused points.npz: cloud2bim's full
+        # ``run`` subcommand re-reads input_files from scratch and would
+        # ignore the carried-over points entirely. Instead, chain every
+        # stage after prepare via run_stages_async so the rest of the
+        # pipeline executes end-to-end without going back to raw input.
+        from cloud2bim.stepwise import STAGES as _STAGES
+        remaining = [s for s in _STAGES if s != "prepare"]
+        thread = threading.Thread(
+            target=job_manager.run_stages_async,
+            args=(job_id, str(config_path), remaining),
             daemon=True,
         )
     else:
