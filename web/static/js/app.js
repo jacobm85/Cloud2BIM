@@ -577,17 +577,61 @@ function applyAlgorithmSectionVisibility() {
 // full-mode panels so the user knows the pipeline is alive and roughly
 // when it'll finish, rather than staring at a frozen-looking log.
 const PROGRESS_RE = /\[PROGRESS\]\s+(\S+)\s+(\d+)\/(\d+)\s+eta=(-?\d+)/;
+// Raw progress labels come from cloud2bim modules and are mostly opaque
+// ("segment", "prepare scan 0", "ptx-read"). Map them to a friendly
+// Swedish term — and fall back to "Arbetar" so a label nobody added a
+// translation for doesn't surface as raw English.
+const PROGRESS_LABELS = {
+  segment:    'ML-segmentering',
+  prepare:    'Förberedelse',
+  'ptx-read': 'Läser PTX',
+  'las-read': 'Läser LAS',
+  'e57-read': 'Läser E57',
+};
+function _friendlyProgressLabel(raw) {
+  if (PROGRESS_LABELS[raw]) return PROGRESS_LABELS[raw];
+  // "prepare scan 3" → "Förberedelse (scan 3)"
+  if (raw.startsWith('prepare')) {
+    const rest = raw.slice('prepare'.length).trim();
+    return rest ? `Förberedelse (${rest})` : 'Förberedelse';
+  }
+  return 'Arbetar';
+}
+
+// Stage banner line (logged by run_stages_async). Used to clear stale
+// progress UI between stages so a finished segment bar doesn't linger
+// while slabs is running with nothing to report.
+const STAGE_BANNER_RE = /── stage:\s*(\S+)/;
+
+function _resetProgressCard(prefix) {
+  const card = document.getElementById(prefix);
+  if (!card) return;
+  card.style.display = 'none';
+  const fill = document.getElementById(prefix + '-fill');
+  if (fill) fill.style.width = '0%';
+  const lbl = document.getElementById(prefix + '-label');
+  if (lbl) lbl.textContent = '';
+  const eta = document.getElementById(prefix + '-eta');
+  if (eta) eta.textContent = '';
+}
+
 function handleProgressLine(line, target /* 'full' | 'wizard' */) {
+  const prefix = target === 'full' ? 'full-progress' : 'wizard-progress';
+  if (STAGE_BANNER_RE.test(line)) {
+    // A new stage just started — wipe whatever the previous stage left
+    // on the progress widget so the user isn't shown stale numbers.
+    _resetProgressCard(prefix);
+    return;
+  }
   const m = line.match(PROGRESS_RE);
   if (!m) return;
-  const [, label, done, total, eta] = m;
+  const [, rawLabel, done, total, eta] = m;
   const pct = Math.round((parseInt(done) / parseInt(total)) * 100);
-  const prefix = target === 'full' ? 'full-progress' : 'wizard-progress';
   const card = document.getElementById(prefix);
   if (!card) return;
   card.style.display = 'block';
   document.getElementById(prefix + '-label').textContent =
-    `${label}: ${done}/${total} (${pct}%)`;
+    `${_friendlyProgressLabel(rawLabel)}: ${done}/${total} (${pct}%)`;
   const etaSec = parseInt(eta);
   let etaStr = '';
   if (etaSec >= 0) {
@@ -779,7 +823,7 @@ document.getElementById('btn-run').addEventListener('click', async () => {
   function appendLog(text) {
     // [PROGRESS] lines drive the bar — don't pollute the log scroll
     // with the 100 individual progress pings.
-    if (typeof handleProgressLine === 'function' && text.includes('[PROGRESS]')) {
+    if (typeof handleProgressLine === 'function' && (text.includes('[PROGRESS]') || text.includes('── stage:'))) {
       handleProgressLine(text, 'full');
       return;
     }
@@ -1013,7 +1057,7 @@ const wizard = {
 function wizardLog(text) {
   // Route [PROGRESS] pings into the progress bar so the log isn't
   // flooded with 100 individual rows per long stage.
-  if (typeof handleProgressLine === 'function' && text.includes('[PROGRESS]')) {
+  if (typeof handleProgressLine === 'function' && (text.includes('[PROGRESS]') || text.includes('── stage:'))) {
     handleProgressLine(text, 'wizard');
     return;
   }
@@ -1130,6 +1174,11 @@ window.reattachFullLog = function (jobId) {
     if (text.includes('[PROGRESS]')) {
       handleProgressLine(text, 'full');
       return;
+    }
+    // Stage banners reset the progress card but still belong in the
+    // log scroll, so don't return early like [PROGRESS] does.
+    if (text.includes('── stage:')) {
+      handleProgressLine(text, 'full');
     }
     const ln = document.createElement('div');
     ln.className = 'log-line';
@@ -1493,8 +1542,12 @@ async function renderPrepareReview() {
       document.getElementById('crop-h-panel').style.display  = which === 'h'  ? 'block' : 'none';
       document.getElementById('crop-vp-panel').style.display = which === 'vp' ? 'block' : 'none';
       document.getElementById('crop-v-panel').style.display  = which === 'v'  ? 'block' : 'none';
-      // Lazy-load the side view the first time the polygon tab is opened.
-      if (which === 'vp' && !document.getElementById('sideview-img').src) {
+      // Lazy-init the side-view the first time the polygon tab is opened.
+      // Using a dataset flag instead of !img.src — browsers resolve a
+      // literal src="" against the page URL so img.src is never falsy.
+      const sv = document.getElementById('sideview-img');
+      if (which === 'vp' && sv && sv.dataset.vpReady !== '1') {
+        sv.dataset.vpReady = '1';
         setupVerticalPolygonCropTool('auto');
       }
     });
@@ -1550,7 +1603,13 @@ function setupVerticalPolygonCropTool(initialAxis) {
     canvas.style.height = img.clientHeight + 'px';
     redraw();
   }
-  img.addEventListener('load', sync);
+  // .onload/.onresize overwrite previous bindings — safe if the setup
+  // function gets called more than once (e.g. on re-attach to a job).
+  img.onload  = sync;
+  img.onerror = () => {
+    status.style.color = 'var(--danger)';
+    status.textContent = '✗ Sidovy-bilden kunde inte laddas (URL: ' + img.src + ')';
+  };
   window.addEventListener('resize', sync);
 
   // Map pixel (px, py) → world (h, z). Image y is top-down, world Z is up.
@@ -1586,27 +1645,28 @@ function setupVerticalPolygonCropTool(initialAxis) {
     }
   }
 
-  canvas.addEventListener('click', e => {
+  canvas.onclick = (e) => {
     const rect = canvas.getBoundingClientRect();
     const px = (e.clientX - rect.left) * (canvas.width / rect.width);
     const py = (e.clientY - rect.top)  * (canvas.height / rect.height);
     pts.push([px, py]);
     redraw();
-  });
-  canvas.addEventListener('dblclick', e => { e.preventDefault(); if (pts.length >= 3) applyCrop(); });
+  };
+  canvas.ondblclick = (e) => { e.preventDefault(); if (pts.length >= 3) applyCrop(); };
 
   undoBtn.onclick  = () => { pts.pop(); redraw(); };
   clearBtn.onclick = () => { pts.length = 0; redraw(); };
   applyBtn.onclick = applyCrop;
 
-  // Axis sub-tabs (Auto / XZ / YZ).
+  // Axis sub-tabs (Auto / XZ / YZ). .onclick instead of addEventListener
+  // so re-attaching doesn't pile up duplicate handlers.
   document.querySelectorAll('[data-vpaxis]').forEach(el => {
-    el.addEventListener('click', () => {
+    el.onclick = () => {
       document.querySelectorAll('[data-vpaxis]').forEach(t => t.classList.remove('active'));
       el.classList.add('active');
       axis = el.dataset.vpaxis;
       loadSideView(axis);
-    });
+    };
   });
 
   async function applyCrop() {

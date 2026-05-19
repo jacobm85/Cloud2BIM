@@ -451,7 +451,14 @@ def stage_openings(cfg: Config) -> None:
 
 
 def stage_columns(cfg: Config) -> None:
-    """Per-storey column detection."""
+    """Per-storey column detection.
+
+    When ``pipeline_mode`` is ml or hybrid AND the user has assigned
+    classes to ``column_classes`` (e.g., pole/trunk from SemanticKITTI),
+    the detector is restricted to those labels so it doesn't pick up
+    every vertical blob in the storey. Geometric mode (or empty
+    column_classes) keeps the original raw-geometry behaviour.
+    """
     log.info("─── columns ───")
     t0 = time.time()
     if not cfg.columns.enabled:
@@ -463,6 +470,19 @@ def stage_columns(cfg: Config) -> None:
     slabs = load_slabs(cfg)
     storey_walls = load_walls(cfg) if (Path(cfg.io.work_dir) / "walls.pkl").exists() else []
 
+    labels = None
+    column_classes: list[str] = []
+    if cfg.pipeline_mode in ("ml", "hybrid"):
+        try:
+            labels = load_labels(cfg)
+            column_classes = list(cfg.segmentation.column_classes or [])
+        except FileNotFoundError:
+            log.warning(
+                "Columns: pipeline_mode=%s but labels.npy missing — "
+                "falling back to geometric column detection",
+                cfg.pipeline_mode,
+            )
+
     storey_columns: list[list[Column]] = []
     for i in range(max(0, len(slabs) - 1)):
         z_floor = slabs[i].bottom_z + slabs[i].thickness
@@ -470,6 +490,14 @@ def stage_columns(cfg: Config) -> None:
         storey_mask = (pts[:, 2] >= z_floor) & (pts[:, 2] <= z_ceiling)
         storey_pts = pts[storey_mask]
         walls_here = storey_walls[i] if i < len(storey_walls) else []
+        # Slice labels in lock-step with the storey points so the index
+        # alignment inside detect_columns is preserved.
+        storey_labels = None
+        if labels is not None:
+            storey_labels = SemanticLabels(
+                label_ids=labels.label_ids[storey_mask],
+                label_names=labels.label_names,
+            )
         try:
             cols = detect_columns(
                 storey_points=storey_pts,
@@ -480,6 +508,8 @@ def stage_columns(cfg: Config) -> None:
                 cfg=cfg.columns,
                 pc_resolution=cfg.slabs.pc_resolution,
                 grid_coefficient=cfg.slabs.grid_coefficient,
+                semantic_labels=storey_labels,
+                column_classes=column_classes,
             )
         except Exception:
             log.exception("Storey %d column detection failed", i)

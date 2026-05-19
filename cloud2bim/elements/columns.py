@@ -21,6 +21,7 @@ from skimage.morphology import closing, footprint_rectangle
 
 from cloud2bim.config import ColumnConfig
 from cloud2bim.logging import get_logger
+from cloud2bim.segmentation.base import SemanticLabels
 
 log = get_logger(__name__)
 
@@ -47,17 +48,36 @@ def detect_columns(
     cfg: ColumnConfig,
     pc_resolution: float,
     grid_coefficient: int,
+    semantic_labels: Optional[SemanticLabels] = None,
+    column_classes: Optional[List[str]] = None,
 ) -> List[Column]:
     """Find columns in one storey's points.
 
     ``walls`` is the list of detected Wall axes — used to mask out wall
-    regions so column candidates can't overlap them.
+    regions so column candidates can't overlap them. When
+    ``semantic_labels`` and a non-empty ``column_classes`` are supplied,
+    only points labelled as one of those classes are considered — for
+    outdoor SemanticKITTI scans this stops trees and lamp posts from
+    spilling into the geometric column detector. Without labels (or
+    when the class list is empty), the detector falls back to the
+    original geometric behaviour over the whole storey.
     """
     if not cfg.enabled:
         return []
     if len(storey_points) == 0:
         log.warning("Storey %d (columns): empty point cloud", storey_idx)
         return []
+
+    if semantic_labels is not None and column_classes:
+        mask = semantic_labels.mask_for(column_classes)
+        n_before = len(storey_points)
+        storey_points = storey_points[mask]
+        log.info(
+            "Storey %d (columns): label filter %s kept %d / %d points",
+            storey_idx, list(column_classes), len(storey_points), n_before,
+        )
+        if len(storey_points) == 0:
+            return []
 
     storey_height = max(0.1, z_ceiling - z_floor)
 
