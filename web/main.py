@@ -1391,12 +1391,20 @@ async def crop_points(job_id: str, req: CropRequest):
 
 
 @app.get("/api/jobs/{job_id}/pointcloud.bin")
-async def pointcloud_binary(job_id: str, max_points: int = 80000):
-    """Return a decimated point cloud as raw Float32Array bytes (XYZ triplets).
+async def pointcloud_binary(job_id: str, max_points: int = 80000, rgb: int = 0):
+    """Return a decimated point cloud as raw Float32Array bytes.
 
-    Used by the 3D viewer to overlay the prepared point cloud on top of the
-    IFC mesh for visual verification. Decimated to keep WebGL happy and the
-    network payload bounded — points.npz can be millions of points.
+    ``rgb=0`` (default) → XYZ triplets, 3 floats per point (backward-
+    compatible with older viewers). ``rgb=1`` → XYZRGB sextuplets, 6
+    floats per point, but only if the prepared cloud actually has RGB.
+    The ``X-Has-Rgb`` response header is ``1`` when RGB is included so
+    the client can pick its buffer stride deterministically rather than
+    sniffing it from the payload length.
+
+    RGB values are normalised to 0–1 before transport: LAS uint16
+    colour, LAZ uint8 colour and already-normalised float arrays each
+    look different in numpy and all need to look the same in WebGL's
+    vertex-colour buffer.
     """
     from fastapi.responses import Response
     pts_path = JOBS_DIR / job_id / "points.npz"
@@ -1407,14 +1415,37 @@ async def pointcloud_binary(job_id: str, max_points: int = 80000):
         import numpy as _np
         data = _np.load(str(pts_path))
         xyz = data["xyz"]
+        rgb_arr = data["rgb"] if (rgb == 1 and "rgb" in data.files) else None
         n = len(xyz)
         if n > max_points and max_points > 0:
             stride = max(1, n // max_points)
             xyz = xyz[::stride]
-        return xyz.astype(_np.float32, copy=False).tobytes()
+            if rgb_arr is not None:
+                rgb_arr = rgb_arr[::stride]
+        if rgb_arr is None:
+            return xyz.astype(_np.float32, copy=False).tobytes(), False
+        # Heuristic normalisation. LAS 1.2/1.4 stores colour as uint16
+        # (0-65535); some readers downsample to uint8 (0-255); a few
+        # already give us 0-1 floats. Choose by the array's max so we
+        # don't double-divide a float cloud that's already normalised.
+        rgb_f = rgb_arr.astype(_np.float32, copy=False)
+        max_v = float(rgb_f.max()) if rgb_f.size else 1.0
+        if max_v > 256.0:
+            rgb_f = rgb_f / 65535.0
+        elif max_v > 1.5:
+            rgb_f = rgb_f / 255.0
+        rgb_f = _np.clip(rgb_f, 0.0, 1.0)
+        packed = _np.empty((len(xyz), 6), dtype=_np.float32)
+        packed[:, :3] = xyz.astype(_np.float32, copy=False)
+        packed[:, 3:6] = rgb_f
+        return packed.tobytes(), True
 
-    payload = await asyncio.to_thread(_load)
-    return Response(content=payload, media_type="application/octet-stream")
+    payload, has_rgb = await asyncio.to_thread(_load)
+    return Response(
+        content=payload,
+        media_type="application/octet-stream",
+        headers={"X-Has-Rgb": "1" if has_rgb else "0"},
+    )
 
 
 _CLASS_ROLE_FIELDS = (

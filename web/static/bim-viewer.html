@@ -46,6 +46,10 @@
     #pc-toggle.on { border-color: #4f8ef7; color: #4f8ef7; }
     #stats { position: absolute; bottom: 12px; left: 12px; font-size: 11px;
              color: #4f5580; }
+    #nav-hint { position: absolute; top: 12px; left: 12px; font-size: 11px;
+                color: #7b82a0; background: rgba(26,29,39,.88); border: 1px solid #2e3350;
+                border-radius: 7px; padding: 6px 10px; backdrop-filter: blur(4px);
+                pointer-events: none; transition: opacity .4s; }
   </style>
 </head>
 <body>
@@ -83,6 +87,7 @@
     </div>
   </div>
   <div id="stats"></div>
+  <div id="nav-hint">Dubbelklicka för att sätta rotationscentrum · scrolla för zoom · högerklicka + dra för pan</div>
 </div>
 
 <script type="importmap">
@@ -292,36 +297,123 @@ if (pcRow) {
 // ── Point cloud overlay ───────────────────────────────────────────────────
 async function loadPointCloud() {
   try {
-    const res = await fetch(`/api/jobs/${jobId}/pointcloud.bin?max_points=150000`);
+    // Ask the backend for RGB; it returns plain XYZ when the prepared
+    // cloud has no colour. The X-Has-Rgb header tells us which.
+    const res = await fetch(`/api/jobs/${jobId}/pointcloud.bin?max_points=150000&rgb=1`);
     if (!res.ok) return;  // silently skip — viewer still works
+    const hasRgb = res.headers.get('X-Has-Rgb') === '1';
     const buf = await res.arrayBuffer();
     const arr = new Float32Array(buf);
     if (arr.length === 0) return;
-    pointCloudCount = arr.length / 3;
+
+    const stride = hasRgb ? 6 : 3;
+    pointCloudCount = arr.length / stride;
+    const positions = new Float32Array(pointCloudCount * 3);
+    const colors = hasRgb ? new Float32Array(pointCloudCount * 3) : null;
+    for (let i = 0; i < pointCloudCount; i++) {
+      positions[i * 3 + 0] = arr[i * stride + 0];
+      positions[i * 3 + 1] = arr[i * stride + 1];
+      positions[i * 3 + 2] = arr[i * stride + 2];
+      if (colors) {
+        colors[i * 3 + 0] = arr[i * stride + 3];
+        colors[i * 3 + 1] = arr[i * stride + 4];
+        colors[i * 3 + 2] = arr[i * stride + 5];
+      }
+    }
+
     const geom = new THREE.BufferGeometry();
-    geom.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    if (colors) geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
     // World-space points so they scale with zoom alongside the IFC mesh.
     // 4 cm is the smallest size where typical scan resolution (1–2 cm
     // post-dilution) still reads as a dot at typical view distances.
     const mat = new THREE.PointsMaterial({
-      color: 0x9dd4ee, size: 0.04, sizeAttenuation: true,
+      vertexColors: !!colors,
+      color: colors ? 0xffffff : 0x9dd4ee,
+      size: 0.04, sizeAttenuation: true,
     });
     pointCloud = new THREE.Points(geom, mat);
     pointCloud.visible = true;  // on by default so the user sees it
     root.add(pointCloud);
 
-    // Don't re-fit the camera — that pushed it out to include far-away
-    // peripheral points and the IFC became invisible. The IFC fit done
-    // above is the right framing; the user can orbit out to see more of
-    // the point cloud if they need to.
     if (pcRow) {
       pcRow.style.display = '';
       pcRow.classList.remove('off');
+      // Reflect "RGB" status in the legend dot — easier than another row.
+      const dot = pcRow.querySelector('.dot');
+      if (dot && hasRgb) {
+        dot.style.background = 'linear-gradient(90deg,#e85a5a,#6bd06b,#5a7dff)';
+        dot.title = 'Punktmolnet visas i sina riktiga RGB-färger';
+      }
       refreshLegendCounts();
     }
   } catch (e) { /* point cloud is optional */ }
 }
 loadPointCloud();
+
+// ── Pick orbit centre (double-click) ──────────────────────────────────────
+// OrbitControls always orbits around controls.target. Default target is
+// the IFC bbox centre, which is fine for an overview but useless when
+// the user zooms into a corner of a 100 m building and wants to rotate
+// "around what I'm looking at". Double-click sets target to whatever
+// is under the cursor (mesh face or point), and a small marker ring
+// makes the choice visible.
+const raycaster = new THREE.Raycaster();
+raycaster.params.Points = { threshold: 0.08 };  // need a tolerance to actually hit individual points
+const ndc = new THREE.Vector2();
+
+const targetMarker = (() => {
+  const ring = new THREE.Mesh(
+    new THREE.RingGeometry(0.18, 0.22, 32),
+    new THREE.MeshBasicMaterial({ color: 0x4f8ef7, side: THREE.DoubleSide, depthTest: false, transparent: true, opacity: 0.85 }),
+  );
+  // Render last so it stays visible inside walls.
+  ring.renderOrder = 999;
+  ring.visible = false;
+  scene.add(ring);
+  return ring;
+})();
+
+function placeMarkerAt(worldPos) {
+  targetMarker.position.copy(worldPos);
+  // Always face the camera so the ring reads as a flat disc no matter
+  // how the user has rotated the scene.
+  targetMarker.lookAt(camera.position);
+  targetMarker.visible = true;
+}
+
+renderer.domElement.addEventListener('dblclick', (e) => {
+  const rect = renderer.domElement.getBoundingClientRect();
+  ndc.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1;
+  ndc.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObject(root, true);
+  if (hits.length === 0) return;
+  // Use the closest hit; OrbitControls handles the smooth re-orient.
+  controls.target.copy(hits[0].point);
+  controls.update();
+  placeMarkerAt(hits[0].point);
+});
+
+// Keep the marker oriented towards the camera every frame — the
+// userland animate() loop calls renderer.render so we hook this
+// in by overriding controls.dispatchEvent... simpler: re-aim in
+// the existing animate() loop below by exposing the marker.
+window._aimOrbitMarker = () => {
+  if (targetMarker.visible) targetMarker.lookAt(camera.position);
+};
+
+// Small hint in the header so the user discovers the feature.
+const hdr = document.getElementById('hdr');
+if (hdr) hdr.title = 'Dubbelklicka var som helst i vyn för att sätta rotationscentrum där';
+
+// Fade out the bottom-left hint after a few seconds — it's discoverable
+// not load-bearing, so don't keep it on screen forever.
+setTimeout(() => {
+  const hint = document.getElementById('nav-hint');
+  if (hint) hint.style.opacity = '0';
+}, 8000);
 
 // Hide overlay
 overlay.style.display = 'none';
@@ -330,6 +422,7 @@ overlay.style.display = 'none';
 (function animate() {
   requestAnimationFrame(animate);
   controls.update();
+  if (window._aimOrbitMarker) window._aimOrbitMarker();
   renderer.render(scene, camera);
 })();
 </script>
