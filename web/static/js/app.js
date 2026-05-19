@@ -2156,9 +2156,31 @@ async function renderSlabsReview() {
             <button class="btn btn-outline" id="btn-apply-slab-select">Tillämpa</button>
             <span id="slab-select-status" style="font-size:12px;color:var(--text-dim);align-self:center"></span>
           </div>
+
+          <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+            <div style="font-weight:600;font-size:12px;margin-bottom:6px">Lägg till bjälklag som detektorn missade</div>
+            <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px">
+              Användbart när v2 missar t.ex. en mellanvåning där punktdensiteten
+              är låg. Polygonen härleds automatiskt från punkter i Z-intervallet
+              — om för få finns där används största befintliga bjälklagets kontur.
+            </div>
+            <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap">
+              <div>
+                <label style="display:block;font-size:11px;color:var(--text-dim)">Botten Z (m)</label>
+                <input type="number" id="new-slab-bottom" step="0.01" placeholder="t.ex. 2.85" style="width:100px;font-size:12px">
+              </div>
+              <div>
+                <label style="display:block;font-size:11px;color:var(--text-dim)">Tjocklek (m)</label>
+                <input type="number" id="new-slab-thick" step="0.005" min="0.01" value="0.30" style="width:90px;font-size:12px">
+              </div>
+              <button class="btn btn-outline" id="btn-add-slab" style="font-size:12px">+ Lägg till</button>
+              <span id="add-slab-status" style="font-size:11px;color:var(--text-dim);align-self:center"></span>
+            </div>
+          </div>
         </div>
       </div>`;
     document.getElementById('btn-apply-slab-select').onclick = applySlabSelection;
+    document.getElementById('btn-add-slab').onclick = addSlab;
     extra.querySelectorAll('.slab-bottom, .slab-thick').forEach(inp => {
       inp.addEventListener('input', () => {
         const idx = parseInt(inp.dataset.idx, 10);
@@ -2213,6 +2235,43 @@ async function applySlabSelection() {
     wizard.slabsData = null;
     wizard.bands = [];
     setTimeout(renderSlabsReview, 300);
+  } catch (e) {
+    status.style.color = 'var(--danger)';
+    status.textContent = '✗ ' + e.message;
+  }
+}
+
+async function addSlab() {
+  const bEl = document.getElementById('new-slab-bottom');
+  const tEl = document.getElementById('new-slab-thick');
+  const status = document.getElementById('add-slab-status');
+  const bottom = parseFloat(bEl.value);
+  const thickness = parseFloat(tEl.value);
+  if (!Number.isFinite(bottom) || !Number.isFinite(thickness) || thickness <= 0) {
+    status.style.color = 'var(--danger)';
+    status.textContent = '✗ Ange botten Z och positiv tjocklek';
+    return;
+  }
+  status.style.color = 'var(--text-dim)';
+  status.textContent = 'Lägger till…';
+  try {
+    const res = await fetch('/api/jobs/' + wizard.jobId + '/slabs/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bottom_z: bottom, thickness }),
+    });
+    if (!res.ok) throw new Error(await res.text() || ('HTTP ' + res.status));
+    const r = await res.json();
+    status.style.color = 'var(--success)';
+    const srcLabel = {
+      'z-slice': 'Z-slice-hull',
+      'biggest-existing': 'största befintliga bjälklaget',
+      'full-cloud': 'hela punktmolnets hull',
+    }[r.polygon_source] || r.polygon_source;
+    status.textContent = `✓ Tillagt (kontur: ${srcLabel}, ${r.polygon_vertices} hörn). Nu ${r.count} bjälklag.`;
+    wizard.slabsData = null;
+    wizard.bands = [];
+    setTimeout(renderSlabsReview, 400);
   } catch (e) {
     status.style.color = 'var(--danger)';
     status.textContent = '✗ ' + e.message;

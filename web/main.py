@@ -2435,6 +2435,118 @@ class SlabEditRequest(BaseModel):
     edits: List[SlabEdit]
 
 
+class SlabAddRequest(BaseModel):
+    """A user-defined slab the detector missed.
+
+    Polygon comes from existing slabs or the point cloud — the user
+    only has to give us Z + thickness. The result is inserted into
+    slabs.pkl in Z order so downstream stages see slabs bottom-to-top.
+    """
+    bottom_z: float
+    thickness: float
+
+
+@app.post("/api/jobs/{job_id}/slabs/add")
+async def add_slab(job_id: str, req: SlabAddRequest):
+    """Insert a manually-defined slab at the given Z and thickness.
+
+    Footprint derivation, in order of preference:
+      1. Convex hull of points within the new slab's Z slice (matches
+         the detector's own polygon style — v2 occasionally misses a
+         floor that's actually there in the cloud, just below the
+         peak-detection threshold).
+      2. Outline of the largest existing slab (covers the case where
+         the user is filling in an entirely missing storey level that
+         barely has horizontal points — e.g. an attic floor).
+      3. Convex hull of the whole prepared cloud — final fallback so
+         we never persist an empty polygon.
+    """
+    import pickle
+    job_dir = JOBS_DIR / job_id
+    slabs_path = job_dir / "slabs.pkl"
+    pts_path = job_dir / "points.npz"
+    if not slabs_path.exists():
+        raise HTTPException(404, "Slabs not yet computed")
+    if req.thickness <= 0:
+        raise HTTPException(400, "thickness must be positive")
+
+    def _add():
+        import numpy as _np
+        from cloud2bim.elements.slabs import Slab as _Slab
+        with open(slabs_path, "rb") as fh:
+            slabs = pickle.load(fh)
+        # 1. Try Z-slice hull from the prepared cloud
+        poly_x, poly_y, source = None, None, "fallback"
+        if pts_path.exists():
+            data = _np.load(str(pts_path))
+            xyz = data["xyz"]
+            z_lo = req.bottom_z
+            z_hi = req.bottom_z + req.thickness
+            mask = (xyz[:, 2] >= z_lo) & (xyz[:, 2] <= z_hi)
+            slice_pts = xyz[mask]
+            if len(slice_pts) >= 50:
+                try:
+                    from scipy.spatial import ConvexHull
+                    hull = ConvexHull(slice_pts[:, :2])
+                    poly_x = slice_pts[hull.vertices, 0].astype(_np.float64)
+                    poly_y = slice_pts[hull.vertices, 1].astype(_np.float64)
+                    source = "z-slice"
+                except Exception:
+                    poly_x = poly_y = None
+        # 2. Reuse the largest existing slab's outline
+        if poly_x is None and slabs:
+            biggest = max(
+                slabs,
+                key=lambda s: float(_np.ptp(s.polygon_x) * _np.ptp(s.polygon_y))
+                if len(s.polygon_x) else 0.0,
+            )
+            poly_x = _np.asarray(biggest.polygon_x, dtype=_np.float64).copy()
+            poly_y = _np.asarray(biggest.polygon_y, dtype=_np.float64).copy()
+            source = "biggest-existing"
+        # 3. Last-ditch: full-cloud convex hull
+        if poly_x is None and pts_path.exists():
+            data = _np.load(str(pts_path))
+            xy = data["xyz"][:, :2]
+            try:
+                from scipy.spatial import ConvexHull
+                hull = ConvexHull(xy)
+                poly_x = xy[hull.vertices, 0].astype(_np.float64)
+                poly_y = xy[hull.vertices, 1].astype(_np.float64)
+                source = "full-cloud"
+            except Exception:
+                pass
+        if poly_x is None or len(poly_x) < 3:
+            return {"error": "could not derive a polygon for the new slab"}
+
+        new_slab = _Slab(
+            bottom_z=float(req.bottom_z),
+            thickness=float(req.thickness),
+            polygon_x=poly_x,
+            polygon_y=poly_y,
+            points=_np.empty((0, 3)),
+        )
+        slabs.append(new_slab)
+        slabs.sort(key=lambda s: s.bottom_z)
+        with open(slabs_path, "wb") as fh:
+            pickle.dump(slabs, fh)
+        return {
+            "ok": True,
+            "count": len(slabs),
+            "inserted_index": next(
+                i for i, s in enumerate(slabs)
+                if s.bottom_z == float(req.bottom_z)
+                and s.thickness == float(req.thickness)
+            ),
+            "polygon_source": source,
+            "polygon_vertices": int(len(poly_x)),
+        }
+
+    result = await asyncio.to_thread(_add)
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+    return result
+
+
 @app.post("/api/jobs/{job_id}/slabs/edit")
 async def edit_slabs(job_id: str, req: SlabEditRequest):
     """Apply per-slab bottom_z / thickness overrides to slabs.pkl.
