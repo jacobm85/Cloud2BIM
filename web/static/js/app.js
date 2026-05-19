@@ -615,23 +615,30 @@ function _resetProgressCard(prefix) {
   if (eta) eta.textContent = '';
 }
 
+// Wizard mode writes to the main wizard-progress card AND, if present,
+// the inline reseg-progress card inside the segment-review's "Byt ML-
+// modell" section so the user sees activity right where they clicked.
+function _progressTargets(target) {
+  if (target === 'full') return ['full-progress'];
+  if (target === 'wizard') {
+    const inline = document.getElementById('reseg-progress');
+    return inline ? ['wizard-progress', 'reseg-progress'] : ['wizard-progress'];
+  }
+  return [target];
+}
+
 function handleProgressLine(line, target /* 'full' | 'wizard' */) {
-  const prefix = target === 'full' ? 'full-progress' : 'wizard-progress';
+  const prefixes = _progressTargets(target);
   if (STAGE_BANNER_RE.test(line)) {
     // A new stage just started — wipe whatever the previous stage left
     // on the progress widget so the user isn't shown stale numbers.
-    _resetProgressCard(prefix);
+    prefixes.forEach(_resetProgressCard);
     return;
   }
   const m = line.match(PROGRESS_RE);
   if (!m) return;
   const [, rawLabel, done, total, eta] = m;
   const pct = Math.round((parseInt(done) / parseInt(total)) * 100);
-  const card = document.getElementById(prefix);
-  if (!card) return;
-  card.style.display = 'block';
-  document.getElementById(prefix + '-label').textContent =
-    `${_friendlyProgressLabel(rawLabel)}: ${done}/${total} (${pct}%)`;
   const etaSec = parseInt(eta);
   let etaStr = '';
   if (etaSec >= 0) {
@@ -639,14 +646,40 @@ function handleProgressLine(line, target /* 'full' | 'wizard' */) {
     else if (etaSec < 3600) etaStr = `~${Math.round(etaSec / 60)} min kvar`;
     else etaStr = `~${(etaSec / 3600).toFixed(1)} h kvar`;
   }
-  document.getElementById(prefix + '-eta').textContent = etaStr;
-  document.getElementById(prefix + '-fill').style.width = pct + '%';
-  if (pct >= 100) {
-    // Hide after a beat so the "100 %" is visible briefly.
-    setTimeout(() => { card.style.display = 'none'; }, 1500);
-  }
+  const labelText = `${_friendlyProgressLabel(rawLabel)}: ${done}/${total} (${pct}%)`;
+  prefixes.forEach(prefix => {
+    const card = document.getElementById(prefix);
+    if (!card) return;
+    card.style.display = 'block';
+    const lblEl = document.getElementById(prefix + '-label');
+    const etaEl = document.getElementById(prefix + '-eta');
+    const fillEl = document.getElementById(prefix + '-fill');
+    if (lblEl)  lblEl.textContent  = labelText;
+    if (etaEl)  etaEl.textContent  = etaStr;
+    if (fillEl) fillEl.style.width = pct + '%';
+    if (pct >= 100) {
+      setTimeout(() => { card.style.display = 'none'; }, 1500);
+    }
+  });
 }
 window.handleProgressLine = handleProgressLine;
+
+// Append a log line to the inline tail inside the reseg card so the
+// user can see the segmenter actually doing something without
+// scrolling down to wizard-log. Capped to the last few lines so it
+// doesn't grow unbounded.
+function _appendResegTail(line) {
+  const tail = document.getElementById('reseg-progress-tail');
+  if (!tail) return;
+  const card = document.getElementById('reseg-progress');
+  if (card) card.style.display = 'block';
+  const div = document.createElement('div');
+  div.textContent = line;
+  tail.appendChild(div);
+  while (tail.childElementCount > 8) tail.removeChild(tail.firstChild);
+  tail.scrollTop = tail.scrollHeight;
+}
+window._appendResegTail = _appendResegTail;
 
 // ── Resource monitor (CPU / RAM / GPU) ───────────────────────────────────
 async function pollResources() {
@@ -1069,6 +1102,10 @@ function wizardLog(text) {
   line.textContent = text;
   el.appendChild(line);
   el.scrollTop = el.scrollHeight;
+  // Mirror to the inline reseg tail when the user kicked off a model
+  // swap from the segment review — keeps activity visible without
+  // forcing them to scroll down.
+  if (typeof _appendResegTail === 'function') _appendResegTail(text);
 }
 
 function wizardSetBadge(status) {
@@ -1368,6 +1405,19 @@ async function renderSegmentReview() {
         <button class="btn btn-primary" id="btn-reseg">Spara modell + kör om segmentering</button>
       </div>
       <span id="reseg-status" style="font-size:12px;color:var(--text-dim)"></span>
+
+      <!-- Inline progress for the re-segmentation. Mirrors wizard-progress
+           so the user sees activity right where they clicked, without
+           scrolling down to the main log. handleProgressLine writes to
+           both targets when these elements exist. -->
+      <div id="reseg-progress" class="progress-card" style="display:none;margin-top:12px">
+        <div class="progress-card-label">
+          <span id="reseg-progress-label">…</span>
+          <span id="reseg-progress-eta" style="color:var(--text-dim);font-size:11px"></span>
+        </div>
+        <div class="progress-bar"><div class="progress-bar-fill" id="reseg-progress-fill"></div></div>
+        <div id="reseg-progress-tail" style="font-size:11px;color:var(--text-dim);margin-top:6px;font-family:monospace;white-space:pre-wrap;max-height:70px;overflow:auto"></div>
+      </div>
     </div>
 
     <div style="font-size:12px;color:var(--text-dim)">
@@ -1477,9 +1527,36 @@ async function setupSegmentFilterActions() {
       });
       if (!res.ok) throw new Error(await res.text() || ('HTTP ' + res.status));
       resegStatus.style.color = 'var(--success)';
-      resegStatus.textContent = '✓ Segmentering startar — följ loggen ovan';
-      // wizardPollState will pick up the running stage on its next
-      // tick and re-render with the live log + new classes when done.
+      resegStatus.textContent = '✓ Segmentering startar — följer förlopp här nere';
+
+      // Show the inline progress card immediately so the user sees
+      // *something* is happening before the first [PROGRESS] line
+      // lands (RandLA tiling can take a minute before progress
+      // events start firing on a big cloud).
+      const inlineCard = document.getElementById('reseg-progress');
+      const inlineLabel = document.getElementById('reseg-progress-label');
+      const inlineFill = document.getElementById('reseg-progress-fill');
+      const inlineTail = document.getElementById('reseg-progress-tail');
+      if (inlineCard) inlineCard.style.display = 'block';
+      if (inlineLabel) inlineLabel.textContent = 'Startar segmentering…';
+      if (inlineFill) inlineFill.style.width = '2%';   // sliver of life
+      if (inlineTail) inlineTail.innerHTML = '';
+
+      // Reopen the SSE log stream — wizardPollState only opens it on
+      // a transition we won't see here (we're already in awaiting-
+      // input from the previous segment), so without this neither
+      // wizard-log nor the inline tail would receive any lines.
+      const wizLog = document.getElementById('wizard-log');
+      if (wizLog) wizLog.innerHTML = '';
+      if (typeof wizardStreamLogs === 'function') {
+        // Close any stale SSE before opening a new one.
+        if (wizard.sse) { try { wizard.sse.close(); } catch (e) {} wizard.sse = null; }
+        wizardStreamLogs();
+      }
+
+      // Re-enable after a short window so user can swap again later
+      // if they realise they picked the wrong model.
+      setTimeout(() => { resegBtn.disabled = false; }, 5000);
     } catch (e) {
       resegStatus.style.color = 'var(--danger)';
       resegStatus.textContent = '✗ ' + e.message;
