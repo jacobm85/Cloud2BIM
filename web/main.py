@@ -1033,22 +1033,21 @@ async def topdown_image(job_id: str):
 async def sideview_preview(job_id: str, axis: str = "auto"):
     """Render a side-view density preview onto either XZ or YZ.
 
-    Counterpart to /topdown for the vertical polygon crop tool. ``axis``
-    is 'x' (project onto XZ), 'y' (project onto YZ) or 'auto' (pick the
-    horizontal axis with the wider extent — usually gives a more
-    informative silhouette of the building). Returns the image URL,
-    world bounds [h_min, z_min, h_max, z_max] so the frontend can map
-    pixel clicks → world coordinates, plus which axis was actually used.
+    Counterpart to /topdown for the vertical polygon crop tool.
+    ``axis='auto'`` picks whichever horizontal direction has the wider
+    extent (good default — most informative silhouette of the building);
+    ``axis='x'`` and ``axis='y'`` force the projection so the user can
+    flip the view when the auto pick isn't the one they want. Returns
+    image URL + world bounds [h_min, z_min, h_max, z_max] so the
+    frontend can map pixel clicks → world coords, plus the resolved axis
+    so the polygon can be sent back in matching coordinates.
     """
+    if axis not in ("auto", "x", "y"):
+        raise HTTPException(400, "axis must be 'auto', 'x', or 'y'")
     job_dir = JOBS_DIR / job_id
     pts_path = job_dir / "points.npz"
     if not pts_path.exists():
         raise HTTPException(404, "points.npz missing — run prepare stage first")
-    if axis not in ("auto", "x", "y"):
-        raise HTTPException(400, "axis must be 'auto', 'x', or 'y'")
-
-    out_png = job_dir / f"sideview_{axis}.png"
-    out_meta = job_dir / f"sideview_{axis}.json"
 
     def _render():
         import numpy as _np
@@ -1057,7 +1056,6 @@ async def sideview_preview(job_id: str, axis: str = "auto"):
         import matplotlib.pyplot as _plt
         data = _np.load(str(pts_path))
         xyz = data["xyz"]
-        # Pick horizontal axis. "auto" → whichever has more spread.
         x_spread = float(xyz[:, 0].max() - xyz[:, 0].min())
         y_spread = float(xyz[:, 1].max() - xyz[:, 1].min())
         if axis == "auto":
@@ -1072,7 +1070,12 @@ async def sideview_preview(job_id: str, axis: str = "auto"):
             z = z[::stride]
         h_min, h_max = float(h.min()), float(h.max())
         z_min, z_max = float(z.min()), float(z.max())
-        # Same fixed-aspect approach as topdown so pixel→world maps linearly.
+        # Cache file keyed on the chosen axis so re-renders for the same
+        # axis hit cache, and the URL we return matches the file we
+        # wrote (axis="auto" used to write sideview_auto.png while
+        # returning ?axis=x/y — that mismatch was why the image 404'd).
+        out_png = job_dir / f"sideview_{chosen}.png"
+        out_meta = job_dir / f"sideview_{chosen}.json"
         dpi = 100
         width_in = 12.0
         height_in = max(2.0, width_in * (z_max - z_min) / max(1e-6, h_max - h_min))
@@ -1105,9 +1108,9 @@ async def sideview_preview(job_id: str, axis: str = "auto"):
 
 
 @app.get("/api/jobs/{job_id}/sideview.png")
-async def sideview_image(job_id: str, axis: str = "auto"):
-    if axis not in ("auto", "x", "y"):
-        raise HTTPException(400, "axis must be 'auto', 'x', or 'y'")
+async def sideview_image(job_id: str, axis: str = "x"):
+    if axis not in ("x", "y"):
+        raise HTTPException(400, "axis must be 'x' or 'y'")
     out_png = JOBS_DIR / job_id / f"sideview_{axis}.png"
     if not out_png.exists():
         raise HTTPException(404, "Side-view preview not yet generated; call /sideview first")
@@ -2030,6 +2033,64 @@ async def z_histogram_image(job_id: str):
         raise HTTPException(404, "Z-histogram not yet computed — run 'slabs' stage first")
     out = await asyncio.to_thread(_render_z_histogram, job_dir, None, None)
     return FileResponse(str(out), media_type="image/png")
+
+
+@app.get("/api/jobs/{job_id}/prepare_z_histogram.png")
+async def prepare_z_histogram_image(job_id: str):
+    """Render a Z-histogram for the prepare-stage vertical crop tool.
+
+    The slabs stage produces the full z_histogram.pkl with peak picks
+    and band markers, but waiting for that means the user can't see
+    the distribution while choosing a Z-band crop. Recomputes a quick
+    histogram straight from points.npz (no peak detection, no markers)
+    so the prepare-stage Z-band tab has something to look at while
+    deciding crop limits. Cached as prepare_z_histogram.png and
+    invalidated whenever points.npz is modified by any crop.
+    """
+    job_dir = JOBS_DIR / job_id
+    pts_path = job_dir / "points.npz"
+    if not pts_path.exists():
+        raise HTTPException(404, "points.npz missing — run prepare stage first")
+
+    out_png = job_dir / "prepare_z_histogram.png"
+
+    def _render():
+        import numpy as _np
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as _plt
+        data = _np.load(str(pts_path))
+        z = data["xyz"][:, 2]
+        if z.size == 0:
+            raise HTTPException(400, "points.npz is empty")
+        z_min, z_max = float(z.min()), float(z.max())
+        # 1 cm bins for a building-sized scan is plenty of resolution
+        # without exploding memory; finer steps don't help the user
+        # eyeball slab positions and just smear out peaks.
+        z_step = 0.01
+        bin_edges = _np.arange(z_min, z_max + z_step, z_step)
+        counts, _ = _np.histogram(z, bins=bin_edges)
+        centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+        fig, ax = _plt.subplots(figsize=(10, 4.5), dpi=100)
+        fig.patch.set_facecolor("#1a1d27")
+        ax.set_facecolor("#0f1117")
+        # Horizontal-bar style: Z on Y, density on X — matches how slabs
+        # show up later in the pipeline so the user can map peaks → floors.
+        ax.barh(centers, counts, height=z_step, color="#76c8e8", edgecolor="none")
+        ax.set_xlabel("Antal punkter", color="#cfd2dd")
+        ax.set_ylabel("Z (m)", color="#cfd2dd")
+        ax.tick_params(colors="#cfd2dd")
+        for spine in ax.spines.values():
+            spine.set_color("#2e3350")
+        ax.grid(True, axis="x", alpha=0.18, color="#cfd2dd")
+        ax.set_ylim(z_min, z_max)
+        fig.tight_layout()
+        fig.savefig(out_png, dpi=100)
+        _plt.close(fig)
+        return {"z_min": z_min, "z_max": z_max, "bins": int(len(counts))}
+
+    await asyncio.to_thread(_render)
+    return FileResponse(str(out_png), media_type="image/png")
 
 
 class BandsRequest(BaseModel):

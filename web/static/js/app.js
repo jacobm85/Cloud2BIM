@@ -1456,16 +1456,17 @@ async function renderPrepareReview() {
 
       <div id="crop-v-panel" style="display:none">
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">
-          Ange Z-intervall (i meter) som ska behållas. Skanningens nuvarande
-          Z-spann visas som default. Bra för att klippa bort tak, källare eller
-          terräng som inte ska med i BIM-modellen.
+          Ange Z-intervall (i meter) som ska behållas. Histogrammet nedan visar
+          punkttätheten över höjd — toppar är typiskt golv/tak. Skanningens
+          nuvarande Z-spann visas som default. Bra för att klippa bort tak,
+          källare eller terräng som inte ska med i BIM-modellen.
         </div>
         <div style="background:#0f1117;border:1px solid var(--border);border-radius:8px;padding:12px;display:inline-block">
-          <img id="zhist-img" src="/api/jobs/${wizard.jobId}/z_histogram.png?t=${Date.now()}"
-            alt="Z-histogram" style="max-width:480px;max-height:280px;display:block;margin-bottom:10px"
+          <img id="zhist-img" src="/api/jobs/${wizard.jobId}/prepare_z_histogram.png?t=${Date.now()}"
+            alt="Z-histogram" style="max-width:560px;max-height:320px;display:block;margin-bottom:10px"
             onerror="this.style.display='none';this.nextElementSibling.style.display='block'">
           <div style="display:none;color:var(--text-dim);font-size:12px;margin-bottom:10px;font-style:italic">
-            (Z-histogram visas först efter bjälklagssteget — använd Z-min/Z-max nedan.)
+            (Z-histogram kunde inte renderas — använd Z-min/Z-max nedan.)
           </div>
           <div style="display:flex;gap:10px;align-items:end;flex-wrap:wrap">
             <div>
