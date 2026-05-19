@@ -1414,6 +1414,134 @@ async def pointcloud_binary(job_id: str, max_points: int = 80000):
     return Response(content=payload, media_type="application/octet-stream")
 
 
+_CLASS_ROLE_FIELDS = (
+    ("wall",    "wall_classes"),
+    ("floor",   "floor_classes"),
+    ("ceiling", "ceiling_classes"),
+    ("column",  "column_classes"),
+    ("door",    "door_classes"),
+    ("window",  "window_classes"),
+)
+
+
+def _role_of(class_name: str, seg_cfg: dict) -> str:
+    """Map a class name → semantic role using the segmentation config.
+
+    Returns 'wall' / 'floor' / 'ceiling' / 'column' / 'door' / 'window'
+    if the class appears in the matching list, else 'ignore' — which
+    means the class is invisible to every downstream extractor (they
+    only pull labels matching their role's class-list).
+    """
+    for role, key in _CLASS_ROLE_FIELDS:
+        if class_name in (seg_cfg.get(key) or []):
+            return role
+    return "ignore"
+
+
+@app.get("/api/jobs/{job_id}/segment_classes")
+async def get_segment_classes(job_id: str):
+    """List every class the segmenter produced + its current BIM role.
+
+    Used by the wizard's segment-stage review so the user can override
+    role assignments before continuing. The downstream stages
+    (slabs / walls / openings / columns / IFC) all look up points by
+    role-specific class lists from config.yaml (wall_classes,
+    floor_classes, …) — *not* by raw class id — so toggling roles here
+    surgically changes what each extractor sees without touching the
+    underlying labels.
+    """
+    job_dir = JOBS_DIR / job_id
+    pts_path = job_dir / "points.npz"
+    lbl_path = job_dir / "labels.npy"
+    cfg_path = job_dir / "config.yaml"
+    if not lbl_path.exists():
+        raise HTTPException(404, "labels.npy missing — run segment stage first")
+    if not cfg_path.exists():
+        raise HTTPException(404, "config.yaml missing")
+
+    def _load():
+        import numpy as _np
+        labels_obj = _np.load(str(lbl_path), allow_pickle=True).item()
+        ids = labels_obj["ids"]
+        names = list(labels_obj["names"])
+        # Count points per label id; only classes the model actually
+        # emitted appear in the output, even if more were in the vocab.
+        unique, counts = _np.unique(ids, return_counts=True)
+        return [(int(uid), int(c)) for uid, c in zip(unique, counts)], names
+
+    counts_list, names = await asyncio.to_thread(_load)
+    with open(cfg_path) as fh:
+        cfg = yaml.safe_load(fh) or {}
+    seg_cfg = cfg.get("segmentation") or {}
+
+    result = []
+    for label_id, count in counts_list:
+        if 0 <= label_id < len(names):
+            class_name = names[label_id]
+        else:
+            class_name = f"class_{label_id}"
+        result.append({
+            "label_id": label_id,
+            "name": class_name,
+            "count": count,
+            "role": _role_of(class_name, seg_cfg),
+        })
+    # Sort by count desc — the big classes are the ones the user cares
+    # about deciding on first.
+    result.sort(key=lambda r: -r["count"])
+    return {
+        "classes": result,
+        "roles": ["ignore"] + [r for r, _ in _CLASS_ROLE_FIELDS],
+    }
+
+
+class SegmentClassesUpdate(BaseModel):
+    """Map of class name → role. Role is one of:
+       ignore / wall / floor / ceiling / column / door / window."""
+    assignments: dict[str, str]
+
+
+@app.post("/api/jobs/{job_id}/segment_classes")
+async def set_segment_classes(job_id: str, req: SegmentClassesUpdate):
+    """Persist user's class → role overrides into config.yaml.
+
+    Rewrites the six role-specific class lists (wall_classes etc.) from
+    scratch based on ``assignments`` — anything mapped to a role goes
+    into that role's list; anything mapped to 'ignore' is dropped from
+    every list. The user can then click Fortsätt to run slabs/walls/…
+    against the new mapping without re-running segment.
+    """
+    cfg_path = JOBS_DIR / job_id / "config.yaml"
+    if not cfg_path.exists():
+        raise HTTPException(404, "config.yaml missing")
+
+    valid_roles = {"ignore"} | {r for r, _ in _CLASS_ROLE_FIELDS}
+    for name, role in req.assignments.items():
+        if role not in valid_roles:
+            raise HTTPException(400, f"Bad role for {name!r}: {role!r}")
+
+    with open(cfg_path) as fh:
+        cfg = yaml.safe_load(fh) or {}
+    seg_cfg = cfg.setdefault("segmentation", {})
+
+    # Rebuild each role list from scratch so removing a class actually
+    # takes effect. clutter_classes is intentionally left untouched —
+    # downstream code doesn't read it (it's effectively a legacy field),
+    # and we want role='ignore' to be the canonical "exclude" signal.
+    role_to_classes: dict[str, list[str]] = {r: [] for r, _ in _CLASS_ROLE_FIELDS}
+    for class_name, role in req.assignments.items():
+        if role == "ignore":
+            continue
+        role_to_classes[role].append(class_name)
+
+    for role, key in _CLASS_ROLE_FIELDS:
+        seg_cfg[key] = sorted(role_to_classes[role])
+
+    with open(cfg_path, "w") as fh:
+        yaml.dump(cfg, fh, allow_unicode=True)
+    return {"ok": True, "assignments": req.assignments}
+
+
 @app.get("/api/jobs/{job_id}/segment_pointcloud.bin")
 async def segment_pointcloud_binary(job_id: str, max_points: int = 150000):
     """Return a decimated labeled point cloud as raw Float32Array bytes.

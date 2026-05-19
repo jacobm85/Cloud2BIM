@@ -1233,7 +1233,17 @@ function renderWizardStageReview(stage, failed) {
 // can rotate/zoom the labeled point cloud. Plan-view cropping lives in
 // the prepare stage where it belongs — the segment stage is for
 // reviewing the ML labels and re-running with different settings.
-function renderSegmentReview() {
+const ROLE_LABELS = {
+  ignore:  'Ignorera',
+  wall:    'Vägg',
+  floor:   'Golv',
+  ceiling: 'Tak',
+  column:  'Pelare',
+  door:    'Dörr',
+  window:  'Fönster',
+};
+
+async function renderSegmentReview() {
   const extra = document.getElementById('stage-extra');
   const viewerUrl = '/static/segment-viewer.html?job=' + wizard.jobId;
   extra.innerHTML = `
@@ -1241,11 +1251,8 @@ function renderSegmentReview() {
       <div style="font-weight:600;font-size:13px;margin-bottom:6px">Inspektera segmenteringen i 3D</div>
       <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
         Öppna 3D-vyn för att rotera och zooma i punktmolnet. Varje punkt är
-        färglagd efter dess semantiska klass — väggar, golv, tak och öppningar
-        står i ljusa toner; möbler och clutter (som filtreras bort av hybrid-
-        pipelinen i kommande steg) i dämpade. Toggla klasser i legenden för
-        att isolera grupper. Punktmolnet glesläggs till ~200 000 punkter för
-        att hålla WebGL snabb.
+        färglagd efter dess semantiska klass. Punktmolnet glesläggs till
+        ~200 000 punkter för att hålla WebGL snabb.
       </p>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <a class="btn btn-primary" href="${viewerUrl}" target="_blank" rel="noopener">
@@ -1256,12 +1263,121 @@ function renderSegmentReview() {
         </span>
       </div>
     </div>
+    <div style="margin-bottom:14px;padding:12px;background:var(--surface2);border-radius:8px">
+      <div style="font-weight:600;font-size:13px;margin-bottom:6px">Klassroller — vad ska användas och hur</div>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
+        Varje detekterad klass mappas till en BIM-roll. Klasser satta till
+        <em>Ignorera</em> tas inte med i något senare steg (de blir aldrig
+        väggar, golv eller pelare). Ändringar sparas i jobbets config.yaml
+        — du behöver inte köra om segmenteringen, bara klicka Fortsätt så
+        använder Bjälklags-/Väggstegen det nya valet.
+      </p>
+      <div id="seg-classes-list" style="font-size:12px;color:var(--text-dim)">Laddar klasser…</div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
+        <button class="btn btn-primary" id="btn-seg-save" disabled>Spara klassroller</button>
+        <span id="seg-save-status" style="font-size:12px;color:var(--text-dim)"></span>
+      </div>
+    </div>
     <div style="font-size:12px;color:var(--text-dim)">
       Om något ser fel ut — t.ex. för mycket möbler markerade som "wall", eller
       tomma områden där golvet borde vara — klicka "Kör om detta steg" och
       justera ML-backend, voxelstorlek eller RGB-läge. Behöver du beskära
       punktmolnet, gå tillbaka till <em>Förberedelse</em>-steget.
     </div>`;
+  setupSegmentClassEditor();
+}
+
+async function setupSegmentClassEditor() {
+  const list = document.getElementById('seg-classes-list');
+  const saveBtn = document.getElementById('btn-seg-save');
+  const saveStatus = document.getElementById('seg-save-status');
+  if (!list || !saveBtn) return;
+
+  let initial = {};       // class_name → role at load time
+  let current = {};       // class_name → role as edited
+  let classes = [];
+
+  function refreshSaveButton() {
+    let dirty = false;
+    for (const k of Object.keys(current)) if (current[k] !== initial[k]) { dirty = true; break; }
+    saveBtn.disabled = !dirty;
+    saveStatus.textContent = dirty ? 'Du har osparade ändringar' : '';
+    saveStatus.style.color = dirty ? 'var(--warn,#d49a3a)' : 'var(--text-dim)';
+  }
+
+  try {
+    const res = await fetch('/api/jobs/' + wizard.jobId + '/segment_classes');
+    if (!res.ok) throw new Error(await res.text() || ('HTTP ' + res.status));
+    const data = await res.json();
+    classes = data.classes;
+    const roles = data.roles;
+    const totalPoints = classes.reduce((acc, c) => acc + c.count, 0) || 1;
+
+    const rows = classes.map(c => {
+      initial[c.name] = c.role;
+      current[c.name] = c.role;
+      const opts = roles.map(r =>
+        `<option value="${r}"${r === c.role ? ' selected' : ''}>${ROLE_LABELS[r] || r}</option>`
+      ).join('');
+      const pct = ((c.count / totalPoints) * 100).toFixed(1);
+      return `
+        <tr data-class="${escapeHtml(c.name)}">
+          <td style="padding:4px 8px;font-weight:600">${escapeHtml(c.name)}</td>
+          <td style="padding:4px 8px;text-align:right;font-variant-numeric:tabular-nums">${c.count.toLocaleString()}</td>
+          <td style="padding:4px 8px;text-align:right;color:var(--text-dim)">${pct}%</td>
+          <td style="padding:4px 8px">
+            <select class="seg-role-pick" style="font-size:12px;padding:3px 6px;min-width:100px">${opts}</select>
+          </td>
+        </tr>`;
+    }).join('');
+
+    list.innerHTML = `
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="text-align:left;color:var(--text-dim);border-bottom:1px solid var(--border)">
+            <th style="padding:4px 8px">Klass</th>
+            <th style="padding:4px 8px;text-align:right">Punkter</th>
+            <th style="padding:4px 8px;text-align:right">Andel</th>
+            <th style="padding:4px 8px">Roll</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+
+    list.querySelectorAll('.seg-role-pick').forEach(sel => {
+      const row = sel.closest('tr');
+      const className = row.dataset.class;
+      sel.addEventListener('change', () => {
+        current[className] = sel.value;
+        refreshSaveButton();
+      });
+    });
+  } catch (e) {
+    list.innerHTML = '<div style="color:var(--danger);font-size:12px">Kunde inte ladda klasser: ' + escapeHtml(e.message) + '</div>';
+    return;
+  }
+
+  saveBtn.onclick = async () => {
+    saveBtn.disabled = true;
+    saveStatus.style.color = 'var(--text-dim)';
+    saveStatus.textContent = 'Sparar…';
+    try {
+      const res = await fetch('/api/jobs/' + wizard.jobId + '/segment_classes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ assignments: current }),
+      });
+      if (!res.ok) throw new Error(await res.text() || ('HTTP ' + res.status));
+      initial = { ...current };
+      saveStatus.style.color = 'var(--success)';
+      saveStatus.textContent = '✓ Sparat';
+      refreshSaveButton();
+    } catch (e) {
+      saveStatus.style.color = 'var(--danger)';
+      saveStatus.textContent = '✗ ' + e.message;
+      saveBtn.disabled = false;
+    }
+  };
 }
 
 async function renderPrepareReview() {
