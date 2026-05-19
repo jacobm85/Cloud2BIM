@@ -1316,24 +1316,176 @@ async function renderSegmentReview() {
       <div style="font-weight:600;font-size:13px;margin-bottom:6px">Klassroller — vad ska användas och hur</div>
       <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
         Varje detekterad klass mappas till en BIM-roll. Klasser satta till
-        <em>Ignorera</em> tas inte med i något senare steg (de blir aldrig
-        väggar, golv eller pelare). Ändringar sparas i jobbets config.yaml
-        — du behöver inte köra om segmenteringen, bara klicka Fortsätt så
-        använder Bjälklags-/Väggstegen det nya valet.
+        <em>Ignorera</em> är kandidater för att <strong>tas bort</strong> i
+        nästa steg ("Filtrera punktmolnet" nedan). Övriga roller används
+        bara av ML-extraktorerna; i filter-läget används de inte alls —
+        geometric algoritmer avgör vägg/golv/tak från det rensade molnet.
       </p>
       <div id="seg-classes-list" style="font-size:12px;color:var(--text-dim)">Laddar klasser…</div>
       <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap">
-        <button class="btn btn-primary" id="btn-seg-save" disabled>Spara klassroller</button>
+        <button class="btn btn-outline" id="btn-seg-save" disabled>Spara klassroller</button>
         <span id="seg-save-status" style="font-size:12px;color:var(--text-dim)"></span>
       </div>
     </div>
+
+    <div id="seg-filter-card" style="margin-bottom:14px;padding:12px;background:var(--surface2);border-radius:8px;display:none">
+      <div style="font-weight:600;font-size:13px;margin-bottom:6px">Filtrera punktmolnet (ML som rensning)</div>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
+        Ta bort punkter markerade som <em>Ignorera</em> permanent från
+        punktmolnet. Pipeline-läget växlas samtidigt till <em>geometric</em>
+        så fortsättningen kör v1/v2/vertical på det rensade molnet (du kan
+        ändra läge senare i Inställningar).
+      </p>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn btn-primary" id="btn-apply-filter" disabled>Ta bort markerade punkter</button>
+        <span id="apply-filter-status" style="font-size:12px;color:var(--text-dim)"></span>
+      </div>
+    </div>
+
+    <div id="seg-reseg-card" style="margin-bottom:14px;padding:12px;background:var(--surface2);border-radius:8px">
+      <div style="font-weight:600;font-size:13px;margin-bottom:6px">Byt ML-modell och kör om segmentering</div>
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
+        Användbart efter en filter-omgång: kör t.ex. först SemanticKITTI
+        (outdoor) för att rensa bilar/vegetation/asfalt, växla sedan till
+        S3DIS (indoor) på det rensade molnet för att hitta möbler. Modellens
+        viktfil cachelagras lokalt på servern.
+      </p>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:8px">
+        <div>
+          <label style="display:block;font-size:11px;color:var(--text-dim)">Backend</label>
+          <select id="seg-backend" style="font-size:12px;padding:4px 8px;min-width:140px">
+            <option value="randla">RandLA-Net</option>
+            <option value="ptv3">PTv3 (Pointcept)</option>
+          </select>
+        </div>
+        <div>
+          <label style="display:block;font-size:11px;color:var(--text-dim)">Dataset / vokabulär</label>
+          <select id="seg-dataset" style="font-size:12px;padding:4px 8px;min-width:200px">
+            <option value="s3dis">S3DIS — indoor (13 klasser)</option>
+            <option value="semantickitti">SemanticKITTI — outdoor (19 klasser)</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" id="btn-reseg">Spara modell + kör om segmentering</button>
+      </div>
+      <span id="reseg-status" style="font-size:12px;color:var(--text-dim)"></span>
+    </div>
+
     <div style="font-size:12px;color:var(--text-dim)">
-      Om något ser fel ut — t.ex. för mycket möbler markerade som "wall", eller
-      tomma områden där golvet borde vara — klicka "Kör om detta steg" och
-      justera ML-backend, voxelstorlek eller RGB-läge. Behöver du beskära
-      punktmolnet, gå tillbaka till <em>Förberedelse</em>-steget.
+      Om du är klar med rensningen — klicka <strong>Fortsätt →</strong> uppe
+      till höger för att gå till bjälklagsdetektering. Bjälklag/väggar/öppningar
+      körs då med geometric algoritmer på det rensade molnet.
     </div>`;
   setupSegmentClassEditor();
+  setupSegmentFilterActions();
+}
+
+async function setupSegmentFilterActions() {
+  const filterBtn = document.getElementById('btn-apply-filter');
+  const filterStatus = document.getElementById('apply-filter-status');
+  const filterCard = document.getElementById('seg-filter-card');
+  const resegBtn = document.getElementById('btn-reseg');
+  const resegStatus = document.getElementById('reseg-status');
+  const backendSel = document.getElementById('seg-backend');
+  const datasetSel = document.getElementById('seg-dataset');
+  if (!filterBtn || !resegBtn) return;
+
+  function recomputeFilterButton() {
+    // The role editor stores its "current" map on a dataset attribute
+    // of the list element; we read it back here to find "ignore" rows.
+    const rows = document.querySelectorAll('#seg-classes-list .seg-role-pick');
+    const ignored = [];
+    rows.forEach(sel => {
+      if (sel.value === 'ignore') {
+        const row = sel.closest('tr');
+        if (row && row.dataset.class) ignored.push(row.dataset.class);
+      }
+    });
+    if (ignored.length > 0) {
+      filterCard.style.display = 'block';
+      filterBtn.disabled = false;
+      filterStatus.style.color = 'var(--text-dim)';
+      filterStatus.textContent = `${ignored.length} klass${ignored.length === 1 ? '' : 'er'} markerade för borttagning`;
+    } else {
+      filterCard.style.display = 'none';
+      filterBtn.disabled = true;
+      filterStatus.textContent = '';
+    }
+    return ignored;
+  }
+  // Poll the role-editor selects every 400 ms — easier than rewiring
+  // every dropdown's change handler from outside.
+  setInterval(recomputeFilterButton, 400);
+  recomputeFilterButton();
+
+  filterBtn.onclick = async () => {
+    const ignored = recomputeFilterButton();
+    if (ignored.length === 0) return;
+    if (!confirm(`Ta bort ${ignored.length} klass${ignored.length === 1 ? '' : 'er'} permanent från punktmolnet?\n\n${ignored.join(', ')}`)) return;
+    filterBtn.disabled = true;
+    filterStatus.style.color = 'var(--text-dim)';
+    filterStatus.textContent = 'Rensar…';
+    try {
+      const res = await fetch('/api/jobs/' + wizard.jobId + '/apply_class_filter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ remove: ignored }),
+      });
+      if (!res.ok) throw new Error(await res.text() || ('HTTP ' + res.status));
+      const r = await res.json();
+      filterStatus.style.color = 'var(--success)';
+      filterStatus.textContent = `✓ ${r.removed.toLocaleString()} punkter borttagna (${r.after.toLocaleString()} / ${r.before.toLocaleString()} kvar)`;
+      // Re-render the segment review so the role table reflects the
+      // smaller cloud (and the class list shrinks if a removed class
+      // had been the only points of its kind).
+      setTimeout(renderSegmentReview, 600);
+    } catch (e) {
+      filterStatus.style.color = 'var(--danger)';
+      filterStatus.textContent = '✗ ' + e.message;
+      filterBtn.disabled = false;
+    }
+  };
+
+  // Pre-fill the model picker from current config (best-effort —
+  // a fresh job has the values the user picked in step 2, but a
+  // previous filter run may have changed dataset already).
+  try {
+    const cfgRes = await fetch('/api/jobs/' + wizard.jobId + '/state');
+    // The state endpoint doesn't return config; piggy-back on the
+    // segment_classes call which already ran for the role editor.
+    // (No fetch here — we just leave the defaults.)
+  } catch (e) { /* keep defaults */ }
+
+  resegBtn.onclick = async () => {
+    resegBtn.disabled = true;
+    resegStatus.style.color = 'var(--text-dim)';
+    resegStatus.textContent = 'Sparar modellval…';
+    try {
+      let res = await fetch('/api/jobs/' + wizard.jobId + '/segment_model', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          backend: backendSel.value,
+          dataset: datasetSel.value,
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text() || ('HTTP ' + res.status));
+      resegStatus.textContent = 'Kör segmentering…';
+      res = await fetch('/api/jobs/' + wizard.jobId + '/run_stage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stage: 'segment' }),
+      });
+      if (!res.ok) throw new Error(await res.text() || ('HTTP ' + res.status));
+      resegStatus.style.color = 'var(--success)';
+      resegStatus.textContent = '✓ Segmentering startar — följ loggen ovan';
+      // wizardPollState will pick up the running stage on its next
+      // tick and re-render with the live log + new classes when done.
+    } catch (e) {
+      resegStatus.style.color = 'var(--danger)';
+      resegStatus.textContent = '✗ ' + e.message;
+      resegBtn.disabled = false;
+    }
+  };
 }
 
 async function setupSegmentClassEditor() {

@@ -1504,6 +1504,162 @@ class SegmentClassesUpdate(BaseModel):
     assignments: dict[str, str]
 
 
+class ClassFilterRequest(BaseModel):
+    """List of class names whose points should be removed from points.npz."""
+    remove: List[str]
+
+
+class SegmentModelUpdate(BaseModel):
+    """Switch the ML model used by the segment stage.
+
+    Used by the wizard's filter-only flow when the user wants to run a
+    second pass with a different model (e.g. switch from SemanticKITTI
+    outdoor → S3DIS indoor after stripping cars and vegetation).
+    """
+    backend: Optional[str] = None    # 'ptv3' | 'randla' | 'none'
+    dataset: Optional[str] = None    # 's3dis' | 'semantickitti'
+
+
+@app.post("/api/jobs/{job_id}/apply_class_filter")
+async def apply_class_filter(job_id: str, req: ClassFilterRequest):
+    """Remove all points labelled with the listed classes from points.npz.
+
+    The flow this enables: user runs ML segmentation as a clutter-finder
+    rather than a classifier. They mark cars/vegetation/furniture as
+    'Ignorera' in the role editor, click this, and those points are
+    gone for good. labels.npy is filtered in lock-step so downstream
+    stages still have aligned labels. pipeline_mode is set to
+    'geometric' on apply so the rest of the wizard runs the v1/v2/v3
+    geometric algorithms on the cleaned cloud (which is what the user
+    is asking for when they treat ML as 'just a filter').
+    """
+    if not req.remove:
+        raise HTTPException(400, "remove list is empty")
+    job_dir = JOBS_DIR / job_id
+    pts_path = job_dir / "points.npz"
+    lbl_path = job_dir / "labels.npy"
+    cfg_path = job_dir / "config.yaml"
+    if not pts_path.exists():
+        raise HTTPException(404, "points.npz missing — run prepare first")
+    if not lbl_path.exists():
+        raise HTTPException(404, "labels.npy missing — run segment first")
+
+    def _filter():
+        import numpy as _np
+        data = _np.load(str(pts_path))
+        xyz = data["xyz"]
+        offset = data["offset"]
+        rgb = data["rgb"] if "rgb" in data.files else None
+        labels_obj = _np.load(str(lbl_path), allow_pickle=True).item()
+        ids = labels_obj["ids"]
+        names = list(labels_obj["names"])
+        if len(ids) != len(xyz):
+            return {"error": f"label count {len(ids)} ≠ point count {len(xyz)}"}
+        remove_ids = [i for i, n in enumerate(names) if n in req.remove]
+        if not remove_ids:
+            return {"error": f"none of {list(req.remove)} are present in the cloud"}
+        keep_mask = ~_np.isin(ids, remove_ids)
+        n_before = int(len(xyz))
+        n_after = int(keep_mask.sum())
+        if n_after == 0:
+            return {"error": "filter would remove every point"}
+        save_kwargs = {"xyz": xyz[keep_mask].astype(_np.float32), "offset": offset}
+        if rgb is not None:
+            save_kwargs["rgb"] = rgb[keep_mask].astype(_np.float32)
+        _np.savez(str(pts_path), **save_kwargs)
+        labels_obj["ids"] = ids[keep_mask]
+        _np.save(str(lbl_path), labels_obj, allow_pickle=True)
+        return {
+            "before": n_before,
+            "after": n_after,
+            "removed": n_before - n_after,
+            "removed_classes": list(req.remove),
+        }
+
+    result = await asyncio.to_thread(_filter)
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+
+    # Switch the pipeline to geometric so downstream stages don't try
+    # to use labels (the user has signalled with this action that ML
+    # was only a filter; classification belongs to v1/v2/vertical now).
+    if cfg_path.exists():
+        with open(cfg_path) as fh:
+            cfg = yaml.safe_load(fh) or {}
+        cfg["pipeline_mode"] = "geometric"
+        with open(cfg_path, "w") as fh:
+            yaml.dump(cfg, fh, allow_unicode=True)
+
+    # Invalidate cached previews — the cloud just shrank.
+    for cached in ("topdown.png", "topdown.json",
+                   "sideview_x.png", "sideview_x.json",
+                   "sideview_y.png", "sideview_y.json",
+                   "prepare_z_histogram.png"):
+        try:
+            (job_dir / cached).unlink()
+        except FileNotFoundError:
+            pass
+    return result
+
+
+@app.post("/api/jobs/{job_id}/segment_model")
+async def set_segment_model(job_id: str, req: SegmentModelUpdate):
+    """Update segmentation.backend + dataset in config.yaml.
+
+    Used by the filter-only flow to switch e.g. SemanticKITTI →
+    S3DIS between passes without going back to the settings step.
+    Dataset changes reset the role-specific class lists to the
+    dataset's natural defaults so the role editor opens with sane
+    pre-assignments rather than stale ones from the previous model.
+    """
+    cfg_path = JOBS_DIR / job_id / "config.yaml"
+    if not cfg_path.exists():
+        raise HTTPException(404, "config.yaml missing")
+    if req.backend not in (None, "ptv3", "randla", "none"):
+        raise HTTPException(400, "backend must be ptv3, randla, or none")
+    if req.dataset not in (None, "s3dis", "semantickitti"):
+        raise HTTPException(400, "dataset must be s3dis or semantickitti")
+
+    with open(cfg_path) as fh:
+        cfg = yaml.safe_load(fh) or {}
+    seg_cfg = cfg.setdefault("segmentation", {})
+    if req.backend is not None:
+        seg_cfg["backend"] = req.backend
+        # Switching backend usually means the user wants ML to actually
+        # run — flip enabled back on if it was disabled.
+        if req.backend != "none":
+            seg_cfg["enabled"] = True
+    if req.dataset is not None:
+        seg_cfg["dataset"] = req.dataset
+        # Hard-coded mirrors of _build_segmentation_cfg's per-dataset
+        # defaults. Keeping them here means a model swap inside the
+        # wizard doesn't leave wall_classes pointing at a label the
+        # new model never emits.
+        if req.dataset == "s3dis":
+            seg_cfg["wall_classes"]    = ["wall"]
+            seg_cfg["floor_classes"]   = ["floor"]
+            seg_cfg["ceiling_classes"] = ["ceiling"]
+            seg_cfg["column_classes"]  = ["column"]
+            seg_cfg["door_classes"]    = ["door"]
+            seg_cfg["window_classes"]  = ["window"]
+        else:  # semantickitti
+            seg_cfg["wall_classes"]    = ["building", "fence"]
+            seg_cfg["floor_classes"]   = ["road", "sidewalk", "parking", "other-ground", "terrain"]
+            seg_cfg["ceiling_classes"] = []
+            seg_cfg["column_classes"]  = ["pole", "trunk"]
+            seg_cfg["door_classes"]    = []
+            seg_cfg["window_classes"]  = []
+    with open(cfg_path, "w") as fh:
+        yaml.dump(cfg, fh, allow_unicode=True)
+    return {
+        "ok": True,
+        "segmentation": {
+            "backend": seg_cfg.get("backend"),
+            "dataset": seg_cfg.get("dataset"),
+        },
+    }
+
+
 @app.post("/api/jobs/{job_id}/segment_classes")
 async def set_segment_classes(job_id: str, req: SegmentClassesUpdate):
     """Persist user's class → role overrides into config.yaml.
