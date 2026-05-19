@@ -1332,6 +1332,44 @@ const ROLE_LABELS = {
 async function renderSegmentReview() {
   const extra = document.getElementById('stage-extra');
   const viewerUrl = '/static/segment-viewer.html?job=' + wizard.jobId;
+
+  // Detect "ML is off for this job" before rendering the full ML
+  // review — geometric-only runs still write a labels.npy with a
+  // single "unknown" class via PassthroughSegmenter, but the 3D
+  // viewer / role editor / model-swap UI have nothing to operate
+  // on. Render a short "ML disabled" notice and hide the segment
+  // line in the wizard stage list so the user isn't told to
+  // inspect something that doesn't exist.
+  try {
+    const r = await fetch('/api/jobs/' + wizard.jobId + '/segment_classes');
+    if (r.ok) {
+      const data = await r.json();
+      const isPassthrough = data.classes && data.classes.length <= 1 &&
+        data.classes.every(c => c.name === 'unknown' || c.name === 'class_0');
+      if (isPassthrough) {
+        extra.innerHTML = `
+          <div style="padding:14px;background:var(--surface2);border-radius:8px;font-size:13px;line-height:1.5">
+            <div style="font-weight:600;margin-bottom:6px">ML-segmentering avstängd för det här jobbet</div>
+            <p style="color:var(--text-dim);margin:0">
+              Du valde geometric-läge i Inställningar, så segmenteringen körs
+              i passthrough-mode (alla punkter får klassen <em>unknown</em>).
+              Bjälklag, väggar och övriga steg detekteras geometriskt — ingen
+              ML-data att inspektera här. Klicka <strong>Fortsätt →</strong>
+              uppe till höger för att gå till bjälklagsdetektering.
+            </p>
+          </div>`;
+        const segLi = document.querySelector('#wizard-stages li[data-stage="segment"]');
+        if (segLi) segLi.style.display = 'none';
+        return;
+      } else {
+        // ML actually ran — make sure the segment line is visible
+        // (it may have been hidden by a previous passthrough render).
+        const segLi = document.querySelector('#wizard-stages li[data-stage="segment"]');
+        if (segLi) segLi.style.display = '';
+      }
+    }
+  } catch (e) { /* fall through to the full review */ }
+
   extra.innerHTML = `
     <div style="margin-bottom:14px;padding:12px;background:var(--surface2);border-radius:8px">
       <div style="font-weight:600;font-size:13px;margin-bottom:6px">Inspektera segmenteringen i 3D</div>
