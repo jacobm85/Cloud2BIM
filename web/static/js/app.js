@@ -1290,6 +1290,7 @@ async function renderPrepareReview() {
       </div>
       <div class="upload-tabs" style="margin-bottom:10px">
         <div class="upload-tab active" data-crop="h">📐 Horisontell (polygon)</div>
+        <div class="upload-tab" data-crop="vp">📐 Vertikal (polygon)</div>
         <div class="upload-tab" data-crop="v">📏 Vertikal (Z-band)</div>
       </div>
 
@@ -1307,6 +1308,33 @@ async function renderPrepareReview() {
           <button class="btn btn-outline" id="btn-crop-clear">Rensa</button>
           <button class="btn btn-primary" id="btn-crop-apply" disabled>Tillämpa crop</button>
           <span id="crop-status" style="font-size:12px;color:var(--text-dim);align-self:center;margin-left:6px"></span>
+        </div>
+      </div>
+
+      <div id="crop-vp-panel" style="display:none">
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">
+          Klicka i sidovyn för att rita en polygon — punkter innanför behålls.
+          Praktiskt för sluttande tak, ställningar eller överhängande vegetation
+          som ett platt Z-band inte kan särskilja. Axeln väljs automatiskt
+          (den med störst utbredning) — du kan toggla mellan XZ och YZ nedan.
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+          <div class="upload-tabs" style="margin:0;padding:0;border:none;background:none;gap:6px">
+            <div class="upload-tab active" data-vpaxis="auto" style="font-size:11px;padding:4px 10px">Auto</div>
+            <div class="upload-tab" data-vpaxis="x" style="font-size:11px;padding:4px 10px">XZ</div>
+            <div class="upload-tab" data-vpaxis="y" style="font-size:11px;padding:4px 10px">YZ</div>
+          </div>
+          <span id="vp-axis-info" style="font-size:11px;color:var(--text-dim)"></span>
+        </div>
+        <div id="sideview-wrap" style="position:relative;display:inline-block;background:#0f1117;border:1px solid var(--border);border-radius:8px;overflow:hidden;max-width:100%">
+          <img id="sideview-img" src="" alt="Side-view" style="display:block;max-width:100%;user-select:none;-webkit-user-drag:none">
+          <canvas id="sideview-canvas" style="position:absolute;left:0;top:0;cursor:crosshair"></canvas>
+        </div>
+        <div class="btn-row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-outline" id="btn-vpcrop-undo">Ångra punkt</button>
+          <button class="btn btn-outline" id="btn-vpcrop-clear">Rensa</button>
+          <button class="btn btn-primary" id="btn-vpcrop-apply" disabled>Tillämpa crop</button>
+          <span id="vpcrop-status" style="font-size:12px;color:var(--text-dim);align-self:center;margin-left:6px"></span>
         </div>
       </div>
 
@@ -1344,14 +1372,149 @@ async function renderPrepareReview() {
     el.addEventListener('click', () => {
       extra.querySelectorAll('[data-crop]').forEach(t => t.classList.remove('active'));
       el.classList.add('active');
-      const h = el.dataset.crop === 'h';
-      document.getElementById('crop-h-panel').style.display = h ? 'block' : 'none';
-      document.getElementById('crop-v-panel').style.display = h ? 'none' : 'block';
+      const which = el.dataset.crop;
+      document.getElementById('crop-h-panel').style.display  = which === 'h'  ? 'block' : 'none';
+      document.getElementById('crop-vp-panel').style.display = which === 'vp' ? 'block' : 'none';
+      document.getElementById('crop-v-panel').style.display  = which === 'v'  ? 'block' : 'none';
+      // Lazy-load the side view the first time the polygon tab is opened.
+      if (which === 'vp' && !document.getElementById('sideview-img').src) {
+        setupVerticalPolygonCropTool('auto');
+      }
     });
   });
 
   setupCropTool(meta.bounds);
   setupZCropTool();
+}
+
+// Side-view polygon crop. Renders the cloud projected onto the chosen
+// horizontal axis vs Z, lets the user click a polygon, and POSTs it to
+// /crop_vertical_polygon. Switching axis re-fetches /sideview because
+// the polygon coordinates are axis-specific.
+function setupVerticalPolygonCropTool(initialAxis) {
+  const img = document.getElementById('sideview-img');
+  const canvas = document.getElementById('sideview-canvas');
+  const status = document.getElementById('vpcrop-status');
+  const info = document.getElementById('vp-axis-info');
+  const applyBtn = document.getElementById('btn-vpcrop-apply');
+  const undoBtn  = document.getElementById('btn-vpcrop-undo');
+  const clearBtn = document.getElementById('btn-vpcrop-clear');
+  if (!img || !canvas) return;
+
+  let bounds = null;   // [h_min, z_min, h_max, z_max] in world units
+  let axis   = initialAxis || 'auto';   // requested axis
+  let chosen = null;   // actual axis returned by backend ('x' or 'y')
+  const pts = [];
+
+  async function loadSideView(requestedAxis) {
+    status.style.color = 'var(--text-dim)';
+    status.textContent = 'Laddar sidovy…';
+    try {
+      const res = await fetch('/api/jobs/' + wizard.jobId + '/sideview?axis=' + requestedAxis);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      bounds = data.bounds;
+      chosen = data.axis;
+      info.textContent = chosen === 'x' ? 'Vy: XZ (öst-väst längs marken vs höjd)'
+                                        : 'Vy: YZ (nord-syd längs marken vs höjd)';
+      img.src = data.image_url;
+      pts.length = 0;
+      status.textContent = '';
+    } catch (e) {
+      status.style.color = 'var(--danger)';
+      status.textContent = '✗ ' + e.message;
+    }
+  }
+
+  function sync() {
+    canvas.width  = img.naturalWidth  || img.clientWidth;
+    canvas.height = img.naturalHeight || img.clientHeight;
+    canvas.style.width  = img.clientWidth  + 'px';
+    canvas.style.height = img.clientHeight + 'px';
+    redraw();
+  }
+  img.addEventListener('load', sync);
+  window.addEventListener('resize', sync);
+
+  // Map pixel (px, py) → world (h, z). Image y is top-down, world Z is up.
+  function pixelToWorld(px, py) {
+    const [hmin, zmin, hmax, zmax] = bounds;
+    const wh = hmin + (px / canvas.width) * (hmax - hmin);
+    const wz = zmax - (py / canvas.height) * (zmax - zmin);
+    return [wh, wz];
+  }
+
+  function redraw() {
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    applyBtn.disabled = pts.length < 3;
+    status.textContent = pts.length + ' punkt' + (pts.length === 1 ? '' : 'er');
+    if (pts.length === 0) return;
+    ctx.strokeStyle = '#4f8ef7';
+    ctx.fillStyle = 'rgba(79,142,247,0.18)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    if (pts.length >= 3) { ctx.closePath(); ctx.fill(); }
+    ctx.stroke();
+    for (const p of pts) {
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], 4, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff';
+      ctx.fill();
+      ctx.strokeStyle = '#4f8ef7';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+
+  canvas.addEventListener('click', e => {
+    const rect = canvas.getBoundingClientRect();
+    const px = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const py = (e.clientY - rect.top)  * (canvas.height / rect.height);
+    pts.push([px, py]);
+    redraw();
+  });
+  canvas.addEventListener('dblclick', e => { e.preventDefault(); if (pts.length >= 3) applyCrop(); });
+
+  undoBtn.onclick  = () => { pts.pop(); redraw(); };
+  clearBtn.onclick = () => { pts.length = 0; redraw(); };
+  applyBtn.onclick = applyCrop;
+
+  // Axis sub-tabs (Auto / XZ / YZ).
+  document.querySelectorAll('[data-vpaxis]').forEach(el => {
+    el.addEventListener('click', () => {
+      document.querySelectorAll('[data-vpaxis]').forEach(t => t.classList.remove('active'));
+      el.classList.add('active');
+      axis = el.dataset.vpaxis;
+      loadSideView(axis);
+    });
+  });
+
+  async function applyCrop() {
+    if (pts.length < 3 || !chosen) return;
+    const polygon = pts.map(p => pixelToWorld(p[0], p[1]));
+    status.style.color = 'var(--text-dim)';
+    status.textContent = 'Beskär…';
+    try {
+      const res = await fetch('/api/jobs/' + wizard.jobId + '/crop_vertical_polygon', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ polygon, axis: chosen }),
+      });
+      if (!res.ok) throw new Error(await res.text() || ('HTTP ' + res.status));
+      const r = await res.json();
+      status.style.color = 'var(--success)';
+      const lbl = r.labels_after != null ? ` (${r.labels_after.toLocaleString()} etiketter följde med)` : '';
+      status.textContent = `✓ ${r.after.toLocaleString()} av ${r.before.toLocaleString()} punkter kvar (${Math.round(r.kept_fraction * 100)}%)${lbl}`;
+      setTimeout(renderPrepareReview, 400);
+    } catch (e) {
+      status.style.color = 'var(--danger)';
+      status.textContent = '✗ ' + e.message;
+    }
+  }
+
+  loadSideView(axis);
 }
 
 function setupZCropTool() {

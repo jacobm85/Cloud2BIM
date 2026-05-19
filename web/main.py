@@ -1029,6 +1029,91 @@ async def topdown_image(job_id: str):
     return FileResponse(str(out_png), media_type="image/png")
 
 
+@app.get("/api/jobs/{job_id}/sideview")
+async def sideview_preview(job_id: str, axis: str = "auto"):
+    """Render a side-view density preview onto either XZ or YZ.
+
+    Counterpart to /topdown for the vertical polygon crop tool. ``axis``
+    is 'x' (project onto XZ), 'y' (project onto YZ) or 'auto' (pick the
+    horizontal axis with the wider extent — usually gives a more
+    informative silhouette of the building). Returns the image URL,
+    world bounds [h_min, z_min, h_max, z_max] so the frontend can map
+    pixel clicks → world coordinates, plus which axis was actually used.
+    """
+    job_dir = JOBS_DIR / job_id
+    pts_path = job_dir / "points.npz"
+    if not pts_path.exists():
+        raise HTTPException(404, "points.npz missing — run prepare stage first")
+    if axis not in ("auto", "x", "y"):
+        raise HTTPException(400, "axis must be 'auto', 'x', or 'y'")
+
+    out_png = job_dir / f"sideview_{axis}.png"
+    out_meta = job_dir / f"sideview_{axis}.json"
+
+    def _render():
+        import numpy as _np
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as _plt
+        data = _np.load(str(pts_path))
+        xyz = data["xyz"]
+        # Pick horizontal axis. "auto" → whichever has more spread.
+        x_spread = float(xyz[:, 0].max() - xyz[:, 0].min())
+        y_spread = float(xyz[:, 1].max() - xyz[:, 1].min())
+        if axis == "auto":
+            chosen = "x" if x_spread >= y_spread else "y"
+        else:
+            chosen = axis
+        h = xyz[:, 0] if chosen == "x" else xyz[:, 1]
+        z = xyz[:, 2]
+        if len(h) > 250_000:
+            stride = len(h) // 250_000
+            h = h[::stride]
+            z = z[::stride]
+        h_min, h_max = float(h.min()), float(h.max())
+        z_min, z_max = float(z.min()), float(z.max())
+        # Same fixed-aspect approach as topdown so pixel→world maps linearly.
+        dpi = 100
+        width_in = 12.0
+        height_in = max(2.0, width_in * (z_max - z_min) / max(1e-6, h_max - h_min))
+        fig, ax = _plt.subplots(figsize=(width_in, height_in), dpi=dpi)
+        fig.patch.set_facecolor("#1a1d27")
+        ax.set_facecolor("#0f1117")
+        ax.scatter(h, z, s=0.3, c="#76c8e8", alpha=0.45)
+        ax.set_xlim(h_min, h_max)
+        ax.set_ylim(z_min, z_max)
+        ax.set_aspect("equal")
+        ax.axis("off")
+        fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+        fig.savefig(out_png, dpi=dpi, pad_inches=0)
+        _plt.close(fig)
+        meta = {
+            "bounds": [h_min, z_min, h_max, z_max],
+            "axis": chosen,
+            "point_count": int(len(xyz)),
+        }
+        out_meta.write_text(json.dumps(meta))
+        return meta
+
+    meta = await asyncio.to_thread(_render)
+    return {
+        "image_url": f"/api/jobs/{job_id}/sideview.png?axis={meta['axis']}&t={meta['point_count']}",
+        "bounds": meta["bounds"],
+        "axis": meta["axis"],
+        "point_count": meta["point_count"],
+    }
+
+
+@app.get("/api/jobs/{job_id}/sideview.png")
+async def sideview_image(job_id: str, axis: str = "auto"):
+    if axis not in ("auto", "x", "y"):
+        raise HTTPException(400, "axis must be 'auto', 'x', or 'y'")
+    out_png = JOBS_DIR / job_id / f"sideview_{axis}.png"
+    if not out_png.exists():
+        raise HTTPException(404, "Side-view preview not yet generated; call /sideview first")
+    return FileResponse(str(out_png), media_type="image/png")
+
+
 class CropRequest(BaseModel):
     """Polygon in world XY coords (m). At least 3 vertices required."""
     polygon: List[List[float]]
@@ -1038,6 +1123,13 @@ class ZCropRequest(BaseModel):
     """Vertical crop: keep points with z in [z_min, z_max] (world Z, metres)."""
     z_min: float
     z_max: float
+
+
+class VerticalPolygonCropRequest(BaseModel):
+    """Crop in a side-view: polygon in (h, z) world coords, where h is the
+    horizontal projection axis (either X or Y). At least 3 vertices."""
+    polygon: List[List[float]]
+    axis: str  # "x" or "y"
 
 
 @app.post("/api/jobs/{job_id}/crop_z")
@@ -1100,12 +1192,98 @@ async def crop_points_z(job_id: str, req: ZCropRequest):
     if "error" in result:
         raise HTTPException(400, result["error"])
 
-    # Invalidate the top-down preview so the next /topdown call re-renders.
-    try:
-        (job_dir / "topdown.png").unlink()
-        (job_dir / "topdown.json").unlink()
-    except FileNotFoundError:
-        pass
+    # Invalidate top-down + side-view previews so the next render reflects
+    # the trimmed cloud rather than the cached image of the full one.
+    for cached in ("topdown.png", "topdown.json",
+                   "sideview_auto.png", "sideview_auto.json",
+                   "sideview_x.png", "sideview_x.json",
+                   "sideview_y.png", "sideview_y.json"):
+        try:
+            (job_dir / cached).unlink()
+        except FileNotFoundError:
+            pass
+    return result
+
+
+@app.post("/api/jobs/{job_id}/crop_vertical_polygon")
+async def crop_points_vertical_polygon(job_id: str, req: VerticalPolygonCropRequest):
+    """Filter points.npz to those inside a polygon drawn on the side view.
+
+    Polygon vertices are in world (h, z) where ``h`` is whichever
+    horizontal axis the side view was rendered against. This is the
+    vertical counterpart of the horizontal polygon crop and gives the
+    user a way to remove e.g. a sloping ceiling, scaffolding, or
+    overhanging trees that a flat Z-band can't surgically isolate.
+    """
+    if req.axis not in ("x", "y"):
+        raise HTTPException(400, "axis must be 'x' or 'y'")
+    if len(req.polygon) < 3:
+        raise HTTPException(400, "polygon must have at least 3 vertices")
+
+    job_dir = JOBS_DIR / job_id
+    pts_path = job_dir / "points.npz"
+    if not pts_path.exists():
+        raise HTTPException(404, "points.npz missing — run prepare stage first")
+
+    def _crop():
+        import numpy as _np
+        from matplotlib.path import Path as _MPath
+        data = _np.load(str(pts_path))
+        xyz = data["xyz"]
+        offset = data["offset"]
+        rgb = data["rgb"] if "rgb" in data.files else None
+        h = xyz[:, 0] if req.axis == "x" else xyz[:, 1]
+        z = xyz[:, 2]
+        points_2d = _np.column_stack([h, z])
+        polygon = _np.array(req.polygon, dtype=_np.float64)
+        path = _MPath(polygon)
+        mask = path.contains_points(points_2d)
+        kept = xyz[mask]
+        if len(kept) == 0:
+            return {"error": "polygon contains no points"}
+        save_kwargs = {"xyz": kept.astype(_np.float32), "offset": offset}
+        if rgb is not None:
+            save_kwargs["rgb"] = rgb[mask].astype(_np.float32)
+        _np.savez(str(pts_path), **save_kwargs)
+
+        # Filter labels.npy in lock-step (same logic as the other crops).
+        lbl_path = job_dir / "labels.npy"
+        labels_after = None
+        if lbl_path.exists():
+            try:
+                labels_obj = _np.load(str(lbl_path), allow_pickle=True).item()
+                ids = labels_obj["ids"]
+                if len(ids) == len(xyz):
+                    labels_obj["ids"] = ids[mask]
+                    _np.save(str(lbl_path), labels_obj, allow_pickle=True)
+                    labels_after = int(len(labels_obj["ids"]))
+                else:
+                    lbl_path.unlink()
+            except Exception:
+                lbl_path.unlink(missing_ok=True)
+
+        return {
+            "before": int(len(xyz)),
+            "after": int(len(kept)),
+            "kept_fraction": float(len(kept) / len(xyz)),
+            "labels_after": labels_after,
+            "axis": req.axis,
+        }
+
+    result = await asyncio.to_thread(_crop)
+    if "error" in result:
+        raise HTTPException(400, result["error"])
+
+    # Invalidate both the top-down and the side-view caches so the next
+    # render of either reflects the new cloud.
+    for cached in ("topdown.png", "topdown.json",
+                   "sideview_auto.png", "sideview_auto.json",
+                   "sideview_x.png", "sideview_x.json",
+                   "sideview_y.png", "sideview_y.json"):
+        try:
+            (job_dir / cached).unlink()
+        except FileNotFoundError:
+            pass
     return result
 
 
@@ -1196,12 +1374,16 @@ async def crop_points(job_id: str, req: CropRequest):
     if "error" in result:
         raise HTTPException(400, result["error"])
 
-    # Invalidate cached top-down preview so the next /topdown call re-renders
-    try:
-        (job_dir / "topdown.png").unlink()
-        (job_dir / "topdown.json").unlink()
-    except FileNotFoundError:
-        pass
+    # Invalidate top-down + side-view previews so the next render reflects
+    # the trimmed cloud rather than the cached image of the full one.
+    for cached in ("topdown.png", "topdown.json",
+                   "sideview_auto.png", "sideview_auto.json",
+                   "sideview_x.png", "sideview_x.json",
+                   "sideview_y.png", "sideview_y.json"):
+        try:
+            (job_dir / cached).unlink()
+        except FileNotFoundError:
+            pass
     return result
 
 
