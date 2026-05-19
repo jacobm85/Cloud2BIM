@@ -37,6 +37,15 @@ DEFAULT_DBSCAN_EPS = 0.30        # m — points within this XY distance cluster
 DEFAULT_DBSCAN_MIN_PTS = 50      # noise filter — sparse blobs rejected
 WALL_INLIER_BAND = 0.40          # m — perpendicular inlier band for axis fit
 
+# DBSCAN on open3d's KD-tree scales badly with point count + density:
+# a dense outdoor scan with millions of wall points (e.g. building facades
+# at full LAS resolution) makes the radius queries blow past tens of
+# minutes per storey. We voxel-downsample first so DBSCAN gets a tractable
+# input — clustering only needs the geometry of the wall *surface*, not
+# the underlying raw point density.
+DBSCAN_DOWNSAMPLE_THRESHOLD = 250_000   # points — above this, downsample first
+DBSCAN_DOWNSAMPLE_VOXEL = 0.05          # m — XY voxel size for downsampling
+
 
 def extract_walls_ml(
     storey_points: np.ndarray,
@@ -74,7 +83,23 @@ def extract_walls_ml(
 
     # Project to XY for clustering and axis fitting. Wall height comes
     # from slab spacing, not point Z, so we don't need 3D here.
-    clusters = _dbscan_xy(wall_pts[:, :2], DEFAULT_DBSCAN_EPS, DEFAULT_DBSCAN_MIN_PTS)
+    wall_xy = wall_pts[:, :2]
+    n_in = len(wall_xy)
+    if n_in > DBSCAN_DOWNSAMPLE_THRESHOLD:
+        wall_xy = _voxel_downsample_xy(wall_xy, DBSCAN_DOWNSAMPLE_VOXEL)
+        # Scale min_pts so a "real wall" still has enough points after
+        # downsampling. Going to a hard floor (10) so noise filtering
+        # still works on small storeys with few-but-valid wall surfaces.
+        ratio = max(1e-6, len(wall_xy) / n_in)
+        min_pts = max(10, int(DEFAULT_DBSCAN_MIN_PTS * ratio))
+        log.info(
+            "ML walls storey %d: voxel-downsampled %d → %d points (%.2g× ; min_pts=%d) "
+            "before DBSCAN to keep it tractable",
+            storey_idx, n_in, len(wall_xy), ratio, min_pts,
+        )
+    else:
+        min_pts = DEFAULT_DBSCAN_MIN_PTS
+    clusters = _dbscan_xy(wall_xy, DEFAULT_DBSCAN_EPS, min_pts)
     log.info("ML walls storey %d: %d DBSCAN clusters", storey_idx, len(clusters))
 
     centroid = None
@@ -134,6 +159,25 @@ def extract_walls_ml(
 
 
 # ── internals ─────────────────────────────────────────────────────────────────
+
+
+def _voxel_downsample_xy(xy: np.ndarray, voxel: float) -> np.ndarray:
+    """Snap to a 2D voxel grid and keep one representative per cell.
+
+    Used as a fast pre-pass for DBSCAN on dense wall surfaces — open3d's
+    DBSCAN scales with both point count and local density, both of which
+    are unbounded in a full-resolution outdoor LAS. A 5 cm XY grid still
+    gives DBSCAN enough geometric fidelity to find wall clusters, but
+    runs in seconds instead of tens of minutes on millions of points.
+    """
+    if len(xy) == 0:
+        return xy
+    grid = np.floor(xy / voxel).astype(np.int64)
+    # Combine the two cell coords into a single 64-bit key for unique().
+    # The shift keeps positive and negative coords separable.
+    keys = (grid[:, 0] + (1 << 30)) * (1 << 32) + (grid[:, 1] + (1 << 30))
+    _, unique_idx = np.unique(keys, return_index=True)
+    return xy[unique_idx]
 
 
 def _dbscan_xy(
