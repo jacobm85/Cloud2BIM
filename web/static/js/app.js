@@ -1360,6 +1360,18 @@ async function setupSegmentClassEditor() {
     const data = await res.json();
     classes = data.classes;
     const roles = data.roles;
+    // Passthrough segmentation (geometric mode) emits a single
+    // "unknown" class for every point — the role table can't do
+    // anything useful with that, so hide the whole section instead
+    // of confusing the user with "Ignorera" defaults that aren't
+    // actually decisions.
+    const isPassthrough = classes.length <= 1 &&
+      classes.every(c => c.name === 'unknown' || c.name === 'class_0');
+    if (isPassthrough) {
+      const card = list.closest('div[style*="surface2"]');
+      if (card) card.style.display = 'none';
+      return;
+    }
     const totalPoints = classes.reduce((acc, c) => acc + c.count, 0) || 1;
 
     const rows = classes.map(c => {

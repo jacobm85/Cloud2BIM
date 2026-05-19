@@ -142,13 +142,48 @@ def _find_furthest_points(all_points):
     return sp.tolist(), ep.tolist()
 
 
+def _segment_aabb(seg, pad: float):
+    """Axis-aligned bounding box of a segment, expanded by ``pad`` metres."""
+    x0 = min(seg[0][0], seg[1][0]) - pad
+    x1 = max(seg[0][0], seg[1][0]) + pad
+    y0 = min(seg[0][1], seg[1][1]) - pad
+    y1 = max(seg[0][1], seg[1][1]) + pad
+    return (x0, y0, x1, y1)
+
+
+def _aabbs_overlap(a, b) -> bool:
+    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
+
+
 def _merge_collinear_segments(segments, min_thickness, max_distance):
+    """O(n²) merge of overlapping collinear wall segments — fast path.
+
+    The naive version called ``_segments_collinearity_check`` (which
+    builds 4 distance computations + a perpendicular line-distance
+    test) for every pair, plus an angle check. With 7k segments that's
+    ~50M pair evaluations and ran in 2.5 h on a building-sized scan.
+
+    The fast path is the same algorithm but skips pairs whose
+    AABBs (expanded by max_distance) don't even overlap — those can
+    never be close-enough to merge. That single ``and`` cuts the bulk
+    of the work for any segment cloud that's spatially spread out.
+    """
     final_segments = []
     work = [list(s) for s in segments]
+    # Cache AABBs in a parallel list keyed by id(); rebuild for merged
+    # segments as we go. Using id-keyed dict avoids re-hashing the
+    # list-of-list segments, which Python can't natively cache.
+    aabbs: dict[int, tuple[float, float, float, float]] = {
+        id(s): _segment_aabb(s, max_distance) for s in work
+    }
     while work:
         base = work[0]
+        base_aabb = aabbs[id(base)]
         to_merge = [base]
         for other in work[1:]:
+            other_aabb = aabbs.get(id(other))
+            if other_aabb is None or not _aabbs_overlap(base_aabb, other_aabb):
+                continue
             if (_segments_collinearity_check(base, other, min_thickness, max_distance)
                     and _segments_angle(base, other, angle_tolerance=3)):
                 to_merge.append(other)
@@ -157,10 +192,12 @@ def _merge_collinear_segments(segments, min_thickness, max_distance):
             sp, ep = _find_furthest_points(all_points)
             merged = [sp, ep]
             work.append(merged)
+            aabbs[id(merged)] = _segment_aabb(merged, max_distance)
         else:
             final_segments.append(base)
         for seg in to_merge:
             work.remove(seg)
+            aabbs.pop(id(seg), None)
     return final_segments
 
 

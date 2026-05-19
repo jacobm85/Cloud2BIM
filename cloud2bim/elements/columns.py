@@ -160,16 +160,38 @@ def detect_columns(
 
 def _wall_corridor_mask(walls, clearance: float, x_min: float, y_min: float,
                        pixel_size: float, shape: tuple[int, int]) -> np.ndarray:
-    """Render thick lines along each wall axis into a binary mask."""
+    """Render thick lines along each wall axis into a binary mask.
+
+    Silently skips walls whose endpoints contain NaN/inf — the v1
+    wall pipeline can produce those when collinear merge collapses
+    parallel segments badly, and ``int(float('inf'))`` raises
+    OverflowError. Better to drop a bad wall from the mask than to
+    kill the entire columns stage.
+    """
     mask = np.zeros(shape, dtype=np.uint8)
-    thickness_px = max(1, int(clearance / pixel_size))
+    height, width = shape
+    skipped = 0
     for w in walls:
         sp, ep = w.start, w.end
+        if not all(np.isfinite([sp[0], sp[1], ep[0], ep[1], w.thickness])):
+            skipped += 1
+            continue
         x1 = int((sp[0] - x_min) / pixel_size)
         y1 = int((sp[1] - y_min) / pixel_size)
         x2 = int((ep[0] - x_min) / pixel_size)
         y2 = int((ep[1] - y_min) / pixel_size)
-        # Add half the wall's own thickness too
+        # Clip to image bounds — cv2.line tolerates out-of-range
+        # coords but the mask is bounded anyway and clipping keeps
+        # any rasterisation cost proportional to the visible area.
+        x1 = max(-width, min(2 * width, x1))
+        x2 = max(-width, min(2 * width, x2))
+        y1 = max(-height, min(2 * height, y1))
+        y2 = max(-height, min(2 * height, y2))
         wall_w_px = max(1, int((w.thickness + 2 * clearance) / pixel_size))
         cv2.line(mask, (x1, y1), (x2, y2), 255, wall_w_px)
+    if skipped:
+        log.warning(
+            "_wall_corridor_mask: skipped %d wall(s) with non-finite endpoints",
+            skipped,
+        )
     return mask
