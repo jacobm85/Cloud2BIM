@@ -60,6 +60,21 @@ JOBS_DIR.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="Cloud2BIM Web Interface", docs_url="/api/docs")
 job_manager = JobManager(JOBS_DIR)
 
+# Rehydrate every job_dir we find on disk into the in-memory JobManager.
+# Without this, a container/Uvicorn restart wipes _jobs and any job that
+# was running before vanishes from both /api/jobs/active (filters on
+# in-memory status='running') and /api/jobs/reusable (filters on
+# labels.npy or converted_input.xyz existing). The user can't tell why
+# their job went silent or how to recover it. Rehydration registers
+# every disk-side job as status='failed' so the wizard surfaces it
+# under "Aktiva jobb" with a Retry button.
+try:
+    _rehydrated = job_manager.rehydrate_from_disk()
+    if _rehydrated:
+        print(f"[startup] Rehydrated {_rehydrated} job(s) from disk into JobManager")
+except Exception as _exc:
+    print(f"[startup] Job rehydration failed: {_exc}")
+
 app.mount("/static", StaticFiles(directory=str(_PROJECT_ROOT / "web" / "static")), name="static")
 
 
@@ -475,42 +490,147 @@ async def get_resources():
     return await asyncio.to_thread(_collect)
 
 
-@app.get("/api/jobs/active")
-async def list_active_jobs():
-    """Return jobs whose pipeline is currently running.
+def _describe_jobs_for_active_list() -> list:
+    """Build the Active-jobs list by combining JobManager memory + disk state.
 
-    Pairs the in-memory JobManager status (most authoritative for
-    "running right now") with on-disk metadata so the wizard can
-    re-attach to a job started in another browser tab — or after
-    closing the laptop and coming back. Includes elapsed seconds so
-    the GUI can show "running for 12 min" without needing client-side
-    timer state.
+    Returns one entry per job_dir whose logical status is anything other
+    than 'completed' (those belong in the reuse panel). Status is derived
+    as follows:
+
+      running     — JobManager says so
+      failed      — JobManager says so, or state.json says only some
+                    stages finished and no process is running
+      interrupted — partial state.json on disk but no JobManager entry
+                    (e.g. server died mid-job before rehydration ran)
+      pending     — has config but no state.json yet (uploaded but never
+                    started, or prepare hasn't written its state line
+                    yet — rare race window)
+
+    Also returns ``next_stage`` so the UI can label the Retry button with
+    the actual stage to run.
     """
     from datetime import datetime as _dt
+    from cloud2bim.stepwise import STAGES
+    if not JOBS_DIR.exists():
+        return []
+    in_memory = {j["job_id"]: j for j in job_manager.list_jobs()}
+    seen: set = set()
     result = []
-    for job in job_manager.list_jobs():
-        if job.get("status") != "running":
+    for job_dir in JOBS_DIR.iterdir():
+        if not job_dir.is_dir():
             continue
-        job_id = job["job_id"]
-        job_dir = JOBS_DIR / job_id
+        if not (job_dir / "config.yaml").exists():
+            continue
+        job_id = job_dir.name
+        seen.add(job_id)
+        # Skip completed jobs — they're handled by /api/jobs/reusable.
+        if (job_dir / "output.ifc").exists():
+            continue
+
+        info = {}
         info_path = job_dir / "job_info.json"
-        info = json.loads(info_path.read_text()) if info_path.exists() else {}
-        created = job.get("created_at") or info.get("created_at", "")
+        if info_path.exists():
+            try:
+                info = json.loads(info_path.read_text(encoding="utf-8"))
+            except Exception:
+                info = {}
+        state = {}
+        state_path = job_dir / "state.json"
+        if state_path.exists():
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except Exception:
+                state = {}
+        completed_stages = list(state.keys())
+
+        mem = in_memory.get(job_id)
+        if mem and mem.get("status") == "running":
+            status = "running"
+            current_stage = mem.get("current_stage")
+        elif mem and mem.get("status") == "failed":
+            # Rehydrated jobs were inferred from disk-only state — we
+            # don't actually know if the subprocess died or the server
+            # died. Surface those as "interrupted" so the wizard text
+            # ("Avbrutet") is honest about what we know.
+            status = "interrupted" if mem.get("rehydrated") else "failed"
+            current_stage = mem.get("current_stage")
+        elif not completed_stages:
+            status = "pending"
+            current_stage = None
+        else:
+            status = "interrupted"
+            current_stage = None
+
+        # Next un-done stage (what Retry will run).
+        next_stage = next((s for s in STAGES if s not in completed_stages), None)
+
+        created = (mem.get("created_at") if mem else None) or info.get("created_at", "")
         elapsed_s = None
         if created:
             try:
                 elapsed_s = int((_dt.now() - _dt.fromisoformat(created)).total_seconds())
             except Exception:
                 pass
+
         result.append({
             "job_id": job_id,
-            "mode": job.get("mode"),
-            "current_stage": job.get("current_stage"),
+            "status": status,
+            "mode": (mem or {}).get("mode") or "stepwise",
+            "current_stage": current_stage,
+            "next_stage": next_stage,
+            "completed_stages": completed_stages,
             "created_at": created,
             "elapsed_seconds": elapsed_s,
             "original_filename": info.get("original_filename", job_id),
         })
+
+    # In-memory-only jobs (config not on disk yet — rare, but include
+    # them so the wizard doesn't lose track during the brief gap between
+    # POST /api/jobs and the first config.yaml write).
+    for job_id, mem in in_memory.items():
+        if job_id in seen:
+            continue
+        if mem.get("status") == "completed":
+            continue
+        from datetime import datetime as _dt2
+        created = mem.get("created_at") or ""
+        elapsed_s = None
+        if created:
+            try:
+                elapsed_s = int((_dt2.now() - _dt2.fromisoformat(created)).total_seconds())
+            except Exception:
+                pass
+        result.append({
+            "job_id": job_id,
+            "status": mem.get("status") or "pending",
+            "mode": mem.get("mode") or "stepwise",
+            "current_stage": mem.get("current_stage"),
+            "next_stage": None,
+            "completed_stages": [],
+            "created_at": created,
+            "elapsed_seconds": elapsed_s,
+            "original_filename": job_id,
+        })
+
+    # Sort: running first (so the busy stuff is at the top), then
+    # newest-created — feels right when checking back later.
+    _status_order = {"running": 0, "failed": 1, "interrupted": 2, "pending": 3}
+    result.sort(key=lambda r: (_status_order.get(r["status"], 9), r.get("created_at") or "", r["job_id"]))
     return result
+
+
+@app.get("/api/jobs/active")
+async def list_active_jobs():
+    """Return all jobs that haven't produced an IFC yet.
+
+    Combines in-memory JobManager status with on-disk state.json so the
+    wizard can show: still-running jobs (with a "Hoppa in"-button),
+    failed/interrupted jobs (with Retry + Visa logg + Ta bort), and any
+    job that was started but never made it past upload. The wizard tab
+    badge counts everything here; the count is split by status so the
+    UI can differentiate "running" from "needs attention".
+    """
+    return _describe_jobs_for_active_list()
 
 
 @app.get("/api/jobs/{job_id}/wizard_state")
@@ -1507,13 +1627,30 @@ def _apply_overrides_to_config(config_path: Path, req: RunStageRequest) -> None:
 @app.post("/api/jobs/{job_id}/run_stage")
 async def run_stage(job_id: str, req: RunStageRequest):
     """Run a single stage. If overrides are provided they're written to
-    the job's config.yaml first so re-runs use the new values."""
-    job = job_manager.get_job(job_id)
-    if not job:
-        raise HTTPException(404, "Job not found")
+    the job's config.yaml first so re-runs use the new values.
+
+    Lazy-registers the job in JobManager if it isn't there yet — this is
+    what makes "Försök igen" work for failed/interrupted jobs whose
+    in-memory entry was lost (server restart without rehydration, very
+    old jobs predating persistence). The job_dir must still exist on
+    disk with config.yaml; we don't conjure jobs out of thin air.
+    """
     config_path = JOBS_DIR / job_id / "config.yaml"
     if not config_path.exists():
         raise HTTPException(404, "Job config not found")
+
+    job = job_manager.get_job(job_id)
+    if not job:
+        # Pull input_path out of config so the in-memory entry is consistent
+        # with what create_job would have stored — saves the UI a round-trip.
+        try:
+            with open(config_path) as fh:
+                _cfg = yaml.safe_load(fh) or {}
+            _inputs = ((_cfg.get("io") or {}).get("input_files") or [])
+            input_path = _inputs[0] if _inputs else ""
+        except Exception:
+            input_path = ""
+        job_manager.ensure_job(job_id, input_path=input_path, mode="stepwise")
 
     from cloud2bim.stepwise import STAGES
     if req.stage not in STAGES:

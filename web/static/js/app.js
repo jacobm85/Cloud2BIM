@@ -147,6 +147,16 @@ function stopActiveJobsPolling() {
   }
 }
 
+// Per-status presentation: icon, label, and CSS colour for the status
+// dot/border. Used by both the badge (counts running vs needs-action)
+// and the row renderer so naming stays consistent.
+const JOB_STATUS_META = {
+  running:     { icon: '🟢', label: 'Pågår',     color: 'var(--accent, #4f8ef7)' },
+  failed:      { icon: '⚠️',  label: 'Misslyckades', color: 'var(--danger, #d64545)' },
+  interrupted: { icon: '⏸',  label: 'Avbrutet',   color: 'var(--warn, #d49a3a)' },
+  pending:     { icon: '⏳', label: 'Väntar',     color: 'var(--text-dim)' },
+};
+
 async function updateActiveJobsBadge() {
   const tab = document.getElementById('tab-active');
   if (!tab) return;
@@ -154,13 +164,28 @@ async function updateActiveJobsBadge() {
     const res = await fetch('/api/jobs/active');
     if (!res.ok) return;
     const jobs = await res.json();
-    if (jobs.length > 0) {
-      tab.classList.remove('muted');
-      tab.innerHTML = '<span class="dot"></span>Aktiva jobb (' + jobs.length + ')';
-    } else {
+    const running = jobs.filter(j => j.status === 'running').length;
+    const needsAction = jobs.length - running;
+    if (jobs.length === 0) {
       tab.classList.add('muted');
       tab.innerHTML = 'Aktiva jobb';
+      return;
     }
+    tab.classList.remove('muted');
+    // Show running with the green dot; if there are also failed/
+    // interrupted jobs, append a "(+N)" so the user notices things
+    // that need their attention even when something else is also
+    // running.
+    let html = '';
+    if (running > 0) {
+      html = '<span class="dot"></span>Aktiva jobb (' + running + ')';
+    } else {
+      html = 'Aktiva jobb';
+    }
+    if (needsAction > 0) {
+      html += ' <span style="color:var(--danger,#d64545);font-weight:600">!' + needsAction + '</span>';
+    }
+    tab.innerHTML = html;
   } catch (e) { /* badge is best-effort */ }
 }
 document.addEventListener('DOMContentLoaded', updateActiveJobsBadge);
@@ -176,29 +201,111 @@ async function loadActiveJobs() {
       return;
     }
     list.innerHTML = '';
-    jobs.forEach(job => {
-      const row = document.createElement('div');
-      row.className = 'browser-item';
-      row.style.cssText = 'padding:10px;border-radius:6px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;background:var(--surface2);gap:10px';
-      const elapsed = job.elapsed_seconds == null ? '—' :
-        (job.elapsed_seconds < 60 ? `${job.elapsed_seconds}s` :
-         `${Math.floor(job.elapsed_seconds / 60)}m ${job.elapsed_seconds % 60}s`);
-      const stage = job.current_stage || (job.mode === 'full' ? 'kör hela pipelinen' : '—');
-      row.innerHTML = `
-        <div style="flex:1;min-width:0">
-          <div style="font-weight:600;font-size:13px">${escapeHtml(job.original_filename || job.job_id)}</div>
-          <div style="font-size:11px;color:var(--text-dim)">
-            Steg: <strong style="color:var(--accent,#4f8ef7)">${escapeHtml(stage)}</strong>
-            &nbsp;·&nbsp; ${elapsed} sedan start &nbsp;·&nbsp; ${job.job_id.slice(0,8)}…
-          </div>
-        </div>
-        <button class="btn btn-primary" style="font-size:12px;padding:6px 14px;flex-shrink:0">Hoppa in</button>`;
-      row.querySelector('button').addEventListener('click', () => attachToActiveJob(job));
-      list.appendChild(row);
-    });
+    jobs.forEach(job => renderActiveJobRow(list, job));
   } catch (e) {
     list.innerHTML = '<div style="color:var(--danger);font-size:13px">Kunde inte hämta aktiva jobb: ' + escapeHtml(e.message) + '</div>';
   }
+}
+
+function renderActiveJobRow(container, job) {
+  const meta = JOB_STATUS_META[job.status] || JOB_STATUS_META.pending;
+  const row = document.createElement('div');
+  row.className = 'browser-item';
+  row.style.cssText =
+    'padding:10px;border-radius:6px;margin-bottom:6px;' +
+    'display:flex;justify-content:space-between;align-items:center;' +
+    'background:var(--surface2);gap:10px;' +
+    'border-left:3px solid ' + meta.color + ';';
+
+  const elapsed = job.elapsed_seconds == null ? '—' :
+    (job.elapsed_seconds < 60 ? `${job.elapsed_seconds}s` :
+     job.elapsed_seconds < 3600 ?
+       `${Math.floor(job.elapsed_seconds / 60)}m ${job.elapsed_seconds % 60}s` :
+       `${Math.floor(job.elapsed_seconds / 3600)}h ${Math.floor((job.elapsed_seconds % 3600) / 60)}m`);
+
+  // Detail line: status badge, last/failed stage, completed-stage trail.
+  let detail = `<span style="color:${meta.color};font-weight:600">${meta.icon} ${meta.label}</span>`;
+  const stageLabel = job.current_stage
+    || (job.status === 'running' && job.mode === 'full' ? 'kör hela pipelinen' : null)
+    || job.next_stage;
+  if (stageLabel) {
+    const word = (job.status === 'running') ? 'Steg' :
+                 (job.status === 'failed') ? 'Avstannade på' :
+                 (job.status === 'interrupted') ? 'Avbruten innan' : 'Nästa';
+    detail += ` &nbsp;·&nbsp; ${word}: <strong style="color:var(--accent,#4f8ef7)">${escapeHtml(stageLabel)}</strong>`;
+  }
+  if (job.completed_stages && job.completed_stages.length > 0) {
+    detail += ` &nbsp;·&nbsp; Klart: ${job.completed_stages.length} steg`;
+  }
+  detail += ` &nbsp;·&nbsp; ${elapsed} sedan start &nbsp;·&nbsp; ${job.job_id.slice(0,8)}…`;
+
+  // Action buttons — different per status.
+  let buttons = '';
+  if (job.status === 'running') {
+    buttons = `<button class="btn btn-primary btn-jump" style="font-size:12px;padding:6px 14px;flex-shrink:0">Hoppa in</button>`;
+  } else if (job.status === 'failed' || job.status === 'interrupted') {
+    const retryLabel = job.next_stage ? `Försök igen (${job.next_stage})` : 'Försök igen';
+    buttons = `
+      <button class="btn btn-primary btn-retry" ${job.next_stage ? '' : 'disabled'}
+        style="font-size:12px;padding:6px 14px;flex-shrink:0">${escapeHtml(retryLabel)}</button>
+      <button class="btn btn-outline btn-show-log" style="font-size:12px;padding:6px 10px;flex-shrink:0">Visa logg</button>
+      <button class="btn btn-outline btn-delete" title="Ta bort jobb och alla filer"
+        style="font-size:12px;padding:6px 8px;flex-shrink:0;color:var(--text-dim)">🗑</button>`;
+  } else { // pending
+    buttons = `
+      <button class="btn btn-primary btn-jump" style="font-size:12px;padding:6px 14px;flex-shrink:0">Hoppa in</button>
+      <button class="btn btn-outline btn-delete" title="Ta bort jobb och alla filer"
+        style="font-size:12px;padding:6px 8px;flex-shrink:0;color:var(--text-dim)">🗑</button>`;
+  }
+
+  row.innerHTML = `
+    <div style="flex:1;min-width:0">
+      <div style="font-weight:600;font-size:13px">${escapeHtml(job.original_filename || job.job_id)}</div>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:2px">${detail}</div>
+    </div>
+    <div style="display:flex;gap:6px;flex-shrink:0">${buttons}</div>`;
+
+  const jumpBtn = row.querySelector('.btn-jump');
+  if (jumpBtn) jumpBtn.addEventListener('click', () => attachToActiveJob(job));
+  const retryBtn = row.querySelector('.btn-retry');
+  if (retryBtn) retryBtn.addEventListener('click', () => retryJob(job));
+  const logBtn = row.querySelector('.btn-show-log');
+  if (logBtn) logBtn.addEventListener('click', () => attachToActiveJob(job, { logOnly: true }));
+  const delBtn = row.querySelector('.btn-delete');
+  if (delBtn) delBtn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!confirm(`Ta bort jobbet och alla dess filer?\n${job.original_filename || job.job_id}`)) return;
+    try {
+      const r = await fetch('/api/jobs/' + job.job_id, { method: 'DELETE' });
+      if (!r.ok) throw new Error(await r.text());
+      row.remove();
+      updateActiveJobsBadge();
+    } catch (err) {
+      alert('Kunde inte ta bort jobbet: ' + err.message);
+    }
+  });
+
+  container.appendChild(row);
+}
+
+async function retryJob(job) {
+  if (!job.next_stage) {
+    alert('Inget kvarvarande steg att köra om — jobbet ser ut att vara klart eller saknar tillstånd.');
+    return;
+  }
+  try {
+    const r = await fetch('/api/jobs/' + job.job_id + '/run_stage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage: job.next_stage }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+  } catch (err) {
+    alert('Kunde inte starta om steget: ' + err.message);
+    return;
+  }
+  // Now attach to the running job so the user sees the live log.
+  attachToActiveJob({ ...job, status: 'running', mode: 'stepwise' });
 }
 
 function escapeHtml(s) {
@@ -207,7 +314,8 @@ function escapeHtml(s) {
   ));
 }
 
-async function attachToActiveJob(job) {
+async function attachToActiveJob(job, opts) {
+  opts = opts || {};
   stopActiveJobsPolling();
   // Restore wizard JS state from disk (if it was persisted) so we land
   // in the right stage with the right algorithm, bands, ML settings.
@@ -218,13 +326,13 @@ async function attachToActiveJob(job) {
   // ``wizard`` is a top-level const, not on window — assign directly.
   Object.assign(wizard, savedState, { jobId: job.job_id });
   state.jobId = job.job_id;
-  if (job.mode === 'stepwise') {
-    // Reattach to the SSE log + show wizard panel for the current stage.
+  // logOnly = "Visa logg" on a failed/interrupted job. SSE replays
+  // log_lines from memory (or from disk after rehydration via log.txt),
+  // so the user sees whatever the pipeline last said before dying.
+  // We still land them on step 3 so they can scroll the log and decide.
+  if (job.mode === 'stepwise' || opts.logOnly) {
     document.querySelector('input[name="run-mode"][value="stepwise"]').checked = true;
     goTo(3);
-    // Make sure the wizard panel is the visible one (full-mode panel is the
-    // sibling); the goTo handler usually does this but we set state.jobId
-    // before so the panel switches without reset.
     document.getElementById('run-full-panel').style.display = 'none';
     document.getElementById('run-wizard-panel').style.display = 'block';
     if (typeof window.reattachWizardLog === 'function') {

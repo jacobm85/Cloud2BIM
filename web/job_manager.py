@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -13,6 +14,11 @@ _JOB_MAX_AGE_HOURS = 48
 # take several hours on a single GPU. Overridable via env var for users
 # who want to tighten/relax it without code changes.
 _JOB_TIMEOUT_SECONDS = int(os.environ.get("CLOUD2BIM_JOB_TIMEOUT_SECONDS", str(12 * 60 * 60)))
+
+# Cap the number of log lines kept in memory / restored from disk on
+# rehydration. A long ML run can emit tens of thousands of lines and we
+# only need a tail for "what went wrong" — anything older isn't useful.
+_LOG_TAIL_LIMIT = 5000
 
 
 class JobManager:
@@ -37,6 +43,34 @@ class JobManager:
             self._jobs[job_id] = job
             return dict(job)
 
+    def ensure_job(
+        self, job_id: str, input_path: str, mode: str = "stepwise"
+    ) -> dict:
+        """Idempotent create — returns existing entry if any, else creates one.
+
+        Used to lazy-register a job in memory when the user kicks off a
+        stage on a job whose JobManager entry was lost (server restart
+        before rehydration, or a job that pre-dates persistence). The
+        new entry's log_lines is seeded from the on-disk tail so re-
+        attaching to the SSE log shows the failure that led to the retry.
+        """
+        with self._lock:
+            existing = self._jobs.get(job_id)
+            if existing is not None:
+                return dict(existing)
+            job = {
+                "job_id": job_id,
+                "status": "failed",
+                "mode": mode,
+                "input_path": input_path,
+                "log_lines": _load_log_tail(self.jobs_dir / job_id),
+                "current_stage": None,
+                "created_at": datetime.now().isoformat(),
+                "finished_at": datetime.now().isoformat(),
+            }
+            self._jobs[job_id] = job
+            return dict(job)
+
     def get_job(self, job_id: str) -> Optional[dict]:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -48,6 +82,57 @@ class JobManager:
                 {k: v for k, v in j.items() if k != "log_lines"}
                 for j in self._jobs.values()
             ]
+
+    def rehydrate_from_disk(self) -> int:
+        """Register every job_dir on disk that isn't already in memory.
+
+        Run once at server startup. Any job_dir with a config.yaml but no
+        live in-memory entry is treated as `failed` (the subprocess that
+        was running before the restart is gone). Completed jobs (those
+        whose output.ifc exists) are recorded with status='completed' so
+        the UI can still hit /api/jobs/{id}/* endpoints against them.
+        Returns the number of jobs rehydrated.
+        """
+        if not self.jobs_dir.exists():
+            return 0
+        count = 0
+        for job_dir in self.jobs_dir.iterdir():
+            if not job_dir.is_dir():
+                continue
+            job_id = job_dir.name
+            if job_id in self._jobs:
+                continue
+            config_path = job_dir / "config.yaml"
+            if not config_path.exists():
+                continue
+            info = _read_json(job_dir / "job_info.json")
+            state = _read_json(job_dir / "state.json")
+            output_ifc = job_dir / "output.ifc"
+            status = "completed" if output_ifc.exists() else "failed"
+            mode = "stepwise"  # stages are resumable from any mode
+            created_at = info.get("created_at") or datetime.now().isoformat()
+            # Last completed stage timestamp is the closest thing we have
+            # to a "finished_at" for a job whose process is long gone.
+            finished_at = max(state.values()) if state else created_at
+            with self._lock:
+                self._jobs[job_id] = {
+                    "job_id": job_id,
+                    "status": status,
+                    "mode": mode,
+                    "input_path": "",
+                    "log_lines": _load_log_tail(job_dir),
+                    "current_stage": None,
+                    "created_at": created_at,
+                    "finished_at": finished_at,
+                    # Distinguish "process exited non-zero" (true failure)
+                    # from "the server lost the in-memory entry" (looks
+                    # the same on disk but means something different to
+                    # the user). Cleared the next time a subprocess
+                    # actually runs against this job.
+                    "rehydrated": status != "completed",
+                }
+            count += 1
+        return count
 
     def run_job(self, job_id: str, config_path: str, preprocess_fn=None):
         """Blocking — run the full pipeline. Used for ``mode='full'`` jobs."""
@@ -146,6 +231,11 @@ class JobManager:
         with self._lock:
             if job_id in self._jobs:
                 self._jobs[job_id]["status"] = status
+                if status == "running":
+                    # A real subprocess is now running against this job —
+                    # whatever happens next is an authoritative outcome,
+                    # not an inherited rehydrated state.
+                    self._jobs[job_id]["rehydrated"] = False
                 if status in ("completed", "failed"):
                     self._jobs[job_id]["finished_at"] = datetime.now().isoformat()
 
@@ -158,6 +248,15 @@ class JobManager:
         with self._lock:
             if job_id in self._jobs:
                 self._jobs[job_id]["log_lines"].append(line)
+        # Persist to disk so rehydrated jobs can still show their tail.
+        # Best-effort: a failed write must not break the pipeline.
+        try:
+            log_path = self.jobs_dir / job_id / "log.txt"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except Exception:
+            pass
 
     def _evict_old_jobs(self):
         """Remove completed/failed jobs older than _JOB_MAX_AGE_HOURS from memory."""
@@ -171,3 +270,25 @@ class JobManager:
             ]
             for jid in to_remove:
                 del self._jobs[jid]
+
+
+def _read_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _load_log_tail(job_dir: Path) -> list:
+    """Read the last _LOG_TAIL_LIMIT lines of log.txt, or [] if missing."""
+    path = job_dir / "log.txt"
+    if not path.exists():
+        return []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+        return lines[-_LOG_TAIL_LIMIT:]
+    except Exception:
+        return []
