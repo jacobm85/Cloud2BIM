@@ -104,11 +104,20 @@ def extract_walls_ml(
     wall_axes: list[list[list[float]]] = []
     wall_thicknesses: list[float] = []
     rng = np.random.default_rng(0)  # deterministic re-runs
+    # Below this measured spread only ONE wall face was scanned (a real
+    # two-faced wall is at least min_thickness apart; add one voxel of
+    # quantisation slack — more would misclassify thin double-faced gips
+    # partitions). The true thickness is unknowable from one face, so use
+    # the configured singleton default instead of clipping to the 5 cm
+    # minimum — which made every exterior wall paper-thin in the IFC.
+    single_face_spread = cfg.min_thickness + DOWNSAMPLE_VOXEL
     for cluster_pts in clusters:
         segments = _extract_line_segments(cluster_pts, cfg, rng)
         for axis, thickness in segments:
             if axis is None or _has_nan(axis):
                 continue
+            if thickness < single_face_spread:
+                thickness = cfg.singleton_thickness
             wall_axes.append(axis)
             wall_thicknesses.append(
                 float(np.clip(thickness, cfg.min_thickness, cfg.max_thickness))

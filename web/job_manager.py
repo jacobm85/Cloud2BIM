@@ -247,7 +247,19 @@ class JobManager:
     def _append_log(self, job_id: str, line: str):
         with self._lock:
             if job_id in self._jobs:
-                self._jobs[job_id]["log_lines"].append(line)
+                job = self._jobs[job_id]
+                lines = job["log_lines"]
+                lines.append(line)
+                # Keep only the tail in memory — a verbose ML run can emit
+                # hundreds of thousands of lines and the full history is
+                # already persisted to log.txt below. Trim in one slice
+                # (not per line) so we don't re-copy the list every append.
+                # log_offset counts trimmed lines so the SSE stream's index
+                # cursor stays valid across trims.
+                if len(lines) > _LOG_TAIL_LIMIT + 1000:
+                    n_drop = len(lines) - _LOG_TAIL_LIMIT
+                    del lines[:n_drop]
+                    job["log_offset"] = job.get("log_offset", 0) + n_drop
         # Persist to disk so rehydrated jobs can still show their tail.
         # Best-effort: a failed write must not break the pipeline.
         try:

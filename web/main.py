@@ -943,10 +943,15 @@ async def stream_logs(job_id: str):
         last_idx = 0
         while True:
             job = job_manager.get_job(job_id)
-            new_lines = job["log_lines"][last_idx:]
+            # log_offset = lines trimmed from the front of the in-memory
+            # tail; translate the absolute cursor into a list index so a
+            # trim mid-stream neither stalls nor repeats lines.
+            offset = job.get("log_offset", 0)
+            lines = job["log_lines"]
+            new_lines = lines[max(0, last_idx - offset):]
             for line in new_lines:
                 yield f"data: {json.dumps({'line': line})}\n\n"
-            last_idx += len(new_lines)
+            last_idx = offset + len(lines)
 
             if job["status"] in ("completed", "failed"):
                 yield f"data: {json.dumps({'done': True, 'status': job['status']})}\n\n"
