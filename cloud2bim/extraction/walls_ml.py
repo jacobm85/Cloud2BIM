@@ -16,7 +16,7 @@ Pipeline per storey:
        per straight wall), remove the inliers, repeat
     5. Thickness per run from the robust perpendicular spread
     6. Regularise: snap to dominant directions, merge collinear
-       fragments, close corners (``extraction.regularize``)
+       fragments, close corners (``geometry.regularize``)
 
 The previous implementation fitted ONE principal axis per DBSCAN
 cluster and rejected clusters wider than 0.8 m perpendicular to that
@@ -34,7 +34,7 @@ import numpy as np
 
 from cloud2bim.config import SegmentationConfig, WallConfig
 from cloud2bim.elements.walls import Wall, _has_nan
-from cloud2bim.extraction.regularize import regularize_walls
+from cloud2bim.geometry.regularize import regularize_walls
 from cloud2bim.logging import get_logger
 from cloud2bim.segmentation.base import SemanticLabels
 
@@ -131,12 +131,13 @@ def extract_walls_ml(
         return []
 
     # Regularise: dominant-direction snap, collinear merge, corner close.
-    wall_axes, wall_thicknesses = regularize_walls(
-        wall_axes, wall_thicknesses,
-        collinear_gap=cfg.collinear_merge_distance,
-        corner_snap=max(cfg.max_thickness * 0.6, 0.45),
-        min_length=cfg.min_length,
-    )
+    if cfg.regularize:
+        wall_axes, wall_thicknesses = regularize_walls(
+            wall_axes, wall_thicknesses,
+            collinear_gap=cfg.collinear_merge_distance,
+            corner_snap=max(cfg.max_thickness * 0.6, 0.45),
+            min_length=cfg.min_length,
+        )
 
     # Cap to safety limit, keeping the longest walls.
     if len(wall_axes) > cfg.max_walls_per_storey:

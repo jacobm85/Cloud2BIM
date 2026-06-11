@@ -245,6 +245,24 @@ def detect_walls(
         log.info("Storey %d: low-section filter kept %d / %d walls",
                  storey_idx, len(wall_axes), before)
 
+    # 9c. Regularise in the world frame (after the inverse PCA rotation):
+    #     dominant-direction snap, collinear merge, corner closing. The
+    #     earlier _adjust_intersections pass only snaps endpoints that are
+    #     already near a crossing — this also straightens directions and
+    #     collapses fragment chains.
+    if cfg.regularize and wall_axes:
+        from cloud2bim.geometry.regularize import regularize_walls
+        before = len(wall_axes)
+        wall_axes, wall_thicknesses, wall_labels = regularize_walls(
+            wall_axes, wall_thicknesses, wall_labels,
+            collinear_gap=cfg.collinear_merge_distance,
+            corner_snap=max(cfg.max_thickness * 0.6, 0.45),
+            min_length=cfg.min_length,
+        )
+        if len(wall_axes) != before:
+            log.info("Storey %d: regularize %d → %d walls",
+                     storey_idx, before, len(wall_axes))
+
     # 10. Cap to safety limit
     if len(wall_axes) > cfg.max_walls_per_storey:
         log.warning(

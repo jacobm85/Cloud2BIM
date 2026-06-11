@@ -200,8 +200,17 @@ def detect_walls_vertical(
         log.warning("Vertical walls storey %d: no axes survived filtering", storey_idx)
         return []
 
-    # ── 7. Snap intersections (reuses v2 helper) ────────────────────────
-    wall_axes = _adjust_intersections(wall_axes, cfg.max_thickness)
+    # ── 7. Regularise (or at least snap intersections) ──────────────────
+    if cfg.regularize:
+        from cloud2bim.geometry.regularize import regularize_walls
+        wall_axes, wall_thicknesses = regularize_walls(
+            wall_axes, wall_thicknesses,
+            collinear_gap=cfg.collinear_merge_distance,
+            corner_snap=max(cfg.max_thickness * 0.6, 0.45),
+            min_length=cfg.min_length,
+        )
+    else:
+        wall_axes = _adjust_intersections(wall_axes, cfg.max_thickness)
 
     # Cap to the safety limit
     if len(wall_axes) > cfg.max_walls_per_storey:

@@ -29,6 +29,7 @@ log = get_logger(__name__)
 def regularize_walls(
     axes: list,
     thicknesses: list[float],
+    labels: list[str] | None = None,
     *,
     snap_angle_deg: float = 7.0,
     collinear_angle_deg: float = 4.0,
@@ -36,14 +37,18 @@ def regularize_walls(
     collinear_gap: float = 1.5,
     corner_snap: float = 0.45,
     min_length: float = 0.05,
-) -> tuple[list, list[float]]:
-    """Clean up raw wall axes. Returns (axes, thicknesses).
+):
+    """Clean up raw wall axes.
+
+    Returns ``(axes, thicknesses)``, or ``(axes, thicknesses, labels)``
+    when a ``labels`` list is supplied (the geometric v2 path tracks a
+    per-wall label; merged segments keep the longer member's label).
 
     ``collinear_gap`` should come from ``WallConfig.collinear_merge_distance``
     so the wizard's setting keeps working; the rest have sane fixed defaults.
     """
     if not axes:
-        return [], []
+        return ([], [], []) if labels is not None else ([], [])
     axes = [[list(map(float, a[0])), list(map(float, a[1]))] for a in axes]
     thicknesses = list(thicknesses)
 
@@ -55,8 +60,8 @@ def regularize_walls(
             len(dirs), [round(np.rad2deg(d), 1) for d in dirs], n_snapped, len(axes),
         )
 
-    axes, thicknesses = _merge_collinear(
-        axes, thicknesses,
+    axes, thicknesses, out_labels = _merge_collinear(
+        axes, thicknesses, labels,
         angle_tol=np.deg2rad(collinear_angle_deg),
         offset_tol=collinear_offset,
         gap_tol=collinear_gap,
@@ -65,12 +70,12 @@ def regularize_walls(
     _snap_corners(axes, corner_snap)
 
     # Drop segments that collapsed below min_length during merging/snapping.
-    kept_axes, kept_t = [], []
-    for ax, t in zip(axes, thicknesses):
-        if _length(ax) >= min_length:
-            kept_axes.append(ax)
-            kept_t.append(t)
-    return kept_axes, kept_t
+    keep = [i for i, ax in enumerate(axes) if _length(ax) >= min_length]
+    axes = [axes[i] for i in keep]
+    thicknesses = [thicknesses[i] for i in keep]
+    if labels is not None:
+        return axes, thicknesses, [out_labels[i] for i in keep]
+    return axes, thicknesses
 
 
 # ── internals ────────────────────────────────────────────────────────────────
@@ -164,20 +169,25 @@ def _snap_to_directions(axes: list, dirs: list[float], tol: float) -> int:
 def _merge_collinear(
     axes: list,
     thicknesses: list[float],
+    labels: list[str] | None,
     angle_tol: float,
     offset_tol: float,
     gap_tol: float,
-) -> tuple[list, list[float]]:
+) -> tuple[list, list[float], list[str]]:
     """Merge near-collinear segments. Iterates until no merge applies.
 
     Two segments merge when their directions agree within ``angle_tol``,
     their perpendicular offset is within ``offset_tol`` and the 1D gap
     along the shared direction is below ``gap_tol``. The merged segment
     spans the union of both projections, sits on the length-weighted mean
-    line, and keeps the larger thickness.
+    line, and keeps the larger thickness (and the longer member's label).
     """
+    if labels is None:
+        labels = [""] * len(axes)
     items = [
-        {"ax": ax, "t": t} for ax, t in zip(axes, thicknesses) if _length(ax) > 1e-9
+        {"ax": ax, "t": t, "lbl": lbl}
+        for ax, t, lbl in zip(axes, thicknesses, labels)
+        if _length(ax) > 1e-9
     ]
     changed = True
     while changed:
@@ -196,7 +206,11 @@ def _merge_collinear(
                     items[j] = None
                     changed = True
         items = [it for it in items if it is not None]
-    return [it["ax"] for it in items], [it["t"] for it in items]
+    return (
+        [it["ax"] for it in items],
+        [it["t"] for it in items],
+        [it["lbl"] for it in items],
+    )
 
 
 def _try_merge_pair(it1, it2, angle_tol, offset_tol, gap_tol):
@@ -235,6 +249,7 @@ def _try_merge_pair(it1, it2, angle_tol, offset_tol, gap_tol):
     return {
         "ax": [[float(p1[0]), float(p1[1])], [float(p2[0]), float(p2[1])]],
         "t": max(it1["t"], it2["t"]),
+        "lbl": it1["lbl"] if l1 >= l2 else it2["lbl"],
     }
 
 

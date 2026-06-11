@@ -243,6 +243,16 @@ class WallConfig(BaseModel):
         default=True,
         description="Pre-filter pointcloud to wall_classes before histogram",
     )
+    regularize: bool = Field(
+        default=True,
+        description=(
+            "Post-process detected wall axes: snap directions to the "
+            "building's dominant orientations, merge collinear fragments, "
+            "close corners. Applies to the ML, v2 and vertical wall paths "
+            "(v1 is kept untouched as the known-good baseline). Disable "
+            "to see the raw detector output."
+        ),
+    )
     enable_ransac_fallback: bool = Field(
         default=True,
         description="Try 3D plane RANSAC for walls the 2D histogram misses (curved walls)",
