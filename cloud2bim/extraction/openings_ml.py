@@ -87,7 +87,13 @@ def _dbscan_xyz(
         return []
     pc = o3d.geometry.PointCloud()
     pc.points = o3d.utility.Vector3dVector(points.astype(np.float64))
-    labels = np.asarray(pc.cluster_dbscan(eps=eps, min_points=min_pts, print_progress=False))
+    # open3d's min_points is the *core-point density* requirement (number
+    # of neighbours within eps), NOT a cluster-size filter. Window glass
+    # and door leaves return sparse points — demanding 30 neighbours in
+    # 25 cm means no core points ever form and every opening is missed.
+    # Use a low core requirement; cluster size is filtered below.
+    core_pts = max(4, min_pts // 6)
+    labels = np.asarray(pc.cluster_dbscan(eps=eps, min_points=core_pts, print_progress=False))
     clusters = []
     for k in range(int(labels.max()) + 1 if labels.size and labels.max() >= 0 else 0):
         m = labels == k

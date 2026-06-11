@@ -111,12 +111,20 @@ def extract_walls_ml(
     # the configured singleton default instead of clipping to the 5 cm
     # minimum — which made every exterior wall paper-thin in the IFC.
     single_face_spread = cfg.min_thickness + DOWNSAMPLE_VOXEL
+    interior = wall_xy.mean(axis=0)
     for cluster_pts in clusters:
         segments = _extract_line_segments(cluster_pts, cfg, rng)
         for axis, thickness in segments:
             if axis is None or _has_nan(axis):
                 continue
             if thickness < single_face_spread:
+                # One face seen → the fitted axis sits ON that face, not on
+                # the wall centreline. Shift half the assumed thickness away
+                # from the building interior so the IFC wall body lands
+                # where the real wall is instead of half-inside the room.
+                axis = _shift_outward(
+                    axis, interior, (cfg.singleton_thickness - thickness) / 2,
+                )
                 thickness = cfg.singleton_thickness
             wall_axes.append(axis)
             wall_thicknesses.append(
@@ -227,6 +235,23 @@ def _classify_exterior(wall_axes: list, wall_xy: np.ndarray) -> list[bool]:
         probes = (a, (a + b) / 2, b)
         flags.append(all(dist_to_hull(p) <= EXTERIOR_HULL_TOL for p in probes))
     return flags
+
+
+def _shift_outward(axis: list, interior: np.ndarray, dist: float) -> list:
+    """Translate a wall axis ``dist`` metres along its normal, away from
+    ``interior`` (the storey's wall-point centroid)."""
+    a = np.asarray(axis[0], float)
+    b = np.asarray(axis[1], float)
+    d = b - a
+    norm = float(np.hypot(*d))
+    if norm < 1e-9 or dist <= 0:
+        return axis
+    n_vec = np.array([-d[1], d[0]]) / norm
+    mid = (a + b) / 2
+    if float(n_vec @ (interior - mid)) > 0:
+        n_vec = -n_vec
+    a, b = a + n_vec * dist, b + n_vec * dist
+    return [[float(a[0]), float(a[1])], [float(b[0]), float(b[1])]]
 
 
 def _axis_length(ax) -> float:
