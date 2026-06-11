@@ -27,6 +27,24 @@ class IOConfig(BaseModel):
         default=True,
         description="Subtract XY minimum before processing (required for SWEREF etc.)",
     )
+    denoise: bool = Field(
+        default=True,
+        description=(
+            "Statistical outlier removal before segmentation. Drops points "
+            "whose mean neighbour distance is an outlier — scanner ghosting, "
+            "reflections off glass, and dust that otherwise smear walls and "
+            "create phantom surfaces. Skipped automatically for clouds over "
+            "~40M points (KD-tree cost); dilute first in that case."
+        ),
+    )
+    denoise_neighbors: int = Field(
+        default=12, ge=4,
+        description="Neighbours used for the mean-distance estimate",
+    )
+    denoise_std_ratio: float = Field(
+        default=2.5, gt=0,
+        description="Points beyond mean + this·σ of neighbour distance are dropped. Lower = more aggressive.",
+    )
 
     @field_validator("input_files", mode="before")
     @classmethod

@@ -70,14 +70,22 @@ def detect_columns(
 
     if semantic_labels is not None and column_classes:
         mask = semantic_labels.mask_for(column_classes)
-        n_before = len(storey_points)
-        storey_points = storey_points[mask]
-        log.info(
-            "Storey %d (columns): label filter %s kept %d / %d points",
-            storey_idx, list(column_classes), len(storey_points), n_before,
-        )
-        if len(storey_points) == 0:
-            return []
+        n_labelled = int(mask.sum())
+        if n_labelled >= cfg.min_points:
+            log.info(
+                "Storey %d (columns): label filter %s kept %d / %d points",
+                storey_idx, list(column_classes), n_labelled, len(storey_points),
+            )
+            storey_points = storey_points[mask]
+        else:
+            # Indoor models label columns rarely — a handful of points
+            # can't drive blob detection, but the geometric path still
+            # can. Fall back rather than silently finding nothing.
+            log.info(
+                "Storey %d (columns): only %d column-labelled points (<%d) — "
+                "using geometric detection over all storey points",
+                storey_idx, n_labelled, cfg.min_points,
+            )
 
     storey_height = max(0.1, z_ceiling - z_floor)
 

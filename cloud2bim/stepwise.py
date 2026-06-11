@@ -41,7 +41,7 @@ from cloud2bim.extraction import extract_openings_ml, extract_slabs_ml, extract_
 from cloud2bim.ifc import IfcBuilder
 from cloud2bim.io import center_xy, read_pointcloud
 from cloud2bim.io.coordinates import CoordinateOffset
-from cloud2bim.io.readers import diluted
+from cloud2bim.io.readers import diluted, remove_outliers
 from cloud2bim.logging import get_logger
 from cloud2bim.segmentation import SemanticLabels, create_segmenter
 from cloud2bim.segmentation.base import load_cached_labels, save_cached_labels
@@ -206,6 +206,17 @@ def stage_prepare(cfg: Config) -> None:
         log.info("Diluted %s → %s points (1/%d)", f"{n0:,}", f"{len(pts):,}", cfg.io.dilution_factor)
     elif read_diluted:
         log.info("Dilution applied during read (PTX streaming) — skipping post-read dilute")
+
+    if cfg.io.denoise:
+        t_dn = time.time()
+        pts, rgb, n_removed = remove_outliers(
+            pts, rgb,
+            neighbors=cfg.io.denoise_neighbors,
+            std_ratio=cfg.io.denoise_std_ratio,
+        )
+        if n_removed:
+            log.info("Denoise: removed %s outlier points in %.1fs",
+                     f"{n_removed:,}", time.time() - t_dn)
 
     if cfg.io.center_coordinates:
         pts, offset = center_xy(pts)

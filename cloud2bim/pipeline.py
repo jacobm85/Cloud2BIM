@@ -32,7 +32,7 @@ from cloud2bim.legacy import detect_openings_v1, detect_slabs_v1, detect_walls_v
 from cloud2bim.ifc import IfcBuilder
 from cloud2bim.io import center_xy, read_pointcloud
 from cloud2bim.io.coordinates import CoordinateOffset
-from cloud2bim.io.readers import diluted
+from cloud2bim.io.readers import diluted, remove_outliers
 from cloud2bim.logging import get_logger
 from cloud2bim.segmentation import SemanticLabels, create_segmenter
 from cloud2bim.segmentation.base import load_cached_labels, save_cached_labels
@@ -64,6 +64,18 @@ def run_pipeline(cfg: Config) -> int:
         log.info("Diluted: %s → %s points (1/%d)", f"{n_before:,}", f"{len(points_xyz):,}", cfg.io.dilution_factor)
     elif read_diluted:
         log.info("Dilution applied during read (PTX streaming) — skipping post-read dilute")
+
+    # ── 2b. Outlier removal ─────────────────────────────────────────────
+    if cfg.io.denoise:
+        t0 = time.time()
+        points_xyz, points_rgb, n_removed = remove_outliers(
+            points_xyz, points_rgb,
+            neighbors=cfg.io.denoise_neighbors,
+            std_ratio=cfg.io.denoise_std_ratio,
+        )
+        if n_removed:
+            log.info("Denoise: removed %s outlier points in %.1fs",
+                     f"{n_removed:,}", time.time() - t0)
 
     # ── 3. Centre coordinates (SWEREF safety) ───────────────────────────
     if cfg.io.center_coordinates:
@@ -199,10 +211,17 @@ def run_pipeline(cfg: Config) -> int:
         from cloud2bim.elements.columns import detect_columns
         log.info("─── Column segmentation ───")
         t0 = time.time()
+        column_classes: list[str] = []
+        if cfg.pipeline_mode in ("ml", "hybrid"):
+            column_classes = list(cfg.segmentation.column_classes or [])
         for i in range(len(slabs) - 1):
             z_floor = slabs[i].bottom_z + slabs[i].thickness
             z_ceiling = slabs[i + 1].bottom_z
             storey_mask = (points_xyz[:, 2] >= z_floor) & (points_xyz[:, 2] <= z_ceiling)
+            col_labels = SemanticLabels(
+                label_ids=labels.label_ids[storey_mask],
+                label_names=labels.label_names,
+            )
             try:
                 cols = detect_columns(
                     storey_points=points_xyz[storey_mask],
@@ -211,6 +230,8 @@ def run_pipeline(cfg: Config) -> int:
                     cfg=cfg.columns,
                     pc_resolution=cfg.slabs.pc_resolution,
                     grid_coefficient=cfg.slabs.grid_coefficient,
+                    semantic_labels=col_labels,
+                    column_classes=column_classes,
                 )
             except Exception:
                 log.exception("Storey %d column detection failed", i)

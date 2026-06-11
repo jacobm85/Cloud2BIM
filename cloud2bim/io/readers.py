@@ -369,3 +369,54 @@ def diluted(points: np.ndarray, factor: int) -> np.ndarray:
     if factor <= 1:
         return points
     return points[::factor]
+
+
+DENOISE_MAX_POINTS = 40_000_000  # KD-tree build above this takes too long
+
+
+def remove_outliers(
+    xyz: np.ndarray,
+    rgb: np.ndarray | None = None,
+    neighbors: int = 12,
+    std_ratio: float = 2.5,
+) -> tuple[np.ndarray, np.ndarray | None, int]:
+    """Statistical outlier removal. Returns (xyz, rgb, n_removed).
+
+    Drops points whose mean distance to ``neighbors`` nearest points is
+    more than ``std_ratio`` standard deviations above the cloud average —
+    scanner ghosting, glass reflections and airborne dust. These outliers
+    smear wall faces (inflating fitted thickness) and can register as
+    phantom horizontal surfaces in slab detection.
+
+    No-ops (with a log line) when the cloud is too small to estimate the
+    statistics or too large to KD-tree in reasonable time.
+    """
+    n = len(xyz)
+    if n < 1_000:
+        return xyz, rgb, 0
+    if n > DENOISE_MAX_POINTS:
+        log.warning(
+            "Denoise skipped: %s points exceeds the %s limit — increase "
+            "dilution if you want outlier removal on this scan",
+            f"{n:,}", f"{DENOISE_MAX_POINTS:,}",
+        )
+        return xyz, rgb, 0
+    try:
+        import open3d as o3d
+    except ImportError:
+        log.warning("Denoise skipped: open3d not installed")
+        return xyz, rgb, 0
+
+    pc = o3d.geometry.PointCloud()
+    pc.points = o3d.utility.Vector3dVector(xyz.astype(np.float64))
+    _, keep_idx = pc.remove_statistical_outlier(
+        nb_neighbors=neighbors, std_ratio=std_ratio,
+    )
+    keep_idx = np.asarray(keep_idx)
+    if len(keep_idx) == n:
+        return xyz, rgb, 0
+    return (
+        xyz[keep_idx],
+        rgb[keep_idx] if rgb is not None else None,
+        n - len(keep_idx),
+    )
