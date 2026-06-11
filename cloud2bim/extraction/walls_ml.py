@@ -140,6 +140,7 @@ def extract_walls_ml(
         wall_axes = [wall_axes[k] for k in keep]
         wall_thicknesses = [wall_thicknesses[k] for k in keep]
 
+    exterior_flags = _classify_exterior(wall_axes, wall_xy)
     wall_height = z_ceiling - z_floor
     walls = [
         Wall(
@@ -149,15 +150,73 @@ def extract_walls_ml(
             z_placement=z_floor,
             height=wall_height,
             storey=storey_idx,
-            label="wall",
+            label="exterior" if ext else "interior",
         )
-        for ax, t in zip(wall_axes, wall_thicknesses)
+        for ax, t, ext in zip(wall_axes, wall_thicknesses, exterior_flags)
     ]
-    log.info("ML walls storey %d: %d walls finalised", storey_idx, len(walls))
+    log.info(
+        "ML walls storey %d: %d walls finalised (%d exterior)",
+        storey_idx, len(walls), sum(exterior_flags),
+    )
     return walls
 
 
 # ── internals ─────────────────────────────────────────────────────────────────
+
+
+EXTERIOR_HULL_TOL = 0.40   # m — wall axis within this of the footprint hull
+                           # counts as exterior. Covers hull-chord cutoff at
+                           # slightly concave corners plus axis-vs-face offset.
+
+
+def _classify_exterior(wall_axes: list, wall_xy: np.ndarray) -> list[bool]:
+    """Flag walls on the building envelope.
+
+    The envelope is approximated by the convex hull of all wall points in
+    the storey; a wall whose start, mid and end points all lie within
+    ``EXTERIOR_HULL_TOL`` of the hull boundary is exterior. Interior walls
+    sit well inside the hull, so the test is forgiving about tolerance.
+    Concave footprints (L/U-shapes) mark the re-entrant walls as interior
+    — wrong for those segments, but IsExternal=false is also what the old
+    behaviour gave, so concavity never makes things worse.
+    """
+    if not wall_axes:
+        return []
+    try:
+        from scipy.spatial import ConvexHull
+        hull = ConvexHull(wall_xy)
+        hull_pts = wall_xy[hull.vertices]
+    except Exception as exc:
+        log.warning("Exterior classification skipped (hull failed: %s)", exc)
+        return [False] * len(wall_axes)
+
+    # Hull edges as (a, b) pairs, closed.
+    edges = [
+        (hull_pts[i], hull_pts[(i + 1) % len(hull_pts)])
+        for i in range(len(hull_pts))
+    ]
+
+    def dist_to_hull(p: np.ndarray) -> float:
+        best = np.inf
+        for a, b in edges:
+            ab = b - a
+            denom = float(ab @ ab)
+            if denom < 1e-12:
+                d = float(np.hypot(*(p - a)))
+            else:
+                t = float(np.clip((p - a) @ ab / denom, 0.0, 1.0))
+                d = float(np.hypot(*(p - (a + t * ab))))
+            if d < best:
+                best = d
+        return best
+
+    flags: list[bool] = []
+    for ax in wall_axes:
+        a = np.asarray(ax[0], dtype=float)
+        b = np.asarray(ax[1], dtype=float)
+        probes = (a, (a + b) / 2, b)
+        flags.append(all(dist_to_hull(p) <= EXTERIOR_HULL_TOL for p in probes))
+    return flags
 
 
 def _axis_length(ax) -> float:
