@@ -32,8 +32,7 @@ log = get_logger(__name__)
 DEFAULT_Z_CLUSTER_TOL = 0.30      # m — points within this Z range cluster
 MIN_POINTS_PER_SURFACE = 200       # below this we ignore a candidate
 RANSAC_THICKNESS_TOL = 0.05        # m — inlier band for horizontal plane fit
-MAX_PAIRING_GAP = 6.0              # m — ceiling further than this isn't paired
-MIN_STOREY_HEIGHT = 1.8            # m — drop floor-ceiling pairs below this
+MIN_STOREY_HEIGHT = 1.8            # m — adjacent slabs closer than this can't both be real
 
 
 def extract_slabs_ml(
@@ -65,7 +64,8 @@ def extract_slabs_ml(
         len(floor_surfaces), len(ceiling_surfaces),
     )
 
-    return _pair_floors_with_ceilings(floor_surfaces, ceiling_surfaces, cfg)
+    slabs = _merge_surfaces_to_slabs(floor_surfaces, ceiling_surfaces, cfg)
+    return _drop_implausible_levels(slabs)
 
 
 # ── internals ─────────────────────────────────────────────────────────────────
@@ -173,72 +173,102 @@ def _ransac_horizontal_plane(
     return z_est, np.where(final_inliers)[0]
 
 
-def _pair_floors_with_ceilings(
+def _merge_surfaces_to_slabs(
     floors: Sequence[dict],
     ceilings: Sequence[dict],
     cfg: SlabConfig,
 ) -> list[Slab]:
-    """Build a sequence of Slab objects from floor+ceiling surfaces.
+    """Turn detected horizontal surfaces into physical Slab objects.
 
-    Each floor surface pairs with the nearest ceiling above it that's
-    within ``MAX_PAIRING_GAP`` and at least ``MIN_STOREY_HEIGHT`` above.
-    The slab itself is centered on the floor surface; the ceiling is
-    used only to derive storey height for the wall stage.
+    The scanner sees two surfaces per intermediate slab: the *underside*
+    (labelled ceiling, storey below) and the *top* (labelled floor,
+    storey above). Those two must become ONE Slab — emitting both used
+    to create a bogus slab-thickness "storey" between them, which the
+    pipeline then filled with junk walls.
 
-    Unpaired ceilings become their own Slab (so the user still sees the
-    roof when only one floor was detected). Unpaired floors stay too.
+    Merge rule: a ceiling surface followed by a floor surface within
+    ``max_slab_thickness`` (plus noise margin) is one slab spanning
+    bottom = ceiling z, top = floor z. Leftover floors are slab *tops*
+    (bottom = z − default thickness); leftover ceilings are slab
+    *bottoms* (the roof slab seen only from below).
     """
+    surfaces = sorted(
+        [{**f, "kind": "floor"} for f in floors]
+        + [{**c, "kind": "ceiling"} for c in ceilings],
+        key=lambda s: s["z"],
+    )
+    merge_band = max(cfg.max_slab_thickness, 0.6)
+
     slabs: list[Slab] = []
-    used_ceiling_ids: set[int] = set()
-
-    for floor in floors:
-        polygon_x, polygon_y = _surface_polygon(floor["points"])
-        slabs.append(Slab(
-            bottom_z=floor["z"],
-            thickness=max(floor["thickness"], cfg.bottom_floor_thickness),
-            polygon_x=polygon_x,
-            polygon_y=polygon_y,
-            points=floor["points"],
-        ))
-        # Pair to nearest valid ceiling — only logged, doesn't change Slab.
-        candidates = [
-            (i, c) for i, c in enumerate(ceilings)
-            if i not in used_ceiling_ids
-            and MIN_STOREY_HEIGHT <= c["z"] - floor["z"] <= MAX_PAIRING_GAP
-        ]
-        if candidates:
-            i_paired, c_paired = min(candidates, key=lambda x: x[1]["z"])
-            used_ceiling_ids.add(i_paired)
+    i = 0
+    while i < len(surfaces):
+        s = surfaces[i]
+        nxt = surfaces[i + 1] if i + 1 < len(surfaces) else None
+        if (
+            s["kind"] == "ceiling"
+            and nxt is not None
+            and nxt["kind"] == "floor"
+            and -0.05 <= nxt["z"] - s["z"] <= merge_band
+        ):
+            pts = np.vstack([s["points"], nxt["points"]])
+            polygon_x, polygon_y = _surface_polygon(pts)
+            thickness = max(nxt["z"] - s["z"], 0.05)
             log.info(
-                "ML slabs: floor z=%.2f paired with ceiling z=%.2f (storey h=%.2f m)",
-                floor["z"], c_paired["z"], c_paired["z"] - floor["z"],
+                "ML slabs: merged ceiling z=%.2f + floor z=%.2f into one slab (t=%.2f m)",
+                s["z"], nxt["z"], thickness,
             )
-
-    # Emit any ceilings that didn't pair as standalone slabs so the wall
-    # stage still has a ceiling reference. They get top_floor_thickness.
-    for i, c in enumerate(ceilings):
-        if i in used_ceiling_ids:
-            # Even paired ceilings need to be emitted as Slab — the pipeline
-            # iterates slabs[i+1] to get z_ceiling for storey i.
-            polygon_x, polygon_y = _surface_polygon(c["points"])
             slabs.append(Slab(
-                bottom_z=c["z"],
-                thickness=max(c["thickness"], cfg.top_floor_thickness),
-                polygon_x=polygon_x,
-                polygon_y=polygon_y,
-                points=c["points"],
+                bottom_z=s["z"], thickness=thickness,
+                polygon_x=polygon_x, polygon_y=polygon_y, points=pts,
+            ))
+            i += 2
+            continue
+        polygon_x, polygon_y = _surface_polygon(s["points"])
+        if s["kind"] == "floor":
+            # Surface is the slab's TOP — place the body below it.
+            t = max(s["thickness"], cfg.bottom_floor_thickness)
+            slabs.append(Slab(
+                bottom_z=s["z"] - t, thickness=t,
+                polygon_x=polygon_x, polygon_y=polygon_y, points=s["points"],
             ))
         else:
-            polygon_x, polygon_y = _surface_polygon(c["points"])
+            # Lone ceiling = roof slab seen from below; surface is the BOTTOM.
             slabs.append(Slab(
-                bottom_z=c["z"],
-                thickness=max(c["thickness"], cfg.top_floor_thickness),
-                polygon_x=polygon_x,
-                polygon_y=polygon_y,
-                points=c["points"],
+                bottom_z=s["z"], thickness=max(s["thickness"], cfg.top_floor_thickness),
+                polygon_x=polygon_x, polygon_y=polygon_y, points=s["points"],
             ))
+        i += 1
 
     slabs.sort(key=lambda s: s.bottom_z)
+    return slabs
+
+
+def _drop_implausible_levels(slabs: list[Slab]) -> list[Slab]:
+    """Remove slabs that imply a storey shorter than ``MIN_STOREY_HEIGHT``.
+
+    Mislabelled horizontal clutter (table tops, scaffolding decks) can
+    survive as a fake floor a metre above the real one. When two adjacent
+    slabs are too close to fit a storey, keep the one supported by more
+    points — that's the real building surface.
+    """
+    if len(slabs) < 2:
+        return slabs
+    changed = True
+    while changed and len(slabs) >= 2:
+        changed = False
+        for i in range(len(slabs) - 1):
+            gap = slabs[i + 1].bottom_z - (slabs[i].bottom_z + slabs[i].thickness)
+            if gap < MIN_STOREY_HEIGHT:
+                drop = i if len(slabs[i].points) < len(slabs[i + 1].points) else i + 1
+                log.warning(
+                    "ML slabs: storey between z=%.2f and z=%.2f is only %.2f m — "
+                    "dropping the weaker slab (%d vs %d support points)",
+                    slabs[i].bottom_z, slabs[i + 1].bottom_z, gap,
+                    len(slabs[i].points), len(slabs[i + 1].points),
+                )
+                del slabs[drop]
+                changed = True
+                break
     return slabs
 
 

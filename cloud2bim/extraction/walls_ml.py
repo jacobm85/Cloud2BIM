@@ -7,16 +7,24 @@ that ambiguity: we only fit walls to points the segmenter marked as
 ``wall``.
 
 Pipeline per storey:
-    1. Slice storey points + labels to z ∈ [floor, ceiling]
-    2. Keep only wall-labelled points
-    3. DBSCAN in XY → one cluster per discrete wall segment
-    4. For each cluster: fit a 2D line via PCA, treat the line as the
-       wall axis, derive thickness from inlier spread perpendicular to
-       the axis
-    5. Snap endpoints to nearby intersections (reuses v2 helper)
+    1. Keep only wall-labelled points, project to XY
+    2. Voxel-downsample so thresholds and runtimes are density-independent
+    3. DBSCAN → connected components (separates detached structures)
+    4. Per component: *iterative RANSAC line extraction* — fit the best
+       2D line, take its inliers, split them into contiguous runs along
+       the line (a corner-connected wall network yields many lines, one
+       per straight wall), remove the inliers, repeat
+    5. Thickness per run from the robust perpendicular spread
+    6. Regularise: snap to dominant directions, merge collinear
+       fragments, close corners (``extraction.regularize``)
 
-Skips PCA building-rotation entirely — every cluster picks its own axis.
-That naturally handles non-axis-aligned and rotated buildings.
+The previous implementation fitted ONE principal axis per DBSCAN
+cluster and rejected clusters wider than 0.8 m perpendicular to that
+axis. Since the walls of a storey are connected at corners, DBSCAN
+returns the whole wall network as a single cluster — which was then
+rejected wholesale, or collapsed onto a meaningless diagonal axis.
+Iterative line extraction is the fix: it peels one straight wall at a
+time out of the connected network.
 """
 from __future__ import annotations
 
@@ -25,7 +33,8 @@ from typing import List, Optional
 import numpy as np
 
 from cloud2bim.config import SegmentationConfig, WallConfig
-from cloud2bim.elements.walls import Wall, _adjust_intersections, _has_nan
+from cloud2bim.elements.walls import Wall, _has_nan
+from cloud2bim.extraction.regularize import regularize_walls
 from cloud2bim.logging import get_logger
 from cloud2bim.segmentation.base import SemanticLabels
 
@@ -33,18 +42,18 @@ log = get_logger(__name__)
 
 
 # Tunables that don't (yet) deserve config fields.
-DEFAULT_DBSCAN_EPS = 0.30        # m — points within this XY distance cluster
-DEFAULT_DBSCAN_MIN_PTS = 50      # noise filter — sparse blobs rejected
-WALL_INLIER_BAND = 0.40          # m — perpendicular inlier band for axis fit
-
-# DBSCAN on open3d's KD-tree scales badly with point count + density:
-# a dense outdoor scan with millions of wall points (e.g. building facades
-# at full LAS resolution) makes the radius queries blow past tens of
-# minutes per storey. We voxel-downsample first so DBSCAN gets a tractable
-# input — clustering only needs the geometry of the wall *surface*, not
-# the underlying raw point density.
-DBSCAN_DOWNSAMPLE_THRESHOLD = 250_000   # points — above this, downsample first
-DBSCAN_DOWNSAMPLE_VOXEL = 0.05          # m — XY voxel size for downsampling
+DOWNSAMPLE_VOXEL = 0.03      # m — XY voxel for the working copy. Density-
+                             # normalises the cloud so min-point thresholds
+                             # mean the same thing for every scanner.
+DBSCAN_EPS = 0.35            # m — XY gap that separates detached components
+DBSCAN_MIN_PTS = 15          # on the voxel-downsampled cloud
+RANSAC_INLIER_DIST = 0.18    # m — captures both faces of walls ≤ ~36 cm
+RANSAC_ITERS = 300           # candidate lines per extraction round
+RANSAC_SCORE_SUBSET = 25_000 # points used for candidate scoring
+MAX_LINES_PER_CLUSTER = 80   # safety cap on extraction rounds
+RUN_GAP = 0.50               # m — gap along the line that splits two runs
+                             # (door gaps re-merge later via collinear merge)
+MIN_RUN_POINTS = 12          # voxelised points for a run to count
 
 
 def extract_walls_ml(
@@ -81,65 +90,55 @@ def extract_walls_ml(
         storey_idx, len(wall_pts), 100 * len(wall_pts) / len(storey_points),
     )
 
-    # Project to XY for clustering and axis fitting. Wall height comes
-    # from slab spacing, not point Z, so we don't need 3D here.
-    wall_xy = wall_pts[:, :2]
-    n_in = len(wall_xy)
-    if n_in > DBSCAN_DOWNSAMPLE_THRESHOLD:
-        wall_xy = _voxel_downsample_xy(wall_xy, DBSCAN_DOWNSAMPLE_VOXEL)
-        # Scale min_pts so a "real wall" still has enough points after
-        # downsampling. Going to a hard floor (10) so noise filtering
-        # still works on small storeys with few-but-valid wall surfaces.
-        ratio = max(1e-6, len(wall_xy) / n_in)
-        min_pts = max(10, int(DEFAULT_DBSCAN_MIN_PTS * ratio))
-        log.info(
-            "ML walls storey %d: voxel-downsampled %d → %d points (%.2g× ; min_pts=%d) "
-            "before DBSCAN to keep it tractable",
-            storey_idx, n_in, len(wall_xy), ratio, min_pts,
-        )
-    else:
-        min_pts = DEFAULT_DBSCAN_MIN_PTS
-    clusters = _dbscan_xy(wall_xy, DEFAULT_DBSCAN_EPS, min_pts)
-    log.info("ML walls storey %d: %d DBSCAN clusters", storey_idx, len(clusters))
+    # Wall height comes from slab spacing, not point Z — XY is enough.
+    n_in = len(wall_pts)
+    wall_xy = _voxel_downsample_xy(wall_pts[:, :2], DOWNSAMPLE_VOXEL)
+    log.info(
+        "ML walls storey %d: voxel-normalised %d → %d points (%.0f cm grid)",
+        storey_idx, n_in, len(wall_xy), DOWNSAMPLE_VOXEL * 100,
+    )
 
-    centroid = None
-    if not exterior_scan and slab_polygon_xy is not None and len(slab_polygon_xy) >= 3:
-        centroid = (
-            float(np.asarray(slab_polygon_xy)[:, 0].mean()),
-            float(np.asarray(slab_polygon_xy)[:, 1].mean()),
-        )
+    clusters = _dbscan_xy(wall_xy, DBSCAN_EPS, DBSCAN_MIN_PTS)
+    log.info("ML walls storey %d: %d connected components", storey_idx, len(clusters))
 
     wall_axes: list[list[list[float]]] = []
     wall_thicknesses: list[float] = []
-
+    rng = np.random.default_rng(0)  # deterministic re-runs
     for cluster_pts in clusters:
-        axis, thickness = _fit_wall_axis(cluster_pts)
-        if axis is None or _has_nan(axis):
-            continue
-        # Length filter
-        seg_len = float(np.hypot(axis[1][0] - axis[0][0], axis[1][1] - axis[0][1]))
-        if seg_len < cfg.min_length:
-            continue
-        # Thickness sanity (clip to config min/max).
-        thickness = float(np.clip(thickness, cfg.min_thickness, cfg.max_thickness))
-        wall_axes.append(axis)
-        wall_thicknesses.append(thickness)
-
+        segments = _extract_line_segments(cluster_pts, cfg, rng)
+        for axis, thickness in segments:
+            if axis is None or _has_nan(axis):
+                continue
+            wall_axes.append(axis)
+            wall_thicknesses.append(
+                float(np.clip(thickness, cfg.min_thickness, cfg.max_thickness))
+            )
+    log.info(
+        "ML walls storey %d: %d raw segments from line extraction",
+        storey_idx, len(wall_axes),
+    )
     if not wall_axes:
-        log.warning("ML walls storey %d: no clusters survived axis fitting", storey_idx)
+        log.warning("ML walls storey %d: no wall segments extracted", storey_idx)
         return []
 
-    # Snap intersections (reuses the v2 helper, which is NaN-safe).
-    wall_axes = _adjust_intersections(wall_axes, cfg.max_thickness)
+    # Regularise: dominant-direction snap, collinear merge, corner close.
+    wall_axes, wall_thicknesses = regularize_walls(
+        wall_axes, wall_thicknesses,
+        collinear_gap=cfg.collinear_merge_distance,
+        corner_snap=max(cfg.max_thickness * 0.6, 0.45),
+        min_length=cfg.min_length,
+    )
 
-    # Cap to safety limit.
+    # Cap to safety limit, keeping the longest walls.
     if len(wall_axes) > cfg.max_walls_per_storey:
         log.warning(
-            "ML walls storey %d: clipping %d walls down to max %d",
+            "ML walls storey %d: clipping %d walls down to max %d (keeping longest)",
             storey_idx, len(wall_axes), cfg.max_walls_per_storey,
         )
-        wall_axes = wall_axes[: cfg.max_walls_per_storey]
-        wall_thicknesses = wall_thicknesses[: cfg.max_walls_per_storey]
+        order = np.argsort([-_axis_length(a) for a in wall_axes])
+        keep = sorted(order[: cfg.max_walls_per_storey])
+        wall_axes = [wall_axes[k] for k in keep]
+        wall_thicknesses = [wall_thicknesses[k] for k in keep]
 
     wall_height = z_ceiling - z_floor
     walls = [
@@ -161,15 +160,12 @@ def extract_walls_ml(
 # ── internals ─────────────────────────────────────────────────────────────────
 
 
-def _voxel_downsample_xy(xy: np.ndarray, voxel: float) -> np.ndarray:
-    """Snap to a 2D voxel grid and keep one representative per cell.
+def _axis_length(ax) -> float:
+    return float(np.hypot(ax[1][0] - ax[0][0], ax[1][1] - ax[0][1]))
 
-    Used as a fast pre-pass for DBSCAN on dense wall surfaces — open3d's
-    DBSCAN scales with both point count and local density, both of which
-    are unbounded in a full-resolution outdoor LAS. A 5 cm XY grid still
-    gives DBSCAN enough geometric fidelity to find wall clusters, but
-    runs in seconds instead of tens of minutes on millions of points.
-    """
+
+def _voxel_downsample_xy(xy: np.ndarray, voxel: float) -> np.ndarray:
+    """Snap to a 2D voxel grid and keep one representative per cell."""
     if len(xy) == 0:
         return xy
     grid = np.floor(xy / voxel).astype(np.int64)
@@ -214,41 +210,137 @@ def _dbscan_xy(
     return clusters
 
 
-def _fit_wall_axis(
+def _extract_line_segments(
     cluster_xy: np.ndarray,
-) -> tuple[Optional[list[list[float]]], float]:
-    """PCA-based axis fit. Returns (axis, thickness) or (None, 0).
+    cfg: WallConfig,
+    rng: np.random.Generator,
+) -> list[tuple[list[list[float]], float]]:
+    """Peel straight wall segments out of one connected component.
 
-    The wall's principal axis is the eigenvector of the points' XY
-    covariance matrix. Length is the extent along that axis; thickness
-    is the extent perpendicular to it.
+    Repeats: RANSAC the best line → PCA-refine on its inliers → split the
+    inliers into contiguous runs along the line → emit each long-enough
+    run as (axis, thickness) → remove the inliers → continue on the rest.
     """
-    if len(cluster_xy) < 3:
-        return None, 0.0
+    segments: list[tuple[list[list[float]], float]] = []
+    remaining = cluster_xy
+    for _ in range(MAX_LINES_PER_CLUSTER):
+        if len(remaining) < MIN_RUN_POINTS:
+            break
+        line = _ransac_line(remaining, RANSAC_INLIER_DIST, rng)
+        if line is None:
+            break
+        origin, direction = line
+        d = _perp_distances(remaining, origin, direction)
+        inlier_mask = d <= RANSAC_INLIER_DIST
+        if int(inlier_mask.sum()) < MIN_RUN_POINTS:
+            break
 
-    centroid = cluster_xy.mean(axis=0)
-    centred = cluster_xy - centroid
-    cov = np.cov(centred.T)
-    if not np.isfinite(cov).all():
-        return None, 0.0
-    eigvals, eigvecs = np.linalg.eigh(cov)
-    # Largest eigenvalue → long axis.
-    order = np.argsort(eigvals)[::-1]
-    axis_dir = eigvecs[:, order[0]]
-    perp_dir = eigvecs[:, order[1]]
+        # PCA refine: re-centre the line on its inliers (2 rounds). This
+        # pulls the axis to the midline when the wall was scanned from
+        # both sides (two parallel point faces).
+        inliers = remaining[inlier_mask]
+        for _ in range(2):
+            origin = inliers.mean(axis=0)
+            cov = np.cov((inliers - origin).T)
+            if not np.isfinite(cov).all():
+                break
+            eigvals, eigvecs = np.linalg.eigh(cov)
+            direction = eigvecs[:, int(np.argmax(eigvals))]
+            d = _perp_distances(remaining, origin, direction)
+            inlier_mask = d <= RANSAC_INLIER_DIST
+            inliers = remaining[inlier_mask]
+            if len(inliers) < MIN_RUN_POINTS:
+                break
+        if len(inliers) < MIN_RUN_POINTS:
+            remaining = remaining[~inlier_mask]
+            continue
 
-    proj_long = centred @ axis_dir
-    proj_perp = centred @ perp_dir
-    long_min, long_max = float(proj_long.min()), float(proj_long.max())
-    perp_min, perp_max = float(proj_perp.min()), float(proj_perp.max())
+        segments.extend(_runs_to_segments(inliers, origin, direction, cfg))
+        remaining = remaining[~inlier_mask]
+    return segments
 
-    # Drop clusters whose perpendicular spread exceeds the inlier band —
-    # these are usually corners where two walls were under-segmented into
-    # one cluster, and an axis fit through them is meaningless.
-    if perp_max - perp_min > WALL_INLIER_BAND * 2:
-        return None, 0.0
 
-    start = centroid + long_min * axis_dir
-    end = centroid + long_max * axis_dir
-    thickness = float(perp_max - perp_min)
-    return [[float(start[0]), float(start[1])], [float(end[0]), float(end[1])]], thickness
+def _perp_distances(xy: np.ndarray, origin: np.ndarray, direction: np.ndarray) -> np.ndarray:
+    normal = np.array([-direction[1], direction[0]])
+    return np.abs((xy - origin) @ normal)
+
+
+def _ransac_line(
+    xy: np.ndarray,
+    inlier_dist: float,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Best 2-point line by inlier count. Returns (origin, unit_direction).
+
+    Scoring runs on a random subset so dense storeys don't make each
+    candidate evaluation O(N); the caller recomputes exact inliers on the
+    full set afterwards.
+    """
+    n = len(xy)
+    if n < 2:
+        return None
+    score_pts = xy
+    if n > RANSAC_SCORE_SUBSET:
+        score_pts = xy[rng.choice(n, RANSAC_SCORE_SUBSET, replace=False)]
+
+    best_score = 0
+    best: tuple[np.ndarray, np.ndarray] | None = None
+    for _ in range(RANSAC_ITERS):
+        i, j = rng.integers(0, n, size=2)
+        p, q = xy[i], xy[j]
+        v = q - p
+        norm = float(np.hypot(v[0], v[1]))
+        if norm < 0.30:  # too close — direction estimate would be noise
+            continue
+        u = v / norm
+        score = int((_perp_distances(score_pts, p, u) <= inlier_dist).sum())
+        if score > best_score:
+            best_score = score
+            best = (p.astype(float), u.astype(float))
+    if best is None or best_score < MIN_RUN_POINTS:
+        return None
+    return best
+
+
+def _runs_to_segments(
+    inliers: np.ndarray,
+    origin: np.ndarray,
+    direction: np.ndarray,
+    cfg: WallConfig,
+) -> list[tuple[list[list[float]], float]]:
+    """Split a line's inliers into contiguous runs; one segment per run.
+
+    A line through a building typically crosses several distinct walls
+    (e.g. the same line continues through a corridor into the next room's
+    wall) — the gaps between runs separate them.
+    """
+    proj = (inliers - origin) @ direction
+    order = np.argsort(proj)
+    proj_sorted = proj[order]
+    pts_sorted = inliers[order]
+
+    breaks = np.where(np.diff(proj_sorted) > RUN_GAP)[0] + 1
+    segments: list[tuple[list[list[float]], float]] = []
+    start = 0
+    for stop in list(breaks) + [len(proj_sorted)]:
+        run_pts = pts_sorted[start:stop]
+        run_proj = proj_sorted[start:stop]
+        start = stop
+        if len(run_pts) < MIN_RUN_POINTS:
+            continue
+        seg_len = float(run_proj[-1] - run_proj[0])
+        if seg_len < cfg.min_length:
+            continue
+        # Robust thickness: central 96 % of the perpendicular spread, so a
+        # few stray voxels don't inflate a 10 cm partition to 40 cm.
+        perp = (run_pts - origin) @ np.array([-direction[1], direction[0]])
+        thickness = float(np.percentile(perp, 98) - np.percentile(perp, 2))
+        mid_perp = float(np.median(perp))
+        normal = np.array([-direction[1], direction[0]])
+        p1 = origin + run_proj[0] * direction + mid_perp * normal
+        p2 = origin + run_proj[-1] * direction + mid_perp * normal
+        segments.append((
+            [[float(p1[0]), float(p1[1])], [float(p2[0]), float(p2[1])]],
+            thickness,
+        ))
+    return segments

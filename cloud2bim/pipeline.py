@@ -333,11 +333,20 @@ def _detect_slabs_dispatch(
         except Exception:
             log.exception("ML slab extraction crashed")
             slabs = []
-        if slabs and len(slabs) >= 2:
-            return slabs, 0.0  # ML path is rotation-agnostic
-        if cfg.pipeline_mode == "ml":
-            log.warning("ML mode: slab extraction returned %d slabs — keeping result", len(slabs))
-            return slabs, 0.0
+        if (slabs and len(slabs) >= 2) or cfg.pipeline_mode == "ml":
+            if cfg.pipeline_mode == "ml" and len(slabs) < 2:
+                log.warning("ML mode: slab extraction returned %d slabs — keeping result", len(slabs))
+            # ML slab extraction itself is rotation-agnostic, but hybrid
+            # mode may still fall back to the *geometric* wall detector for
+            # individual storeys — and that one needs the building's PCA
+            # angle. Compute it here so the fallback isn't stuck at 0°.
+            pca_angle = 0.0
+            try:
+                zh = compute_z_histogram(points_xyz, cfg.slabs.z_step, cfg.slabs.peak_height_ratio)
+                pca_angle = compute_building_pca(points_xyz, zh.peak_z)
+            except Exception:
+                log.exception("Building PCA computation failed — assuming 0°")
+            return slabs, pca_angle
         log.warning(
             "Hybrid: ML found %d slabs (<2) — falling back to geometric (%s)",
             len(slabs), cfg.algorithm,
@@ -518,7 +527,7 @@ def _load_inputs(cfg: Config) -> tuple[np.ndarray, np.ndarray | None, bool]:
         else:
             rgb_chunks.append(rgb)
     if not xyz_chunks:
-        return np.empty((0, 3)), None
+        return np.empty((0, 3)), None, False
     xyz = np.vstack(xyz_chunks) if len(xyz_chunks) > 1 else xyz_chunks[0]
     if all_have_rgb and rgb_chunks:
         rgb = np.vstack(rgb_chunks) if len(rgb_chunks) > 1 else rgb_chunks[0]

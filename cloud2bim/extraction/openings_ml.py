@@ -33,6 +33,9 @@ log = get_logger(__name__)
 DBSCAN_EPS = 0.25                  # m — opening points within this XY radius cluster
 DBSCAN_MIN_PTS = 30                # noise filter
 MAX_WALL_DISTANCE = 0.50           # m — opening farther than this isn't matched
+DOOR_MIN_WIDTH = 0.55              # m — narrower door clusters are label noise
+MERGE_GAP = 0.10                   # m — same-wall same-kind openings closer than
+                                   # this merge into one (split DBSCAN clusters)
 
 
 def extract_openings_ml(
@@ -63,7 +66,7 @@ def extract_openings_ml(
             op = _opening_from_cluster(cluster_pts, walls, kind, cfg)
             if op is not None:
                 openings.append(op)
-    return openings
+    return _merge_overlapping(openings)
 
 
 # ── internals ────────────────────────────────────────────────────────────────
@@ -115,9 +118,23 @@ def _opening_from_cluster(
 
     wall = walls[wall_idx]
     along = _project_onto_axis(cluster_pts[:, :2], wall)
-    along_min, along_max = float(along.min()), float(along.max())
+    wall_len = float(np.hypot(wall.end[0] - wall.start[0], wall.end[1] - wall.start[1]))
+    # Clamp to the wall's extent — labelled points can spill past a wall
+    # end (e.g. a glazed corner) and an IFC opening outside its host wall
+    # breaks the void boolean in most viewers.
+    along_min = float(np.clip(along.min(), 0.0, wall_len))
+    along_max = float(np.clip(along.max(), 0.0, wall_len))
     z_min = float(cluster_pts[:, 2].min())
     z_max = float(cluster_pts[:, 2].max())
+
+    wall_top = wall.z_placement + wall.height
+    if kind == "door":
+        # Doors start at the floor. The scanner rarely sees points at the
+        # threshold itself (it's open!), so the lowest labelled point can
+        # float well above the floor — snap it down.
+        z_min = wall.z_placement
+    z_max = min(z_max, wall_top)
+    z_min = max(z_min, wall.z_placement)
 
     width = along_max - along_min
     height = z_max - z_min
@@ -125,7 +142,7 @@ def _opening_from_cluster(
         if width < cfg.min_window_width or height < cfg.min_window_height:
             return None
     else:
-        if height < cfg.door_min_height:
+        if height < cfg.door_min_height or width < DOOR_MIN_WIDTH:
             return None
 
     return Opening(
@@ -137,6 +154,36 @@ def _opening_from_cluster(
         z_min=z_min,
         z_max=z_max,
     )
+
+
+def _merge_overlapping(openings: List[Opening]) -> List[Opening]:
+    """Merge same-wall, same-kind openings that overlap or nearly touch.
+
+    DBSCAN can split one window into two clusters (e.g. a mullion gap in
+    the labels); two overlapping IFC openings on the same wall render as
+    z-fighting voids. Classic interval merge along the wall axis.
+    """
+    by_host: dict[tuple[int, int, str], list[Opening]] = {}
+    for op in openings:
+        by_host.setdefault((op.wall_storey, op.wall_index, op.type), []).append(op)
+
+    merged: List[Opening] = []
+    for group in by_host.values():
+        group.sort(key=lambda o: o.x_along_wall_start)
+        current = group[0]
+        for op in group[1:]:
+            if op.x_along_wall_start <= current.x_along_wall_end + MERGE_GAP:
+                current.x_along_wall_end = max(current.x_along_wall_end, op.x_along_wall_end)
+                current.z_min = min(current.z_min, op.z_min)
+                current.z_max = max(current.z_max, op.z_max)
+            else:
+                merged.append(current)
+                current = op
+        merged.append(current)
+    if len(merged) < len(openings):
+        log.info("ML openings: merged %d → %d after overlap resolution",
+                 len(openings), len(merged))
+    return merged
 
 
 def _nearest_wall(
