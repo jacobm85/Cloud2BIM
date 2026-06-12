@@ -525,7 +525,7 @@ class Config(BaseModel):
         ),
     )
 
-    algorithm: Literal["v1", "v2", "vertical"] = Field(
+    algorithm: Literal["v1", "v2", "vertical", "v4"] = Field(
         default="v1",
         description=(
             "Wall + slab detection variant. 'v1' = original Cloud2BIM "
@@ -533,9 +533,12 @@ class Config(BaseModel):
             "'v2' = rewrite with geometric tweaks; use after verifying "
             "it beats v1 on your data. 'vertical' = vertical-continuity "
             "approach — a wall is any XY-pixel column that's filled "
-            "from floor to ceiling. Robust against furniture and "
-            "diagonal building orientations because each pixel is "
-            "evaluated independently. Only consulted when pipeline_mode "
+            "from floor to ceiling. 'v4' = evidence-grid detector "
+            "(docs/v4-design.md): vertical-persistence raster + RANSAC "
+            "line peeling for walls, prominence/coverage Z-peaks for "
+            "slabs, absence-evidence + label union for openings. Works "
+            "entirely without ML labels and uses them only as a soft "
+            "weight when present. Only consulted when pipeline_mode "
             "includes a geometric stage."
         ),
     )

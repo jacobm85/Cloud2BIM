@@ -37,8 +37,42 @@ Anteckningar:
   fönster-/dörrpunkter bildade aldrig kluster ⇒ 0 öppningar. Fixad i
   `openings_ml.py` (lågt kärnkrav + storleksfilter efteråt).
 
+## Resultat 2026-06-12 — v4 (evidensraster) + brusläge
+
+Bänken har nu `--noisy` (15 % felmärkta punkter + 6 skuggsektorer),
+flervåningsscenariot `kontor2v`, v1-rader och `--fast` (hoppar v1).
+
+Väggar F1, **brusigt läge** (det fältrelevanta):
+
+| Scenario  | v4    | ml   | v2   | v1*  |
+|-----------|-------|------|------|------|
+| kontor    | 0.96  | 0.96 | 0.69 | 0.56 |
+| bostad    | 0.86  | 0.93 | 0.88 | 0.63 |
+| vård      | 0.76  | 0.91 | —    | —    |
+| industri  | **0.92** | 0.36 | 0.75 | 0.18 |
+| garage    | **0.89** | 0.57 | —    | —    |
+| kontor30° | 0.85  | 0.89 | —    | —    |
+
+\* v1 tar 3–120 **minuter** per scenario (övriga 0,1–1 s); v1-siffror
+från körning med något äldre v4-kod, v1-raderna opåverkade.
+
+- v4 slabbar: rätt antal nivåer i ALLA scenarier, clean och noisy,
+  inkl. kontor2v (3 slabbar, 2/2 golvnivåer).
+- v4 slår v1 överallt, med brus och utan — användarens fältobservation
+  "v1 bäst" förklaras av att ML-vägen (inte v1) var trasig på riktiga
+  skanningar; v4 ger histogram-robusthet + ML-precision.
+- Verklig skanning (gråskala, 7,8M pkt): v4 hittar golv −0,94 m,
+  takzon 1,71–2,15 m som EN slab (undertak+installation+stomme),
+  13 väggar med trovärdiga tjocklekar på 1 s. Se temp/ (ej i git).
+
+**Kvarvarande v4-svagheter** (fortsättning på task #9):
+1. Öppningar under brus: R 0,29–0,75 (skuggor blockerar col_support;
+   etikettunionens klustertrösklar). ML-raden klarar R 0,67–1,00 på
+   samma data — unionen ska upp till det.
+2. kontor30 (roterat): fönsterbandsväggen fragmenteras, F1 0,81 clean.
+3. vård noisy R=0,65: korta korridorväggar under skuggor.
+
 ## Saknas ännu i bänken
 
-Flervåningsscenario (bjälklagssammanslagningen!), trappor, runda pelare,
-krökta väggar, ofullständig skanning (skuggade väggpartier), etikettbrus
-(simulera modellfel: x % felklassade punkter).
+Trappor, runda pelare, krökta väggar, varierande punkttäthet
+(närfält/fjärrfält), multi-skanner-registreringsfel.

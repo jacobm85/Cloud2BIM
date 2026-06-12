@@ -325,6 +325,17 @@ def stage_slabs(cfg: Config) -> None:
         if cfg.algorithm == "v1":
             slabs = detect_slabs_v1(pts, cfg.slabs)
             pca_angle = 0.0
+        elif cfg.algorithm == "v4":
+            from cloud2bim.elements.v4 import detect_slabs_v4
+            v4_labels = None
+            try:
+                v4_labels = load_labels(cfg)
+            except FileNotFoundError:
+                pass  # v4 runs label-free; labels only sharpen the histogram
+            slabs = detect_slabs_v4(pts, cfg.slabs,
+                                    semantic_labels=v4_labels,
+                                    seg_cfg=cfg.segmentation)
+            pca_angle = 0.0
         else:
             pca_angle = compute_building_pca(pts, zh.peak_z)
             slabs = detect_slabs(pts, cfg.slabs, pca_angle=pca_angle)

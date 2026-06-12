@@ -375,6 +375,12 @@ def _detect_slabs_dispatch(
 
     if cfg.algorithm == "v1":
         return detect_slabs_v1(points_xyz, cfg.slabs), 0.0
+    if cfg.algorithm == "v4":
+        from cloud2bim.elements.v4 import detect_slabs_v4
+        return detect_slabs_v4(
+            points_xyz, cfg.slabs,
+            semantic_labels=labels, seg_cfg=cfg.segmentation,
+        ), 0.0  # v4 is rotation-agnostic
     zh = compute_z_histogram(points_xyz, cfg.slabs.z_step, cfg.slabs.peak_height_ratio)
     pca_angle = compute_building_pca(points_xyz, zh.peak_z)
     return detect_slabs(points_xyz, cfg.slabs, pca_angle=pca_angle), pca_angle
@@ -428,6 +434,16 @@ def _detect_walls_dispatch(
         if walls or cfg.pipeline_mode == "ml":
             return walls
         log.warning("Hybrid storey %d: ML walls empty — falling back to geometric", storey_idx)
+
+    if cfg.algorithm == "v4":
+        from cloud2bim.elements.v4 import detect_walls_v4
+        return detect_walls_v4(
+            storey_points=storey_pts,
+            z_floor=z_floor, z_ceiling=z_ceiling, storey_idx=storey_idx,
+            cfg=cfg.walls,
+            semantic_labels=storey_labels, seg_cfg=cfg.segmentation,
+            slab_polygon_xy=slab_polygon_xy,
+        )
 
     wall_fn = _pick_wall_fn(cfg.algorithm)
     return wall_fn(
@@ -493,6 +509,14 @@ def _detect_openings_dispatch(
             return openings
         log.info("Hybrid: ML openings empty — trying geometric")
 
+    if cfg.algorithm == "v4":
+        from cloud2bim.elements.v4 import detect_openings_v4
+        return detect_openings_v4(
+            walls=walls,
+            storey_points=storey_pts,
+            cfg=cfg.openings,
+            semantic_labels=storey_labels, seg_cfg=cfg.segmentation,
+        )
     if cfg.algorithm == "v1":
         return detect_openings_v1(
             walls=walls,

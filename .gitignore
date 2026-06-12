@@ -31,3 +31,4 @@ data/
 *.laz
 *.xyz
 .venv/
+temp/

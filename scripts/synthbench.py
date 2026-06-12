@@ -8,9 +8,17 @@ algorithms from segmentation-model quality — a detector that fails
 here fails everywhere.
 
 Usage:
-    python scripts/synthbench.py            # all scenarios
-    python scripts/synthbench.py kontor     # one scenario
-    python scripts/synthbench.py kontor30   # rotated variant
+    python scripts/synthbench.py                  # all scenarios, clean
+    python scripts/synthbench.py kontor           # one scenario
+    python scripts/synthbench.py --noisy          # 15 % label noise +
+                                                  # scan shadows on all
+    python scripts/synthbench.py kontor --noisy   # combine freely
+
+``--noisy`` models real-scan conditions: a fraction of points gets a
+wrong semantic label (segmentation-model errors) and angular sectors
+are thinned out (scanner occlusion shadows). This is the mode that
+decides whether an algorithm is field-ready — the clean mode only
+checks the geometry math.
 
 Scenarios model the building types Cloud2BIM is used on:
     kontor    — cellkontor + korridor, fönsterband, möbler
@@ -110,7 +118,8 @@ def add_wall(b: Build, p1, p2, z0, z1, thickness,
     u = d / length
     n_vec = np.array([-u[1], u[0]])
     gt_idx = len(b.gt_walls)
-    b.gt_walls.append({"axis": [p1.tolist(), p2.tolist()], "thickness": thickness})
+    b.gt_walls.append({"axis": [p1.tolist(), p2.tolist()],
+                       "thickness": thickness, "z0": z0})
 
     offsets = [thickness / 2, -thickness / 2] if two_sided else [thickness / 2]
     for off in offsets:
@@ -293,6 +302,36 @@ def scen_garage(rotation=0.0):
     return b.finish(rotation)
 
 
+def scen_kontor2v(rotation=0.0):
+    """12×10 m kontor i TVÅ plan — testar bjälklagsparning/sammanslagning.
+
+    Mellanbjälklag: undersida (tak plan 1) på 2.7, ovansida (golv plan 2)
+    på 3.0. Förväntade slabbar: botten, mellan (sammanslagen), tak = 3.
+    """
+    b = Build()
+    H1, SLAB_T, H2 = 2.7, 0.30, 2.5
+    z2 = H1 + SLAB_T          # 3.0 — floor of storey 2
+    z_roof = z2 + H2          # 5.5
+    add_floor(b, 0, 0, 12, 10, 0.0)
+    add_slab_pair(b, 0, 0, 12, 10, z2, SLAB_T)
+    add_ceiling(b, 0, 0, 12, 10, z_roof)
+    b.gt_slab_levels.append(z2)
+    perimeter = (((0, 0), (12, 0)), ((12, 0), (12, 10)),
+                 ((12, 10), (0, 10)), ((0, 10), (0, 0)))
+    # storey-0 walls first — the bench scores storey 0 and slices GT by order
+    for p1, p2 in perimeter:
+        add_wall(b, p1, p2, 0, H1, 0.30, two_sided=False)
+    add_wall(b, (6, 0), (6, 10), 0, H1, 0.12,
+             openings=[("door", 4.0, 4.9, 0, 2.1)])
+    for p1, p2 in perimeter:
+        add_wall(b, p1, p2, z2, z_roof, 0.30, two_sided=False)
+    add_wall(b, (4, 0), (4, 10), z2, z_roof, 0.12,
+             openings=[("door", 6.0, 6.9, z2, z2 + 2.1)])
+    add_clutter(b, 0, 0, 12, 10, 0, 8)
+    add_clutter(b, 0, 0, 12, 10, z2, 8)
+    return b.finish(rotation)
+
+
 SCENARIOS = {
     "kontor": scen_kontor,
     "bostad": scen_bostad,
@@ -300,7 +339,58 @@ SCENARIOS = {
     "industri": scen_industri,
     "garage": scen_garage,
     "kontor30": lambda: scen_kontor(rotation=30.0),
+    "kontor2v": scen_kontor2v,
 }
+
+
+# ── realism: label noise + scan shadows ──────────────────────────────────────
+
+
+LABEL_NOISE_FRACTION = 0.15   # share of points given a WRONG class
+SHADOW_COUNT = 6              # occlusion sectors per scan
+SHADOW_KEEP = 0.15            # share of points surviving inside a shadow
+
+
+def with_label_noise(labels: SemanticLabels, frac: float, rng) -> SemanticLabels:
+    """Corrupt ``frac`` of the labels to a random other class.
+
+    Models segmentation-model errors. Uniform corruption is *harsher*
+    than real confusion patterns (wall↔board, door↔wall) for the
+    detectors that filter on labels — which is the point: an algorithm
+    must survive it.
+    """
+    ids = labels.label_ids.copy()
+    n = len(ids)
+    idx = rng.choice(n, int(n * frac), replace=False)
+    ids[idx] = rng.integers(0, len(labels.label_names), len(idx))
+    return SemanticLabels(ids, labels.label_names)
+
+
+def with_shadows(xyz, labels: SemanticLabels, rng,
+                 k=SHADOW_COUNT, keep=SHADOW_KEEP):
+    """Thin out k random angular sectors — scanner occlusion shadows.
+
+    Each shadow: from a random interior position, points further than
+    2 m away inside a 15–35° azimuth wedge are mostly removed. Creates
+    the wall holes and missing faces that fragment line/contour tracing
+    on real scans.
+    """
+    centre = xyz[:, :2].mean(axis=0)
+    span = xyz[:, :2].max(axis=0) - xyz[:, :2].min(axis=0)
+    drop = np.zeros(len(xyz), bool)
+    for _ in range(k):
+        origin = centre + rng.uniform(-0.3, 0.3, 2) * span
+        ang0 = rng.uniform(0, 2 * np.pi)
+        width = np.deg2rad(rng.uniform(15, 35))
+        rel = xyz[:, :2] - origin
+        az = np.arctan2(rel[:, 1], rel[:, 0]) % (2 * np.pi)
+        in_wedge = ((az - ang0) % (2 * np.pi)) < width
+        far = np.hypot(rel[:, 0], rel[:, 1]) > 2.0
+        sector = in_wedge & far
+        drop |= sector & (rng.uniform(0, 1, len(xyz)) > keep)
+    keep_mask = ~drop
+    return xyz[keep_mask], SemanticLabels(
+        labels.label_ids[keep_mask], labels.label_names)
 
 
 # ── metrics ──────────────────────────────────────────────────────────────────
@@ -388,7 +478,7 @@ def score_openings(gt_openings, gt_walls, det_openings, det_walls):
 # ── runner ───────────────────────────────────────────────────────────────────
 
 
-def main(names):
+def main(names, noisy=False, fast=False):
     for name in names:
         global RNG
         RNG = np.random.default_rng(42)
@@ -408,19 +498,44 @@ def main(names):
         finally:
             Build.finish = orig_finish
         b = b_holder["b"]
+        if noisy:
+            nrng = np.random.default_rng(7)
+            xyz, labels = with_shadows(xyz, labels, nrng)
+            labels = with_label_noise(labels, LABEL_NOISE_FRACTION, nrng)
         cfg = Config(io=IOConfig(input_files=["x.xyz"], output_ifc="x.ifc"))
-        print(f"\n=== {name}: {len(xyz):,} pts, {len(b.gt_walls)} GT walls, "
+        tag = " [NOISY]" if noisy else ""
+        print(f"\n=== {name}{tag}: {len(xyz):,} pts, {len(b.gt_walls)} GT walls, "
               f"{len(b.gt_openings)} GT openings ===")
 
-        # ── slabs (ML path, oracle labels) ──
+        # ── slabs: ML path + v1, scored against GT floor levels ──
+        n_expect = len(b.gt_slab_levels) + 1  # floors + roof slab
         slabs = extract_slabs_ml(xyz, labels, cfg.slabs, cfg.segmentation)
-        print(f"slabs: detected {len(slabs)} (expect 2: floor + ceiling) "
-              f"z={[round(s.bottom_z + s.thickness, 2) for s in slabs]}")
+        _score_slabs("slabs[ml]", slabs, b, n_expect)
+        from cloud2bim.legacy import detect_slabs_v1
+        try:
+            slabs_v1 = detect_slabs_v1(xyz, cfg.slabs)
+            _score_slabs("slabs[v1]", slabs_v1, b, n_expect)
+        except Exception as exc:
+            print(f"slabs[v1]      CRASHED: {exc}")
+        from cloud2bim.elements.v4 import (
+            detect_openings_v4, detect_slabs_v4, detect_walls_v4,
+        )
+        try:
+            slabs_v4 = detect_slabs_v4(xyz, cfg.slabs,
+                                       semantic_labels=labels,
+                                       seg_cfg=cfg.segmentation)
+            _score_slabs("slabs[v4]", slabs_v4, b, n_expect)
+        except Exception as exc:
+            print(f"slabs[v4]      CRASHED: {exc}")
         if len(slabs) < 2:
-            print("slabs: FAILED — cannot continue to walls")
+            print("slabs[ml]: <2 — cannot continue to walls")
             continue
         z_floor = slabs[0].bottom_z + slabs[0].thickness
         z_ceiling = slabs[1].bottom_z
+        # Wall scoring below covers storey 0 only — filter GT accordingly
+        # (multi-storey scenarios carry upper-storey walls in gt too).
+        b.gt_walls = [w for w in b.gt_walls if w.get("z0", 0.0) < z_ceiling]
+        b.gt_openings = [o for o in b.gt_openings if o["wall"] < len(b.gt_walls)]
         storey_mask = (xyz[:, 2] >= z_floor - 0.1) & (xyz[:, 2] <= z_ceiling + 0.1)
         spts = xyz[storey_mask]
         slab_poly = np.column_stack([slabs[1].polygon_x, slabs[1].polygon_y])
@@ -450,6 +565,42 @@ def main(names):
         except Exception as exc:
             print(f"walls[v2]      CRASHED: {exc}")
 
+        # ── walls: v4 (evidence grid, labels as soft prior) ──
+        t1 = time.time()
+        try:
+            walls_v4 = detect_walls_v4(
+                storey_points=spts, z_floor=z_floor, z_ceiling=z_ceiling,
+                storey_idx=0, cfg=cfg.walls, semantic_labels=slabels,
+                seg_cfg=cfg.segmentation, slab_polygon_xy=slab_poly,
+            )
+            p, r, f1, err = score_walls(b.gt_walls, walls_v4)
+            print(f"walls[v4]      P={p:.2f} R={r:.2f} F1={f1:.2f} "
+                  f"axis_err={err * 100:.1f}cm  n={len(walls_v4)}  ({time.time() - t1:.1f}s)")
+        except Exception as exc:
+            walls_v4 = []
+            import traceback; traceback.print_exc()
+            print(f"walls[v4]      CRASHED: {exc}")
+
+        # ── walls: v1 (no labels — the field champion) ──
+        from cloud2bim.legacy import detect_walls_v1, detect_openings_v1
+        t1 = time.time()
+        walls_v1 = []
+        try:
+            if fast:
+                raise RuntimeError("skipped (--fast)")
+            walls_v1 = detect_walls_v1(
+                storey_points=spts, z_floor=z_floor, z_ceiling=z_ceiling,
+                storey_idx=0, cfg=cfg.walls, pc_resolution=cfg.slabs.pc_resolution,
+                grid_coefficient=cfg.slabs.grid_coefficient,
+                slab_polygon_xy=slab_poly,
+            )
+            p, r, f1, err = score_walls(b.gt_walls, walls_v1)
+            print(f"walls[v1]      P={p:.2f} R={r:.2f} F1={f1:.2f} "
+                  f"axis_err={err * 100:.1f}cm  n={len(walls_v1)}  ({time.time() - t1:.1f}s)")
+        except Exception as exc:
+            walls_v1 = []
+            print(f"walls[v1]      CRASHED: {exc}")
+
         # ── walls: vertical ──
         from cloud2bim.elements.walls_vertical import detect_walls_vertical
         t1 = time.time()
@@ -466,11 +617,32 @@ def main(names):
         except Exception as exc:
             print(f"walls[vert]    CRASHED: {exc}")
 
-        # ── openings (ML, on ML walls) ──
+        # ── openings: ML on ML walls + v1 on v1 walls ──
         ops = extract_openings_ml(walls, spts, slabels, cfg.openings, cfg.segmentation)
         p, r = score_openings(b.gt_openings, b.gt_walls, ops, walls)
         n_doors = sum(1 for o in ops if o.type == "door")
         print(f"openings[ml]   P={p:.2f} R={r:.2f}  n={len(ops)} ({n_doors} doors)")
+        if walls_v4:
+            try:
+                ops_v4 = detect_openings_v4(
+                    walls=walls_v4, storey_points=spts, cfg=cfg.openings,
+                    semantic_labels=slabels, seg_cfg=cfg.segmentation,
+                )
+                p, r = score_openings(b.gt_openings, b.gt_walls, ops_v4, walls_v4)
+                print(f"openings[v4]   P={p:.2f} R={r:.2f}  n={len(ops_v4)}")
+            except Exception as exc:
+                print(f"openings[v4]   CRASHED: {exc}")
+        if walls_v1:
+            try:
+                ops_v1 = detect_openings_v1(
+                    walls=walls_v1, storey_points=spts, cfg=cfg.openings,
+                    pc_resolution=cfg.slabs.pc_resolution,
+                    grid_coefficient=cfg.slabs.grid_coefficient,
+                )
+                p, r = score_openings(b.gt_openings, b.gt_walls, ops_v1, walls_v1)
+                print(f"openings[v1]   P={p:.2f} R={r:.2f}  n={len(ops_v1)}")
+            except Exception as exc:
+                print(f"openings[v1]   CRASHED: {exc}")
 
         # ── columns ──
         if b.gt_columns:
@@ -492,6 +664,20 @@ def main(names):
         print(f"[{name} total {time.time() - t0:.1f}s]")
 
 
+def _score_slabs(tag: str, slabs, b: "Build", n_expect: int):
+    """Slab levels matched within 10 cm against GT floor tops."""
+    det_levels = [round(s.bottom_z + s.thickness, 2) for s in slabs]
+    hit = sum(
+        1 for gz in b.gt_slab_levels
+        if any(abs((s.bottom_z + s.thickness) - gz) < 0.10 for s in slabs)
+    )
+    print(f"{tag:<15}n={len(slabs)} (expect {n_expect})  "
+          f"floor-levels {hit}/{len(b.gt_slab_levels)} hit  z={det_levels}")
+
+
 if __name__ == "__main__":
-    args = sys.argv[1:] or list(SCENARIOS)
-    main(args)
+    argv = sys.argv[1:]
+    noisy = "--noisy" in argv
+    fast = "--fast" in argv   # skip slow v1 reference rows during iteration
+    args = [a for a in argv if not a.startswith("--")] or list(SCENARIOS)
+    main(args, noisy=noisy, fast=fast)
