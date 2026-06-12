@@ -179,8 +179,9 @@ def _opening_from_cluster(
         type=kind,
         x_along_wall_start=along_min,
         x_along_wall_end=along_max,
-        z_min=z_min,
-        z_max=z_max,
+        # Opening contract: Z relative to the wall bottom.
+        z_min=z_min - wall.z_placement,
+        z_max=z_max - wall.z_placement,
     )
 
 

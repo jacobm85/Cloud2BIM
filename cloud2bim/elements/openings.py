@@ -33,6 +33,10 @@ class Opening:
     type: str                 # "window" | "door"
     x_along_wall_start: float
     x_along_wall_end: float
+    # CONTRACT: z_min/z_max are RELATIVE to the host wall's z_placement
+    # (the IFC builder places the void at z_placement + z_min). Emitters
+    # that pass absolute world Z double-count the storey elevation and
+    # sink every opening below the floor.
     z_min: float
     z_max: float
 

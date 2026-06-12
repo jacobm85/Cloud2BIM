@@ -913,8 +913,9 @@ def detect_openings_v4(
                 wall_storey=wall.storey, wall_index=w_idx, type=kind,
                 x_along_wall_start=float(x * pixel),
                 x_along_wall_end=float((x + ww) * pixel),
-                z_min=float(wall.z_placement if kind == "door" else z0),
-                z_max=float(z1),
+                # Opening contract: Z relative to the wall bottom.
+                z_min=0.0 if kind == "door" else float(z0 - wall.z_placement),
+                z_max=float(z1 - wall.z_placement),
             ))
     n_holes = len(openings)
 
