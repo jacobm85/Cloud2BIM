@@ -33,7 +33,12 @@ PIXEL = 0.03                 # m — XY cell size for the wall evidence grid
 N_SLICES = 14                # Z-slices per storey for persistence
 PERSISTENCE_THRESHOLD = 0.55  # share of slices a wall cell must occupy
 LABEL_WEIGHT = 0.40          # max score nudge from semantic labels
-MIN_CELL_POINTS = 2          # cell×slice occupancy needs this many points
+MIN_CELL_POINTS = 2          # cell×slice occupancy threshold. Tested at 1
+                             # for symmetry with the availability count —
+                             # that recovers more scan-shadow wall, but in
+                             # tall halls it also promotes pallet racking
+                             # to walls (industri noisy F1 0.92 → 0.63),
+                             # which is the worse trade.
 
 # Slab detection
 SLAB_BIN = 0.02              # m — Z histogram bin
@@ -249,7 +254,28 @@ def detect_walls_v4(
     occupied = uniq[counts >= MIN_CELL_POINTS]
     occ_cells = occupied // N_SLICES
     occ_slices = occupied % N_SLICES
-    pers = np.bincount(occ_cells, minlength=nx * ny).astype(np.float32) / N_SLICES
+
+    # Occlusion-aware normalisation: persistence is occupied slices over
+    # *available* slices — slices where the scanner reached the cell's
+    # neighbourhood at all. In a scan shadow a wall keeps its few
+    # surviving points spread over the full height (high ratio) while
+    # furniture stays bottom-heavy wherever the scan is complete.
+    try:
+        import cv2
+        avail = np.zeros(nx * ny, np.float32)
+        any_cells = uniq // N_SLICES        # ≥1 point counts as reachable
+        any_slices = uniq % N_SLICES
+        kernel = np.ones((5, 5), np.uint8)
+        for s_idx in range(N_SLICES):
+            img = np.zeros(nx * ny, np.uint8)
+            img[any_cells[any_slices == s_idx]] = 1
+            img = cv2.dilate(img.reshape(nx, ny), kernel)
+            avail += img.reshape(-1)
+        n_occ = np.bincount(occ_cells, minlength=nx * ny).astype(np.float32)
+        pers = np.where(avail >= 4, n_occ / np.maximum(avail, 1.0), 0.0)
+        pers = np.minimum(pers, 1.0)
+    except ImportError:
+        pers = np.bincount(occ_cells, minlength=nx * ny).astype(np.float32) / N_SLICES
     # Floor-AND-ceiling presence: a window column keeps wall above the
     # lintel and below the sill, so persistence dips below threshold —
     # but furniture never reaches the top slices. Cells occupied near
@@ -402,11 +428,11 @@ def _try_gap_merge(axes, thicknesses, i, j, max_gap):
         return None
     u1 = d1 / l1
     ang = abs(float(u1 @ (d2 / l2)))
-    if ang < np.cos(np.deg2rad(4)):
+    if ang < np.cos(np.deg2rad(6)):
         return None
     n_vec = np.array([-u1[1], u1[0]])
     off = float(np.mean((a2 - a1[0]) @ n_vec))
-    if abs(off) > 0.20:
+    if abs(off) > 0.30:
         return None
     t1 = sorted(((a1[0] - a1[0]) @ u1, (a1[1] - a1[0]) @ u1))
     t2 = sorted(((a2[0] - a1[0]) @ u1, (a2[1] - a1[0]) @ u1))
@@ -531,8 +557,11 @@ def detect_openings_v4(
                 continue
             if y + hh >= n_z:                 # touches ceiling → shadow band
                 continue
-            if not col_support[x: x + ww].all():
-                continue                      # unscanned columns inside
+            # Require support in most along-columns — a fully unscanned
+            # strip is a shadow, but shadows also eat *parts* of real
+            # openings, so demand 60 % rather than all.
+            if col_support[x: x + ww].mean() < 0.6:
+                continue
             width_m = ww * pixel
             height_m = hh * pixel
             fill = area / max(1, ww * hh)

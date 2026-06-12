@@ -109,27 +109,41 @@ def _opening_from_cluster(
     kind: str,
     cfg: OpeningConfig,
 ) -> Opening | None:
-    """Project a cluster onto its nearest wall, return the Opening AABB."""
+    """Project a cluster onto its best host wall, return the Opening AABB.
+
+    "Best" = among walls within MAX_WALL_DISTANCE of the centroid, the
+    one that keeps the widest clamped projection. Nearest-by-distance
+    alone fails when a cluster sits in the gap between two collinear
+    wall segments (a port): both are at distance ~0 but the projection
+    clamps to zero width on either.
+    """
     centroid_xy = cluster_pts[:, :2].mean(axis=0)
-    best = _nearest_wall(centroid_xy, walls)
-    if best is None:
-        return None
-    wall_idx, dist = best
-    if dist > MAX_WALL_DISTANCE:
-        log.debug(
-            "ML opening: cluster too far from any wall (%.2f m) — skipping",
-            dist,
-        )
+    wall_idx = -1
+    along_min = along_max = 0.0
+    best_width = 0.0
+    for i, w in enumerate(walls):
+        a = np.array(w.start, dtype=float)
+        b = np.array(w.end, dtype=float)
+        ab = b - a
+        n = float(np.linalg.norm(ab))
+        if n < 1e-6:
+            continue
+        dist = float(abs(np.cross(ab, centroid_xy - a)) / n)
+        if dist > MAX_WALL_DISTANCE:
+            continue
+        along = _project_onto_axis(cluster_pts[:, :2], w)
+        # Clamp to the wall's extent — labelled points can spill past a
+        # wall end and an IFC opening outside its host wall breaks the
+        # void boolean in most viewers.
+        lo = float(np.clip(along.min(), 0.0, n))
+        hi = float(np.clip(along.max(), 0.0, n))
+        if hi - lo > best_width:
+            best_width = hi - lo
+            wall_idx, along_min, along_max = i, lo, hi
+    if wall_idx < 0:
         return None
 
     wall = walls[wall_idx]
-    along = _project_onto_axis(cluster_pts[:, :2], wall)
-    wall_len = float(np.hypot(wall.end[0] - wall.start[0], wall.end[1] - wall.start[1]))
-    # Clamp to the wall's extent — labelled points can spill past a wall
-    # end (e.g. a glazed corner) and an IFC opening outside its host wall
-    # breaks the void boolean in most viewers.
-    along_min = float(np.clip(along.min(), 0.0, wall_len))
-    along_max = float(np.clip(along.max(), 0.0, wall_len))
     z_min = float(cluster_pts[:, 2].min())
     z_max = float(cluster_pts[:, 2].max())
 
@@ -190,26 +204,6 @@ def _merge_overlapping(openings: List[Opening]) -> List[Opening]:
         log.info("ML openings: merged %d → %d after overlap resolution",
                  len(openings), len(merged))
     return merged
-
-
-def _nearest_wall(
-    point_xy: np.ndarray,
-    walls: List[Wall],
-) -> tuple[int, float] | None:
-    """Return (wall_index, perpendicular_distance) for the closest wall."""
-    best: tuple[int, float] | None = None
-    for i, w in enumerate(walls):
-        a = np.array(w.start, dtype=float)
-        b = np.array(w.end, dtype=float)
-        ab = b - a
-        n = float(np.linalg.norm(ab))
-        if n < 1e-6:
-            continue
-        # Perpendicular distance from point to infinite line through a-b.
-        d = float(abs(np.cross(ab, point_xy - a)) / n)
-        if best is None or d < best[1]:
-            best = (i, d)
-    return best
 
 
 def _project_onto_axis(points_xy: np.ndarray, wall: Wall) -> np.ndarray:
