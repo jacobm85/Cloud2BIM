@@ -740,7 +740,13 @@ def _try_gap_merge(axes, thicknesses, i, j, max_gap, opening_xy=None):
 
 
 def _segments_cross(s1, s2) -> bool:
-    """Proper segment intersection test (endpoints inclusive-ish).
+    """True when s2 passes THROUGH s1 — not when it merely abuts.
+
+    Used to protect the gap merge from bridging corridors: a corridor
+    is flanked by walls that CROSS the gap line. A perpendicular wall
+    that ends ON the line (a T-junction) must NOT block the merge —
+    long walls are full of T-joints, and treating them as crossings
+    kept window walls split at exactly the windows.
 
     Scalar floats on purpose — called O(n³) times in the worst case."""
     px, py = s1[0]
@@ -753,7 +759,8 @@ def _segments_cross(s1, s2) -> bool:
     dqx, dqy = qx - px, qy - py
     t = (dqx * sy - dqy * sx) / denom
     u = (dqx * ry - dqy * rx) / denom
-    return -0.05 <= t <= 1.05 and -0.05 <= u <= 1.05
+    # u strictly interior on the OTHER wall = it continues on both sides.
+    return -0.05 <= t <= 1.05 and 0.10 <= u <= 0.90
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -915,7 +922,12 @@ def detect_openings_v4(
                 continue
             width_m = ww * pixel
             height_m = hh * pixel
-            fill = area / max(1, ww * hh)
+            # Fill is judged on the CLOSED component: glass speckle and
+            # mullions inside the hole are bridged by the closing, so a
+            # real (mullioned) window fills its bbox even on a diluted
+            # scan where speckle cells read as wall. Size and border
+            # tests above still use the original cells.
+            fill = min(1.0, float((lab_img == k).sum()) / max(1, ww * hh))
             if fill < OPENING_MIN_FILL:
                 continue
             z0 = z_base + y * pixel
