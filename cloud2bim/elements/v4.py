@@ -447,6 +447,11 @@ def _walls_from_clusters(clusters, cells_raw, h, z_floor, storey_idx, cfg,
             opening_xy=opening_xy)
 
     axes, thicknesses = _refine_thickness(axes, cells_raw, cfg)
+    # Near-coincident parallel walls (a wall plus its parallel duct/
+    # curtain layer, both measured "two-faced") duplicate every opening
+    # they host — keep the longer of an overlapping pair.
+    from cloud2bim.v5.plan import _dedupe_parallel
+    axes, thicknesses = _dedupe_parallel(axes, thicknesses)
 
     if len(axes) > cfg.max_walls_per_storey:
         order = np.argsort([-float(np.hypot(a[1][0] - a[0][0], a[1][1] - a[0][1]))
@@ -847,6 +852,18 @@ def detect_openings_v4(
         rel = pts_w[:, :2] - a
         perp = rel @ n_vec
         band = np.abs(perp) <= max(wall.thickness / 2 + 0.07, 0.15)
+        # The facade raster must come from the wall's dominant FACE
+        # plane, not the whole thickness band: when curtains, radiators
+        # or ducts run parallel to a window wall, the measured thickness
+        # inflates and the full band rasterises the parallel layer right
+        # over the window holes. Find the strongest perpendicular mode
+        # and keep a tight slab around it.
+        if band.any():
+            p_band = perp[band]
+            h_p, e_p = np.histogram(p_band, bins=max(
+                4, int((p_band.max() - p_band.min()) / 0.03) + 1))
+            mode = float((e_p[np.argmax(h_p)] + e_p[np.argmax(h_p) + 1]) / 2)
+            band = np.abs(perp - mode) <= 0.12
         along = rel @ u
         in_seg = (along >= 0) & (along <= length)
         zz = pts_w[:, 2]
