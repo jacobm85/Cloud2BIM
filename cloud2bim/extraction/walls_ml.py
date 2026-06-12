@@ -50,7 +50,17 @@ DBSCAN_MIN_PTS = 15          # on the voxel-downsampled cloud
 RANSAC_INLIER_DIST = 0.18    # m — captures both faces of walls ≤ ~36 cm
 RANSAC_ITERS = 300           # candidate lines per extraction round
 RANSAC_SCORE_SUBSET = 25_000 # points used for candidate scoring
-MAX_LINES_PER_CLUSTER = 80   # safety cap on extraction rounds
+MAX_LINES_PER_CLUSTER = 3000  # safety cap on extraction rounds. A whole
+                              # storey's wall network is usually ONE DBSCAN
+                              # cluster (corner-connected), so this is in
+                              # practice the LINE budget for the entire
+                              # storey. It must be generous: dominant-
+                              # direction walls are peeled first, and on a
+                              # real hospital floor the cross walls only
+                              # get their turn after ~800 rounds — a low
+                              # cap silently deleted every perpendicular
+                              # wall. Rounds get cheaper as cells deplete,
+                              # so the cost of a high cap is small.
 RUN_GAP = 0.50               # m — gap along the line that splits two runs
                              # (door gaps re-merge later via collinear merge)
 MIN_RUN_POINTS = 12          # voxelised points for a run to count
@@ -317,12 +327,21 @@ def _extract_line_segments(
     """
     segments: list[tuple[list[list[float]], float]] = []
     remaining = cluster_xy
+    misses = 0
     for _ in range(MAX_LINES_PER_CLUSTER):
         if len(remaining) < MIN_RUN_POINTS:
             break
         line = _ransac_line(remaining, RANSAC_INLIER_DIST, rng)
         if line is None:
-            break
+            # One fruitless round is not proof there's nothing left — on
+            # a large storey the random pairs rarely hit the same short
+            # cross wall, and bailing on the first miss silently deleted
+            # every perpendicular wall. Re-roll a few times.
+            misses += 1
+            if misses >= 8:
+                break
+            continue
+        misses = 0
         origin, direction = line
         d = _perp_distances(remaining, origin, direction)
         inlier_mask = d <= RANSAC_INLIER_DIST
@@ -349,8 +368,25 @@ def _extract_line_segments(
             remaining = remaining[~inlier_mask]
             continue
 
-        segments.extend(_runs_to_segments(inliers, origin, direction, cfg))
-        remaining = remaining[~inlier_mask]
+        new_segments, intervals = _runs_to_segments(inliers, origin, direction, cfg)
+        segments.extend(new_segments)
+        # Remove ONLY the cells inside emitted runs — the inlier band is a
+        # strip across the whole building (distance to the INFINITE line),
+        # and removing all of it bites a chunk out of every crossing wall.
+        # On a corridor building with ~100 wall rows the strips tile the
+        # full footprint and the perpendicular walls get eaten before any
+        # round can peel them.
+        if intervals:
+            inl_idx = np.where(inlier_mask)[0]
+            proj_all = (inliers - origin) @ direction
+            drop = np.zeros(len(remaining), dtype=bool)
+            for lo, hi in intervals:
+                drop[inl_idx[(proj_all >= lo - 0.10) & (proj_all <= hi + 0.10)]] = True
+            if not drop.any():
+                drop[inl_idx] = True  # safety: always make progress
+            remaining = remaining[~drop]
+        else:
+            remaining = remaining[~inlier_mask]
     return segments
 
 
@@ -379,8 +415,17 @@ def _ransac_line(
 
     best_score = 0
     best: tuple[np.ndarray, np.ndarray] | None = None
-    for _ in range(RANSAC_ITERS):
-        i, j = rng.integers(0, n, size=2)
+    for it in range(RANSAC_ITERS):
+        i = int(rng.integers(0, n))
+        if it % 2 == 0:
+            j = int(rng.integers(0, n))
+        else:
+            # Local pair: cells arrive in x-major grid order from the
+            # evidence mask, so nearby indices are nearby in space — a
+            # local pair lands on the SAME short wall far more often
+            # than two independent global draws, which on a 60 m storey
+            # almost never align with a 2 m cross wall.
+            j = (i + int(rng.integers(1, 120))) % n
         p, q = xy[i], xy[j]
         v = q - p
         norm = float(np.hypot(v[0], v[1]))
@@ -401,12 +446,16 @@ def _runs_to_segments(
     origin: np.ndarray,
     direction: np.ndarray,
     cfg: WallConfig,
-) -> list[tuple[list[list[float]], float]]:
+) -> tuple[list[tuple[list[list[float]], float]], list[tuple[float, float]]]:
     """Split a line's inliers into contiguous runs; one segment per run.
 
     A line through a building typically crosses several distinct walls
     (e.g. the same line continues through a corridor into the next room's
     wall) — the gaps between runs separate them.
+
+    Returns (segments, intervals): ``intervals`` are the emitted runs'
+    [lo, hi] ranges along ``direction`` so the caller can consume exactly
+    those cells and leave the rest of the inlier strip for later rounds.
     """
     proj = (inliers - origin) @ direction
     order = np.argsort(proj)
@@ -415,6 +464,7 @@ def _runs_to_segments(
 
     breaks = np.where(np.diff(proj_sorted) > RUN_GAP)[0] + 1
     segments: list[tuple[list[list[float]], float]] = []
+    intervals: list[tuple[float, float]] = []
     start = 0
     for stop in list(breaks) + [len(proj_sorted)]:
         run_pts = pts_sorted[start:stop]
@@ -437,4 +487,5 @@ def _runs_to_segments(
             [[float(p1[0]), float(p1[1])], [float(p2[0]), float(p2[1])]],
             thickness,
         ))
-    return segments
+        intervals.append((float(run_proj[0]), float(run_proj[-1])))
+    return segments, intervals

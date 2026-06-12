@@ -338,9 +338,16 @@ def detect_walls_v4(
         n_lab, lab_img, stats, _ = cv2.connectedComponentsWithStats(
             mask.astype(np.uint8), connectivity=8)
         max_col_px = int(0.9 / PIXEL)
+        min_col_px = int(0.15 / PIXEL)
         for k in range(1, n_lab):
             _, _, w_px, h_px, _ = stats[k]
-            if w_px <= max_col_px and h_px <= max_col_px:
+            # A column is compact AND thick in BOTH directions. A thin
+            # sub-metre line is a scan-shadow fragment of a wall — on a
+            # corridor-scanned hospital floor the room dividers arrive
+            # exactly like that, and removing them cost 29 % of all wall
+            # evidence (every vertical wall vanished from the model).
+            if (min_col_px <= w_px <= max_col_px
+                    and min_col_px <= h_px <= max_col_px):
                 mask[lab_img == k] = False
     except Exception:
         pass
