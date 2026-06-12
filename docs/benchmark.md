@@ -80,14 +80,27 @@ takzon (undertak 7,40/7,50 + stomme 7,66) grupperad till EN slab;
 205 väggar + 66 öppningar (24 dörrar) på 143 s. Tydlig korridor- och
 rumsstruktur i preview (temp/blekinge_v4_preview.png).
 
+**Uppdatering 2026-06-12 kväll (6274994)** — profilering + tjocklek:
+
+- Prestanda storvåning: 143 s → **18,7 s** (skalärmatte i portmergens
+  parprövningar 49→~2 s; rumslig hash i öppningsdetekteringen 86→4 s).
+- Tjockleksskattningen flyttad till efter all sammanslagning, med
+  modalanalys av tvärfördelningen + fasparning (205 axlar → 142 väggar,
+  63 faspar, tjocklekar 0,30–0,54 på Blekinge i stället för 100 %
+  singleton). Tre verklighetsbuggar fixade på vägen: parkerade bilar
+  som "andra yta" (längdtäckningskrav per grupp), axellutning som
+  skenbar bredd (avtrendning), och hörnkontaminering från tvärväggars
+  cellrader (mätning undviker segmentändar — gav ensam garagets
+  14,8 cm → 0,6 cm axelfel).
+- Clean axelfel nu 0,6–6,4 cm (utom bostad 10,3 = okänd 40 cm-yttervägg
+  mot 30 cm-antagande); noisy F1 0,78–0,96.
+
 **Kvarvarande v4-svagheter** (fortsättning på task #9):
 1. Garage-porten under extremskugga: 0 öppningar (väggen förblir
    delad; syntetskuggorna är hårdare än multi-skanner-verklighet).
 2. bostad noisy öppningar R=0,29 — små etikettkluster försvinner i
    skugga (datagräns snarare än algoritmfel).
-3. Blekinge: vissa väggtjocklekar ser för feta ut i preview —
-   verifiera tjockleksskattningen mot kända väggar.
-4. Prestanda storvåning: 139 s (DBSCAN + 205 fasadraster) — profilera.
+3. vård noisy väggar R=0,70 — korta rumsavskiljare i djup skugga.
 
 ## Saknas ännu i bänken
 
