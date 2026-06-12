@@ -859,7 +859,11 @@ async def create_job(request: CreateJobRequest):
             "revit_compatible": True,
         },
         "exterior_scan": request.exterior_scan,
-        "algorithm": request.algorithm if request.algorithm in ("v1", "v2", "vertical") else "v1",
+        # NOTE: keep in sync with Config.algorithm in cloud2bim/config/schema.py.
+        # A missing entry here silently downgraded every wizard v4 run to v1
+        # — the UI said v4, the log said "fallback=v1", and field testing
+        # evaluated the wrong algorithm for a whole day.
+        "algorithm": request.algorithm if request.algorithm in ("v1", "v2", "vertical", "v4") else "v1",
         "pipeline_mode": request.pipeline_mode if request.pipeline_mode in ("geometric", "hybrid", "ml") else "geometric",
         "hybrid_min_class_points": request.hybrid_min_class_points,
         "building_type": request.building_type if request.building_type in ("office", "industrial", "custom") else "office",
