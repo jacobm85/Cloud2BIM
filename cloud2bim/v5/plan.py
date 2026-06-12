@@ -167,30 +167,44 @@ def _dedupe_parallel(axes: list, thicknesses: list[float]):
 
 
 def _dominant_rotation(cells_xy: np.ndarray) -> float:
-    """Building rotation from evidence-cell pair directions (mod 90°).
+    """Building rotation (mod 90°) from peeled line segments.
 
-    Random nearby cell pairs mostly lie along walls; their angles mod
-    90° cluster at the building rotation. Median of the cluster is
-    robust against the diagonal minority.
+    A random-pair angle histogram is biased by clutter and reaches at
+    best ~1° accuracy — which smears a 30 m wall's perpendicular offset
+    over half a metre and shatters its carrier into fragments. Line
+    peeling gives long straight segments whose length-weighted circular
+    mean angle pins the rotation to ~0.1°.
     """
     n = len(cells_xy)
     if n < 50:
         return 0.0
+    sub = cells_xy
+    if n > 15000:
+        rng_s = np.random.default_rng(3)
+        sub = cells_xy[rng_s.choice(n, 15000, replace=False)]
+    from cloud2bim.extraction.walls_ml import _extract_line_segments
+    from cloud2bim.config import WallConfig
     rng = np.random.default_rng(1)
-    i = rng.integers(0, n, 6000)
-    j = rng.integers(0, n, 6000)
-    d = cells_xy[j] - cells_xy[i]
-    dist = np.hypot(d[:, 0], d[:, 1])
-    ok = (dist > 0.5) & (dist < 6.0)
-    ang = np.arctan2(d[ok, 1], d[ok, 0]) % (np.pi / 2)
-    # circular median via histogram peak + local mean
-    hist, edges = np.histogram(ang, bins=90, range=(0, np.pi / 2))
-    k = int(np.argmax(hist))
-    centre = (edges[k] + edges[k + 1]) / 2
-    near = np.abs((ang - centre + np.pi / 4) % (np.pi / 2) - np.pi / 4) < np.deg2rad(3)
-    if near.any():
-        centre = float(np.mean(ang[near]))
-    return centre
+    segs = _extract_line_segments(sub, WallConfig(), rng)
+    if not segs:
+        return 0.0
+    angs, lens = [], []
+    for ax, _t in segs[:80]:
+        dx = ax[1][0] - ax[0][0]
+        dy = ax[1][1] - ax[0][1]
+        L = float(np.hypot(dx, dy))
+        if L < 0.8:
+            continue
+        angs.append(np.arctan2(dy, dx) % (np.pi / 2))
+        lens.append(L)
+    if not angs:
+        return 0.0
+    a = np.array(angs)
+    w = np.array(lens)
+    # length-weighted circular mean on the 4-fold doubled angle
+    quad = a * 4.0
+    mean = np.arctan2((w * np.sin(quad)).sum(), (w * np.cos(quad)).sum())
+    return float((mean / 4.0) % (np.pi / 2))
 
 
 def _find_carriers(q: np.ndarray) -> list[dict]:
@@ -208,21 +222,29 @@ def _find_carriers(q: np.ndarray) -> list[dict]:
         lo, hi = float(off.min()), float(off.max())
         nbin = max(4, int((hi - lo) / OFFSET_BIN) + 1)
         hist, edges = np.histogram(off, bins=nbin, range=(lo, lo + nbin * OFFSET_BIN))
-        # local peaks with a 2-bin guard on each side
-        for k in range(len(hist)):
+        # Non-maximum suppression with a minimum separation: equal-height
+        # neighbouring bins used to spawn DUPLICATE carriers 3–6 cm apart,
+        # which emitted the same wall several times AND widened the
+        # blocked corridor until the side probes of neighbouring walls
+        # could no longer reach any region (walls silently vanished).
+        order_k = np.argsort(hist)[::-1]
+        taken_off: list[float] = []
+        for k in order_k:
             if hist[k] < CARRIER_MIN_RUN / PIXEL:
+                break
+            centre = (edges[k] + edges[k + 1]) / 2
+            # 0.40 m separation also folds a thick wall's two faces into
+            # ONE carrier on the centreline instead of two boundary twins.
+            if any(abs(centre - t) < 0.40 for t in taken_off):
                 continue
-            l_ = max(0, k - 2)
-            r_ = min(len(hist), k + 3)
-            if hist[k] < hist[l_:r_].max():
-                continue
-            o0 = edges[k] - OFFSET_BIN
-            o1 = edges[k + 1] + OFFSET_BIN
+            o0 = edges[k] - OFFSET_BIN - 0.10
+            o1 = edges[k + 1] + OFFSET_BIN + 0.10
             members = (off >= o0) & (off <= o1)
             intervals = _covered_intervals(np.sort(run[members]))
             if not intervals:
                 continue
             offset = float(np.median(off[members]))
+            taken_off.append(offset)
             carriers.append({"axis": axis, "offset": offset,
                              "intervals": intervals})
             claimed |= members & (np.abs(off - offset) <= CARRIER_CLAIM)
@@ -283,7 +305,17 @@ def _region_grid(q: np.ndarray, qf: np.ndarray, carriers: list[dict]):
     blocked = np.zeros((nx, ny), bool)
 
     for c in carriers:
-        for lo, hi in c["intervals"]:
+        # Bridge port-sized gaps between a carrier's intervals when
+        # drawing the corridor: a 3–4 m port in a perimeter wall is an
+        # opening IN the wall, not a passage that joins outside and room
+        # into one region (which silently deleted every garage wall).
+        spans: list[list[float]] = []
+        for lo, hi in sorted(c["intervals"]):
+            if spans and lo - spans[-1][1] <= 5.0:
+                spans[-1][1] = hi
+            else:
+                spans.append([lo, hi])
+        for lo, hi in spans:
             # Seal corners: extend the corridor to crossing carriers'
             # intersections near the interval ends, else inside and
             # outside leak together around the corner and the whole
@@ -319,7 +351,13 @@ def _region_grid(q: np.ndarray, qf: np.ndarray, carriers: list[dict]):
     # wall evidence lies on it.
     free = ~blocked
     erode_iters = max(1, int(0.55 / REGION_PIX))
-    seeds_mask = ndimage.binary_erosion(free, iterations=erode_iters)
+    # border_value=1: the world beyond the grid is free space, so the
+    # outside ring erodes only from its inner edge. With the default 0
+    # the ring eroded from BOTH edges and lost its seed entirely — the
+    # watershed then flooded outside and rooms into one region and the
+    # plan had no boundaries at all.
+    seeds_mask = ndimage.binary_erosion(free, iterations=erode_iters,
+                                        border_value=1)
     seeds, n_lab = ndimage.label(seeds_mask)
     if n_lab == 0:
         label_img = ndimage.label(free)[0]
@@ -395,7 +433,13 @@ def _walls_on_carriers(carriers, regions, g0, label_img, q_cells):
     axes_out: list = []
     for c in carriers:
         n_vec = _carrier_normal(c)
-        for lo, hi in c["intervals"]:
+        spans: list[list[float]] = []
+        for lo, hi in sorted(c["intervals"]):
+            if spans and lo - spans[-1][1] <= 5.0:
+                spans[-1][1] = hi
+            else:
+                spans.append([lo, hi])
+        for lo, hi in spans:
             t = np.arange(lo, hi + STATION_STEP, STATION_STEP)
             if len(t) < 2:
                 continue
