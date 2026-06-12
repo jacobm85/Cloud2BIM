@@ -13,7 +13,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from cloud2bim import __version__
+from cloud2bim import __version__, git_revision
 from cloud2bim.config import load_config
 from cloud2bim.logging import configure, get_logger
 
@@ -21,7 +21,7 @@ from cloud2bim.logging import configure, get_logger
 def cmd_run(args: argparse.Namespace) -> int:
     configure(level=args.log_level)
     log = get_logger("cloud2bim.cli")
-    log.info("Cloud2BIM %s — pipeline run", __version__)
+    log.info("Cloud2BIM %s (%s) — pipeline run", __version__, git_revision())
 
     cfg = load_config(args.config)
     log.info("Loaded config: %s", args.config)
@@ -38,7 +38,7 @@ def cmd_step(args: argparse.Namespace) -> int:
     """Run one named pipeline stage; the rest of the wizard calls this again later."""
     configure(level=args.log_level)
     log = get_logger("cloud2bim.cli")
-    log.info("Cloud2BIM %s — stage %s", __version__, args.stage)
+    log.info("Cloud2BIM %s (%s) — stage %s", __version__, git_revision(), args.stage)
 
     cfg = load_config(args.config)
     log.info("Loaded config: %s", args.config)

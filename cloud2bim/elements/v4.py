@@ -963,60 +963,32 @@ def detect_openings_v4(
                                  np.ones((mull, mull), np.uint8))
         n_lab, lab_img, _stats, _ = cv2.connectedComponentsWithStats(empty, 8)
         for k in range(1, n_lab):
-            sub_z, sub_a = np.nonzero((lab_img == k) & empty_orig)
-            if len(sub_z) == 0:
+            sub_z_all, sub_a_all = np.nonzero((lab_img == k) & empty_orig)
+            if len(sub_z_all) == 0:
                 continue
-            x = int(sub_a.min()); ww = int(sub_a.max()) - x + 1
-            y = int(sub_z.min()); hh = int(sub_z.max()) - y + 1
-            area = len(sub_z)
-            if x == 0 or x + ww >= n_a:       # touches wall end → not a hole
-                continue
-            if y + hh >= n_z and y * pixel < 0.30:
-                # Full-height void = scan shadow. But a hole that REACHES
-                # the ceiling while standing on a real parapet (sill
-                # evidence below it) is a window up to the soffit —
-                # shadows have no parapet, they run to the floor.
-                continue
-            # Require support in most along-columns — a fully unscanned
-            # strip is a shadow, but shadows also eat *parts* of real
-            # openings, so demand 60 % rather than all.
-            if col_support[x: x + ww].mean() < 0.6:
-                continue
-            width_m = ww * pixel
-            height_m = hh * pixel
-            # Fill is judged on the CLOSED component: glass speckle and
-            # mullions inside the hole are bridged by the closing, so a
-            # real (mullioned) window fills its bbox even on a diluted
-            # scan where speckle cells read as wall. Size and border
-            # tests above still use the original cells.
-            fill = min(1.0, float((lab_img == k).sum()) / max(1, ww * hh))
-            if fill < OPENING_MIN_FILL:
-                continue
-            z0 = z_base + y * pixel
-            z1 = z0 + height_m
-            # "Reaches the floor" = hole bottom within ~35 cm of the slab
-            # (raster bottom already sits FLOOR_SKIP up, and thresholds,
-            # skirting boards and floor spill blur the lowest rows).
-            touches_floor = z0 <= wall.z_placement + 0.35
-            kind = None
-            if touches_floor and (z1 - wall.z_placement) >= cfg.door_min_height \
-                    and 0.55 <= width_m <= DOOR_MAX_WIDTH:
-                kind = "door"
-            elif (not touches_floor) and width_m >= cfg.min_window_width \
-                    and height_m >= cfg.min_window_height:
-                kind = "window"
-            if kind is None:
-                continue
-            # Optional label confirmation boost: shrink minimum fill when
-            # labelled opening points sit inside the hole region.
-            openings.append(Opening(
-                wall_storey=wall.storey, wall_index=w_idx, type=kind,
-                x_along_wall_start=float(x * pixel),
-                x_along_wall_end=float((x + ww) * pixel),
-                # Opening contract: Z relative to the wall bottom.
-                z_min=0.0 if kind == "door" else float(z0 - wall.z_placement),
-                z_max=float(z1 - wall.z_placement),
-            ))
+            x0 = int(sub_a_all.min()); x1 = int(sub_a_all.max())
+            y0_all = int(sub_z_all.min()); y1_all = int(sub_z_all.max())
+            # Split at interior posts: a door/window frame is a thin
+            # column of wall evidence that the hole flows AROUND (the
+            # post rarely reaches every raster row), so the component
+            # spans door + sidelight as one oversized opening. Columns
+            # with high occupancy across the hole's rows are real
+            # frame lines — cut there.
+            col_occ = raster[y0_all:y1_all + 1, :].mean(axis=0)
+            seg_ranges = _split_at_posts(x0, x1, col_occ)
+            for sx0, sx1 in seg_ranges:
+                in_seg = (sub_a_all >= sx0) & (sub_a_all <= sx1)
+                sub_z = sub_z_all[in_seg]; sub_a = sub_a_all[in_seg]
+                if len(sub_z) < 4:
+                    continue
+                x = int(sub_a.min()); ww = int(sub_a.max()) - x + 1
+                y = int(sub_z.min()); hh = int(sub_z.max()) - y + 1
+                area = len(sub_z)
+                cand = _opening_candidate(
+                    x, y, ww, hh, n_a, n_z, pixel, z_base,
+                    lab_img, k, col_support, wall, w_idx, cfg)
+                if cand is not None:
+                    openings.append(cand)
     n_holes = len(openings)
 
     # ── label-cluster openings (closed doors / glazed windows) ──
@@ -1036,6 +1008,79 @@ def detect_openings_v4(
              "across %d walls", len(openings), n_holes,
              len(openings) - n_holes, len(walls))
     return openings
+
+
+def _split_at_posts(x0: int, x1: int, col_occ: np.ndarray,
+                    min_occ: float = 0.55) -> list[tuple[int, int]]:
+    """Partition a hole's column range at interior frame posts.
+
+    ``col_occ`` is the per-column wall occupancy across the hole's rows;
+    interior runs above ``min_occ`` are door/window frames the hole
+    flowed around. Returns [x_start, x_end] sub-ranges (inclusive).
+    """
+    is_post = col_occ[x0:x1 + 1] >= min_occ
+    ranges: list[tuple[int, int]] = []
+    start = None
+    for i, post in enumerate(is_post):
+        if not post and start is None:
+            start = i
+        elif post and start is not None:
+            ranges.append((x0 + start, x0 + i - 1))
+            start = None
+    if start is not None:
+        ranges.append((x0 + start, x1))
+    return ranges or [(x0, x1)]
+
+
+def _opening_candidate(x, y, ww, hh, n_a, n_z, pixel, z_base,
+                       lab_img, k, col_support, wall, w_idx, cfg):
+    """Size/border/fill/kind tests for one hole segment → Opening|None."""
+    if x == 0 or x + ww >= n_a:       # touches wall end → not a hole
+        return None
+    if y + hh >= n_z and y * pixel < 0.30:
+        # Full-height void = scan shadow. But a hole that REACHES the
+        # ceiling while standing on a real parapet (sill evidence below
+        # it) is a window up to the soffit — shadows have no parapet,
+        # they run to the floor.
+        return None
+    # Require support in most along-columns — a fully unscanned strip is
+    # a shadow, but shadows also eat *parts* of real openings, so demand
+    # 60 % rather than all.
+    if col_support[x: x + ww].mean() < 0.6:
+        return None
+    width_m = ww * pixel
+    height_m = hh * pixel
+    # Fill is judged on the CLOSED component within this segment's
+    # columns: glass speckle and mullions inside the hole are bridged by
+    # the closing, so a real (mullioned) window fills its bbox even on a
+    # diluted scan where speckle cells read as wall.
+    closed_seg = (lab_img[y:y + hh, x:x + ww] == k).sum()
+    fill = min(1.0, float(closed_seg) / max(1, ww * hh))
+    if fill < OPENING_MIN_FILL:
+        return None
+    z0 = z_base + y * pixel
+    z1 = z0 + height_m
+    # "Reaches the floor" = hole bottom within ~35 cm of the slab (the
+    # raster bottom already sits FLOOR_SKIP up, and thresholds, skirting
+    # boards and floor spill blur the lowest rows).
+    touches_floor = z0 <= wall.z_placement + 0.35
+    kind = None
+    if touches_floor and (z1 - wall.z_placement) >= cfg.door_min_height \
+            and 0.55 <= width_m <= DOOR_MAX_WIDTH:
+        kind = "door"
+    elif (not touches_floor) and width_m >= cfg.min_window_width \
+            and height_m >= cfg.min_window_height:
+        kind = "window"
+    if kind is None:
+        return None
+    return Opening(
+        wall_storey=wall.storey, wall_index=w_idx, type=kind,
+        x_along_wall_start=float(x * pixel),
+        x_along_wall_end=float((x + ww) * pixel),
+        # Opening contract: Z relative to the wall bottom.
+        z_min=0.0 if kind == "door" else float(z0 - wall.z_placement),
+        z_max=float(z1 - wall.z_placement),
+    )
 
 
 def _overlaps_existing(op: Opening, existing: List[Opening]) -> bool:
