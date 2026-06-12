@@ -398,8 +398,19 @@ def detect_walls_v4(
         # across a corridor are collinear with a similar gap. The
         # difference: a corridor gap is *crossed* by perpendicular walls.
         # Merge big collinear gaps only when nothing crosses them.
+        # Door/window-labelled points are soft evidence that an even
+        # longer gap is an opening (port + adjacent scan shadow) rather
+        # than two separate walls.
+        opening_xy = None
+        if semantic_labels is not None and seg_cfg is not None:
+            op_mask = semantic_labels.mask_for(
+                list(seg_cfg.door_classes) + list(seg_cfg.window_classes))
+            op_mask = op_mask & in_storey
+            if op_mask.any():
+                opening_xy = storey_points[op_mask][:, :2]
         axes, thicknesses = _merge_across_openings(
-            axes, thicknesses, max_gap=DOOR_MAX_WIDTH + 0.5)
+            axes, thicknesses, max_gap=DOOR_MAX_WIDTH + 0.5,
+            opening_xy=opening_xy)
 
     axes, thicknesses = _refine_thickness(axes, cells_raw, cfg)
 
@@ -600,9 +611,15 @@ def _face_midline(ax1, ax2) -> tuple[list, float]:
 
 
 def _merge_across_openings(axes: list, thicknesses: list[float],
-                           max_gap: float) -> tuple[list, list[float]]:
+                           max_gap: float,
+                           opening_xy: np.ndarray | None = None
+                           ) -> tuple[list, list[float]]:
     """Merge collinear wall pairs across port-sized gaps that no other
     wall crosses. Iterates to a fixpoint.
+
+    ``opening_xy``: door/window-labelled points. When the gap contains
+    enough of them the merge distance is extended — the gap is then an
+    opening widened by an adjacent scan shadow, not two separate walls.
 
     Hot path on large storeys (hundreds of segments → O(n²) pairs per
     sweep) — _try_gap_merge therefore works in plain scalar floats; the
@@ -614,7 +631,8 @@ def _merge_across_openings(axes: list, thicknesses: list[float],
         n = len(axes)
         for i in range(n):
             for j in range(i + 1, n):
-                merged = _try_gap_merge(axes, thicknesses, i, j, max_gap)
+                merged = _try_gap_merge(axes, thicknesses, i, j, max_gap,
+                                        opening_xy)
                 if merged is not None:
                     axes[i], thicknesses[i] = merged
                     del axes[j], thicknesses[j]
@@ -628,7 +646,10 @@ def _merge_across_openings(axes: list, thicknesses: list[float],
 _COS6 = float(np.cos(np.deg2rad(6)))
 
 
-def _try_gap_merge(axes, thicknesses, i, j, max_gap):
+MAX_LABELLED_GAP = 10.0   # m — gap-merge ceiling when opening labels fill it
+
+
+def _try_gap_merge(axes, thicknesses, i, j, max_gap, opening_xy=None):
     (x1a, y1a), (x1b, y1b) = axes[i]
     (x2a, y2a), (x2b, y2b) = axes[j]
     d1x, d1y = x1b - x1a, y1b - y1a
@@ -652,8 +673,22 @@ def _try_gap_merge(axes, thicknesses, i, j, max_gap):
     gap_lo = min(t1_hi, t2_hi)
     gap_hi = max(t1_lo, t2_lo)
     gap = gap_hi - gap_lo
-    if gap <= 0 or gap > max_gap:
+    if gap <= 0 or gap > MAX_LABELLED_GAP:
         return None
+    if gap > max_gap:
+        # Beyond plain port distance: require door/window-labelled points
+        # in the gap corridor as evidence that this is one wall with an
+        # opening (plus scan shadow), not two separate walls.
+        if opening_xy is None or len(opening_xy) == 0:
+            return None
+        relx = opening_xy[:, 0] - x1a
+        rely = opening_xy[:, 1] - y1a
+        o_along = relx * ux + rely * uy
+        o_perp = relx * nx_ + rely * ny_
+        n_in_gap = int(((o_along > gap_lo) & (o_along < gap_hi)
+                        & (np.abs(o_perp) < 0.4)).sum())
+        if n_in_gap < 20:
+            return None
     # Does any other wall cross the gap segment?
     g1 = (x1a + gap_lo * ux, y1a + gap_lo * uy)
     g2 = (x1a + gap_hi * ux, y1a + gap_hi * uy)

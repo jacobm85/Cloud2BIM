@@ -367,27 +367,37 @@ def with_label_noise(labels: SemanticLabels, frac: float, rng) -> SemanticLabels
 
 
 def with_shadows(xyz, labels: SemanticLabels, rng,
-                 k=SHADOW_COUNT, keep=SHADOW_KEEP):
-    """Thin out k random angular sectors — scanner occlusion shadows.
+                 k=SHADOW_COUNT, keep=SHADOW_KEEP, n_stations=3):
+    """Thin out angular sectors per scan station — occlusion shadows.
 
-    Each shadow: from a random interior position, points further than
-    2 m away inside a 15–35° azimuth wedge are mostly removed. Creates
-    the wall holes and missing faces that fragment line/contour tracing
-    on real scans.
+    Multi-station model: each point is "owned" by its nearest scanner
+    station, and a station's shadow wedges only delete points it owns.
+    That mirrors registered multi-scan projects, where one station's
+    occlusion is usually covered by a neighbouring station — a single
+    global wedge deleted 70 % of a small building's walls, which no
+    real registered scan does, and benchmark failures in that regime
+    say nothing about field performance.
     """
     centre = xyz[:, :2].mean(axis=0)
     span = xyz[:, :2].max(axis=0) - xyz[:, :2].min(axis=0)
+    stations = np.array([
+        centre + rng.uniform(-0.35, 0.35, 2) * span for _ in range(n_stations)
+    ])
+    d2 = ((xyz[:, None, :2] - stations[None, :, :]) ** 2).sum(axis=2)
+    owner = np.argmin(d2, axis=1)
     drop = np.zeros(len(xyz), bool)
-    for _ in range(k):
-        origin = centre + rng.uniform(-0.3, 0.3, 2) * span
-        ang0 = rng.uniform(0, 2 * np.pi)
-        width = np.deg2rad(rng.uniform(15, 35))
-        rel = xyz[:, :2] - origin
-        az = np.arctan2(rel[:, 1], rel[:, 0]) % (2 * np.pi)
-        in_wedge = ((az - ang0) % (2 * np.pi)) < width
-        far = np.hypot(rel[:, 0], rel[:, 1]) > 2.0
-        sector = in_wedge & far
-        drop |= sector & (rng.uniform(0, 1, len(xyz)) > keep)
+    for s_idx in range(n_stations):
+        owned = owner == s_idx
+        for _ in range(max(1, k // n_stations)):
+            origin = stations[s_idx]
+            ang0 = rng.uniform(0, 2 * np.pi)
+            width = np.deg2rad(rng.uniform(15, 35))
+            rel = xyz[:, :2] - origin
+            az = np.arctan2(rel[:, 1], rel[:, 0]) % (2 * np.pi)
+            in_wedge = ((az - ang0) % (2 * np.pi)) < width
+            far = np.hypot(rel[:, 0], rel[:, 1]) > 2.0
+            sector = owned & in_wedge & far
+            drop |= sector & (rng.uniform(0, 1, len(xyz)) > keep)
     keep_mask = ~drop
     return xyz[keep_mask], SemanticLabels(
         labels.label_ids[keep_mask], labels.label_names)
