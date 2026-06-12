@@ -232,11 +232,47 @@ def detect_walls_v4(
     h = z_ceiling - z_floor
     if len(storey_points) == 0 or h <= 0.2:
         return []
+    ev = wall_evidence(storey_points, z_floor, z_ceiling,
+                       semantic_labels=semantic_labels, seg_cfg=seg_cfg)
+    if ev is None:
+        return []
+    cells_raw, cells_xy, in_storey = ev
+    log.info("v4 walls storey %d: %d evidence cells (%.0f m² wall footprint)",
+             storey_idx, len(cells_raw), len(cells_raw) * PIXEL * PIXEL)
+    if len(cells_xy) < 10:
+        return []
+
+    from cloud2bim.extraction.walls_ml import (
+        _dbscan_xy, _extract_line_segments, DBSCAN_EPS,
+    )
+    rng = np.random.default_rng(0)
+    clusters = _dbscan_xy(cells_xy, DBSCAN_EPS, 8)
+    return _walls_from_clusters(
+        clusters, cells_raw, h, z_floor, storey_idx, cfg,
+        storey_points, in_storey, semantic_labels, seg_cfg, rng)
+
+
+def wall_evidence(
+    storey_points: np.ndarray,
+    z_floor: float,
+    z_ceiling: float,
+    semantic_labels: Optional[SemanticLabels] = None,
+    seg_cfg: Optional[SegmentationConfig] = None,
+):
+    """Shared evidence raster: persistence + occlusion normalisation +
+    span evidence + soft labels + morphology.
+
+    Returns (cells_raw, cells_xy, in_storey_mask) or None:
+        cells_raw — XY centres of mask cells BEFORE closing (thickness truth)
+        cells_xy  — XY centres after closing + column-blob removal (peeling)
+    Used by both v4 (line peeling) and v5 (carrier accumulation).
+    """
+    h = z_ceiling - z_floor
     z = storey_points[:, 2]
     in_storey = (z >= z_floor + 0.07) & (z <= z_ceiling - 0.07)
     pts = storey_points[in_storey]
     if len(pts) < 100:
-        return []
+        return None
 
     # ── persistence raster ──
     xy0 = pts[:, :2].min(axis=0)
@@ -307,11 +343,8 @@ def detect_walls_v4(
             pers = pers * weight
 
     mask = ((pers >= PERSISTENCE_THRESHOLD) | span_evidence).reshape(nx, ny)
-    n_wall_cells = int(mask.sum())
-    log.info("v4 walls storey %d: %d evidence cells (%.0f m² wall footprint)",
-             storey_idx, n_wall_cells, n_wall_cells * PIXEL * PIXEL)
-    if n_wall_cells < 10:
-        return []
+    if int(mask.sum()) < 10:
+        return None
 
     # Keep the un-closed mask for thickness measurement: closing widens a
     # single scanned face to ~3 cell rows, which is indistinguishable from
@@ -352,19 +385,20 @@ def detect_walls_v4(
     except Exception:
         pass
 
-    # ── cells → centrelines via RANSAC line peeling ──
     # mask is indexed [ix, iy] — nonzero gives (ix_list, iy_list)
     ix, iy = np.nonzero(mask)
     cells_xy = np.column_stack([
         xy0[0] + (ix + 0.5) * PIXEL,
         xy0[1] + (iy + 0.5) * PIXEL,
     ])
+    return cells_raw, cells_xy, in_storey
 
-    from cloud2bim.extraction.walls_ml import (
-        _dbscan_xy, _extract_line_segments, DBSCAN_EPS,
-    )
-    rng = np.random.default_rng(0)
-    clusters = _dbscan_xy(cells_xy, DBSCAN_EPS, 8)
+
+def _walls_from_clusters(clusters, cells_raw, h, z_floor, storey_idx, cfg,
+                         storey_points, in_storey, semantic_labels, seg_cfg,
+                         rng):
+    """v4 tail: peel clusters → regularize → gap merge → thickness."""
+    from cloud2bim.extraction.walls_ml import _extract_line_segments
 
     # Raw axes only here — thickness is estimated AFTER all merging, from
     # the evidence cells around the final axis. Line peeling often puts a

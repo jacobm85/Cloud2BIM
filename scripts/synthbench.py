@@ -591,6 +591,28 @@ def main(names, noisy=False, fast=False):
             import traceback; traceback.print_exc()
             print(f"walls[v4]      CRASHED: {exc}")
 
+        # ── walls: v5 (global plan / cell complex) ──
+        t1 = time.time()
+        try:
+            from cloud2bim.v5 import detect_walls_v5
+            walls_v5 = detect_walls_v5(
+                storey_points=spts, z_floor=z_floor, z_ceiling=z_ceiling,
+                storey_idx=0, cfg=cfg.walls, semantic_labels=slabels,
+                seg_cfg=cfg.segmentation,
+            )
+            p, r, f1, err = score_walls(b.gt_walls, walls_v5)
+            print(f"walls[v5]      P={p:.2f} R={r:.2f} F1={f1:.2f} "
+                  f"axis_err={err * 100:.1f}cm  n={len(walls_v5)}  ({time.time() - t1:.1f}s)")
+            ops_v5 = detect_openings_v4(
+                walls_v5, spts, cfg.openings,
+                semantic_labels=slabels, seg_cfg=cfg.segmentation,
+            ) if walls_v5 else []
+            p, r = score_openings(b.gt_openings, b.gt_walls, ops_v5, walls_v5)
+            print(f"openings[v5]   P={p:.2f} R={r:.2f}  n={len(ops_v5)}")
+        except Exception as exc:
+            import traceback; traceback.print_exc()
+            print(f"walls[v5]      CRASHED: {exc}")
+
         # ── walls: v1 (no labels — the field champion) ──
         from cloud2bim.legacy import detect_walls_v1, detect_openings_v1
         t1 = time.time()
