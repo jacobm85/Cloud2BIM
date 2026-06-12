@@ -148,6 +148,14 @@ def _opening_from_cluster(
     z_max = float(cluster_pts[:, 2].max())
 
     wall_top = wall.z_placement + wall.height
+    # Geometry overrides the label: a "window" whose points reach (near)
+    # the floor and span door height is a glazed door — S3DIS-trained
+    # models label glass doors as windows, and the user gets an opening
+    # floating above the floor where a door belongs.
+    if (kind == "window"
+            and z_min <= wall.z_placement + 0.35
+            and z_max - wall.z_placement >= cfg.door_min_height):
+        kind = "door"
     if kind == "door":
         # Doors start at the floor. The scanner rarely sees points at the
         # threshold itself (it's open!), so the lowest labelled point can

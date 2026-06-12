@@ -809,7 +809,12 @@ def detect_openings_v4(
         along = rel @ u
         in_seg = (along >= 0) & (along <= length)
         zz = pts_w[:, 2]
-        in_z = (zz >= wall.z_placement) & (zz <= wall.z_placement + wall.height)
+        # Skip the floor band: floor-surface points inside the wall band
+        # occupy the raster's bottom row everywhere, so no hole could
+        # ever "touch the floor" and every door classified as a window.
+        FLOOR_SKIP = 0.12
+        z_base = wall.z_placement + FLOOR_SKIP
+        in_z = (zz >= z_base) & (zz <= wall.z_placement + wall.height)
         sel = band & in_seg & in_z
         if int(sel.sum()) < 100:
             continue
@@ -818,12 +823,13 @@ def detect_openings_v4(
         # cell so surface coverage reads as solid. A fixed pixel below the
         # point spacing turns the whole facade into Swiss cheese and the
         # openings drown in one giant "empty" component.
-        rho = float(sel.sum()) / max(length * wall.height, 1e-6)
+        raster_h = wall.height - FLOOR_SKIP
+        rho = float(sel.sum()) / max(length * raster_h, 1e-6)
         pixel = float(np.clip(np.sqrt(6.0 / max(rho, 1.0)), 0.03, 0.15))
         n_a = max(4, int(np.ceil(length / pixel)))
-        n_z = max(4, int(np.ceil(wall.height / pixel)))
+        n_z = max(4, int(np.ceil(raster_h / pixel)))
         ia = np.clip((along[sel] / pixel).astype(int), 0, n_a - 1)
-        iz = np.clip(((zz[sel] - wall.z_placement) / pixel).astype(int),
+        iz = np.clip(((zz[sel] - z_base) / pixel).astype(int),
                      0, n_z - 1)
         raster = np.zeros((n_z, n_a), np.uint8)
         raster[iz, ia] = 1
@@ -852,11 +858,14 @@ def detect_openings_v4(
             fill = area / max(1, ww * hh)
             if fill < OPENING_MIN_FILL:
                 continue
-            z0 = wall.z_placement + y * pixel
+            z0 = z_base + y * pixel
             z1 = z0 + height_m
-            touches_floor = y <= 1
+            # "Reaches the floor" = hole bottom within ~35 cm of the slab
+            # (raster bottom already sits FLOOR_SKIP up, and thresholds,
+            # skirting boards and floor spill blur the lowest rows).
+            touches_floor = z0 <= wall.z_placement + 0.35
             kind = None
-            if touches_floor and height_m >= cfg.door_min_height \
+            if touches_floor and (z1 - wall.z_placement) >= cfg.door_min_height \
                     and 0.55 <= width_m <= DOOR_MAX_WIDTH:
                 kind = "door"
             elif (not touches_floor) and width_m >= cfg.min_window_width \
