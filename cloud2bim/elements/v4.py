@@ -452,6 +452,7 @@ def _walls_from_clusters(clusters, cells_raw, h, z_floor, storey_idx, cfg,
     # they host — keep the longer of an overlapping pair.
     from cloud2bim.v5.plan import _dedupe_parallel
     axes, thicknesses = _dedupe_parallel(axes, thicknesses)
+    axes, thicknesses = _drop_isolated_stubs(axes, thicknesses)
 
     if len(axes) > cfg.max_walls_per_storey:
         order = np.argsort([-float(np.hypot(a[1][0] - a[0][0], a[1][1] - a[0][1]))
@@ -647,6 +648,46 @@ def _face_midline(ax1, ax2) -> tuple[list, float]:
     p2 = base + hi * u
     return ([[float(p1[0]), float(p1[1])], [float(p2[0]), float(p2[1])]],
             abs(off2))
+
+
+def _drop_isolated_stubs(axes: list, thicknesses: list[float],
+                         max_len: float = 2.6, clearance: float = 0.6):
+    """Drop short walls that connect to nothing.
+
+    A desk row with a cable tray running to the ceiling passes vertical
+    persistence (desk fills the bottom slices, the tray the rest) and
+    becomes a free-standing 1–2 m "wall" in the middle of the room.
+    Real walls of that length virtually always meet another wall at one
+    end; furniture rows float. Walls longer than ``max_len`` are kept
+    unconditionally — free-standing partitions of real size survive.
+    """
+    if len(axes) <= 1:
+        return axes, thicknesses
+    from cloud2bim.geometry.lines import distance_point_to_line
+
+    keep = []
+    for i, ax in enumerate(axes):
+        L = float(np.hypot(ax[1][0] - ax[0][0], ax[1][1] - ax[0][1]))
+        if L >= max_len:
+            keep.append(i)
+            continue
+        attached = False
+        for j, other in enumerate(axes):
+            if i == j:
+                continue
+            for k in (0, 1):
+                if distance_point_to_line(ax[k], other[0], other[1]) <= clearance:
+                    attached = True
+                    break
+            if attached:
+                break
+        if attached:
+            keep.append(i)
+        else:
+            log.info("v4 walls: dropping isolated %.1f m stub at "
+                     "(%.1f, %.1f) — free-standing furniture signature",
+                     L, ax[0][0], ax[0][1])
+    return [axes[i] for i in keep], [thicknesses[i] for i in keep]
 
 
 def _merge_across_openings(axes: list, thicknesses: list[float],
@@ -930,7 +971,11 @@ def detect_openings_v4(
             area = len(sub_z)
             if x == 0 or x + ww >= n_a:       # touches wall end → not a hole
                 continue
-            if y + hh >= n_z:                 # touches ceiling → shadow band
+            if y + hh >= n_z and y * pixel < 0.30:
+                # Full-height void = scan shadow. But a hole that REACHES
+                # the ceiling while standing on a real parapet (sill
+                # evidence below it) is a window up to the soffit —
+                # shadows have no parapet, they run to the floor.
                 continue
             # Require support in most along-columns — a fully unscanned
             # strip is a shadow, but shadows also eat *parts* of real
