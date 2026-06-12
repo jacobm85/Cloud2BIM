@@ -65,12 +65,29 @@ från körning med något äldre v4-kod, v1-raderna opåverkade.
   takzon 1,71–2,15 m som EN slab (undertak+installation+stomme),
   13 väggar med trovärdiga tjocklekar på 1 s. Se temp/ (ej i git).
 
+**Uppdatering 2026-06-12 em (b7b8d4d)** — ocklusionsmedveten persistens
+(occuperade/tillgängliga skivor i stället för absolut andel) + bästa-
+vägg-projektion för etikettkluster + portmerge-toleranser:
+
+| Noisy | kontor | bostad | vård | industri | garage | kontor30 |
+|-------|--------|--------|------|----------|--------|----------|
+| väggar F1 | 0.96 | 0.86 | 0.78 | 0.92 | 0.89 | **0.92** |
+| öppn. R   | 0.75 | 0.29 | **0.79** | **0.67** | 0.00 | 0.44 |
+
+**Blekinge-validering** (287M pkt flervåningsbyggnad, ingen ML, ingen
+GPU): korrekt nivåstruktur — golv (täckning 0,77) + trippelskiktad
+takzon (undertak 7,40/7,50 + stomme 7,66) grupperad till EN slab;
+205 väggar + 66 öppningar (24 dörrar) på 143 s. Tydlig korridor- och
+rumsstruktur i preview (temp/blekinge_v4_preview.png).
+
 **Kvarvarande v4-svagheter** (fortsättning på task #9):
-1. Öppningar under brus: R 0,29–0,75 (skuggor blockerar col_support;
-   etikettunionens klustertrösklar). ML-raden klarar R 0,67–1,00 på
-   samma data — unionen ska upp till det.
-2. kontor30 (roterat): fönsterbandsväggen fragmenteras, F1 0,81 clean.
-3. vård noisy R=0,65: korta korridorväggar under skuggor.
+1. Garage-porten under extremskugga: 0 öppningar (väggen förblir
+   delad; syntetskuggorna är hårdare än multi-skanner-verklighet).
+2. bostad noisy öppningar R=0,29 — små etikettkluster försvinner i
+   skugga (datagräns snarare än algoritmfel).
+3. Blekinge: vissa väggtjocklekar ser för feta ut i preview —
+   verifiera tjockleksskattningen mot kända väggar.
+4. Prestanda storvåning: 139 s (DBSCAN + 205 fasadraster) — profilera.
 
 ## Saknas ännu i bänken
 
