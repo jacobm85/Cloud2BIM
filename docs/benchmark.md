@@ -95,12 +95,26 @@ rumsstruktur i preview (temp/blekinge_v4_preview.png).
 - Clean axelfel nu 0,6–6,4 cm (utom bostad 10,3 = okänd 40 cm-yttervägg
   mot 30 cm-antagande); noisy F1 0,78–0,96.
 
-**Kvarvarande v4-svagheter** (fortsättning på task #9):
-1. Garage-porten under extremskugga: 0 öppningar (väggen förblir
-   delad; syntetskuggorna är hårdare än multi-skanner-verklighet).
-2. bostad noisy öppningar R=0,29 — små etikettkluster försvinner i
-   skugga (datagräns snarare än algoritmfel).
-3. vård noisy väggar R=0,70 — korta rumsavskiljare i djup skugga.
+**Slutläge 2026-06-12 (dcd2410)** — efter IFC-granskningens peelingfixar
+(e6ff7df), etikettevidens i gap-mergen och flerstations-skuggmodell:
+
+| | kontor | bostad | vård | industri | garage | kontor30 | kontor2v |
+|---|---|---|---|---|---|---|---|
+| Clean F1 | 1.00 | 0.93 | 1.00 | 1.00 | 1.00 | 0.96 | 1.00 |
+| Noisy F1 | 0.92 | 0.88 | 0.91 | **1.00** | **1.00** | 0.83 | — |
+| Öppn. noisy P/R | .87/.81 | 1.0/.57 | **1.0/1.0** | 1.0/.83 | **1.0/1.0** | 1.0/.44 | — |
+
+Blekinge wizardkedja: 115 väggar, 49+49 dörr/fönster, 117/117 giltiga
+IFC-geometrier, ~25 s end-to-end. Viktig granskningsläxa: de "saknade
+tvärväggarna" var kompaktarkivhyllor — verifiera "missar" mot rådata
+innan algoritmen ändras.
+
+**Kvarvarande svagheter:**
+1. kontor30 noisy P=0,71 / öppningar R=0,44 — roterade scenariot släpar
+   konsekvent; fragmenten snappar inte ihop lika rent som axisalignerat.
+2. bostad noisy öppningar R=0,57 — små etikettkluster i skugga
+   (datagräns).
+3. Slutvalidering: GPU-wizard på servern med ML-segmentering + v4.
 
 ## Saknas ännu i bänken
 
