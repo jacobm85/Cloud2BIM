@@ -865,8 +865,19 @@ def detect_openings_v4(
         ia = np.clip((along[sel] / pixel).astype(int), 0, n_a - 1)
         iz = np.clip(((zz[sel] - z_base) / pixel).astype(int),
                      0, n_z - 1)
-        raster = np.zeros((n_z, n_a), np.uint8)
-        raster[iz, ia] = 1
+        # Density-thresholded occupancy: glass panes return SOME points
+        # (speckle, frames behind), and a single point per cell used to
+        # mark the whole pane as solid wall — mullioned windows then
+        # shrank to fragments. A cell is wall only with a meaningful
+        # share of the expected wall-point density.
+        counts = np.zeros((n_z, n_a), np.float32)
+        np.add.at(counts, (iz, ia), 1.0)
+        cell_expect = rho * pixel * pixel
+        # Only demand more than one point per cell when the wall is dense
+        # enough that real wall cells carry many points — otherwise a
+        # diluted scan's legitimate wall cells get blanked too.
+        thr = 2.0 if cell_expect >= 12.0 else 1.0
+        raster = (counts >= thr).astype(np.uint8)
         # Bridge residual sampling gaps so only real holes stay empty.
         raster = cv2.morphologyEx(raster, cv2.MORPH_CLOSE,
                                   np.ones((3, 3), np.uint8))
@@ -874,10 +885,25 @@ def detect_openings_v4(
         # not read as "hole": require some support in each along-column.
         col_support = raster.sum(axis=0) > 0
 
-        empty = (raster == 0).astype(np.uint8)
-        n_lab, lab_img, stats, _ = cv2.connectedComponentsWithStats(empty, 8)
+        empty_orig = raster == 0
+        # Merge panes across mullions: a spröjs is a 5–15 cm filled bar
+        # inside one window — close the EMPTY mask over that width so a
+        # mullioned window is ONE opening, while real piers (≥ 0.4 m)
+        # between adjacent windows survive. Closing only GROUPS panes;
+        # all size/border tests below run on the component's original
+        # empty cells, since the dilation step of the closing inflates
+        # holes into the ceiling row and got real windows rejected.
+        mull = max(3, int(round(0.18 / pixel)) | 1)
+        empty = cv2.morphologyEx(empty_orig.astype(np.uint8), cv2.MORPH_CLOSE,
+                                 np.ones((mull, mull), np.uint8))
+        n_lab, lab_img, _stats, _ = cv2.connectedComponentsWithStats(empty, 8)
         for k in range(1, n_lab):
-            x, y, ww, hh, area = stats[k]
+            sub_z, sub_a = np.nonzero((lab_img == k) & empty_orig)
+            if len(sub_z) == 0:
+                continue
+            x = int(sub_a.min()); ww = int(sub_a.max()) - x + 1
+            y = int(sub_z.min()); hh = int(sub_z.max()) - y + 1
+            area = len(sub_z)
             if x == 0 or x + ww >= n_a:       # touches wall end → not a hole
                 continue
             if y + hh >= n_z:                 # touches ceiling → shadow band
