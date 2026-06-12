@@ -313,6 +313,15 @@ def detect_walls_v4(
     if n_wall_cells < 10:
         return []
 
+    # Keep the un-closed mask for thickness measurement: closing widens a
+    # single scanned face to ~3 cell rows, which is indistinguishable from
+    # a thin two-faced wall at this resolution.
+    ix0, iy0 = np.nonzero(mask)
+    cells_raw = np.column_stack([
+        xy0[0] + (ix0 + 0.5) * PIXEL,
+        xy0[1] + (iy0 + 0.5) * PIXEL,
+    ])
+
     # Bridge small scan-shadow gaps.
     try:
         from skimage.morphology import closing, footprint_rectangle
@@ -345,22 +354,21 @@ def detect_walls_v4(
     ])
 
     from cloud2bim.extraction.walls_ml import (
-        _dbscan_xy, _extract_line_segments, _shift_outward, DBSCAN_EPS,
+        _dbscan_xy, _extract_line_segments, DBSCAN_EPS,
     )
     rng = np.random.default_rng(0)
     clusters = _dbscan_xy(cells_xy, DBSCAN_EPS, 8)
-    interior = cells_xy.mean(axis=0)
-    single_face_spread = cfg.min_thickness + PIXEL
 
+    # Raw axes only here — thickness is estimated AFTER all merging, from
+    # the evidence cells around the final axis. Line peeling often puts a
+    # thick wall's two faces in separate runs; per-run estimation then
+    # reports a single face (~3 cm) for every wall, and the two face-walls
+    # render as a doubled fat wall.
     axes, thicknesses = [], []
     for cl in clusters:
         for axis, thickness in _extract_line_segments(cl, cfg, rng):
             if axis is None or _has_nan(axis):
                 continue
-            if thickness < single_face_spread:
-                axis = _shift_outward(axis, interior,
-                                      (cfg.singleton_thickness - thickness) / 2)
-                thickness = cfg.singleton_thickness
             axes.append(axis)
             thicknesses.append(float(np.clip(
                 thickness, cfg.min_thickness, cfg.max_thickness)))
@@ -368,8 +376,12 @@ def detect_walls_v4(
         return []
 
     if cfg.regularize:
+        # collinear_offset 0.30: the two faces of a 20–30 cm wall arrive
+        # as parallel segments that far apart — they must collapse to the
+        # centreline before thickness refinement.
         axes, thicknesses = regularize_walls(
             axes, thicknesses,
+            collinear_offset=0.30,
             collinear_gap=cfg.collinear_merge_distance,
             corner_snap=max(cfg.max_thickness * 0.6, 0.45),
             min_length=cfg.min_length,
@@ -381,6 +393,8 @@ def detect_walls_v4(
         # Merge big collinear gaps only when nothing crosses them.
         axes, thicknesses = _merge_across_openings(
             axes, thicknesses, max_gap=DOOR_MAX_WIDTH + 0.5)
+
+    axes, thicknesses = _refine_thickness(axes, cells_raw, cfg)
 
     if len(axes) > cfg.max_walls_per_storey:
         order = np.argsort([-float(np.hypot(a[1][0] - a[0][0], a[1][1] - a[0][1]))
@@ -398,10 +412,195 @@ def detect_walls_v4(
     return walls
 
 
+def _refine_thickness(
+    axes: list, cells_xy: np.ndarray, cfg: WallConfig,
+) -> tuple[list, list[float]]:
+    """Pair wall faces and re-estimate thickness from evidence cells.
+
+    The persistence mask is essentially one cell-row per scanned wall
+    FACE, so line peeling emits each face of a thick wall as its own
+    axis. Pairing: two near-parallel axes whose perpendicular distance
+    is a plausible wall thickness and that overlap along their length
+    are the two faces of ONE wall — replace them with the midline.
+    Leftover single faces get singleton_thickness shifted away from the
+    building interior.
+    """
+    from cloud2bim.extraction.walls_ml import _shift_outward
+
+    interior = cells_xy.mean(axis=0)
+
+    # Measure each axis: is the perpendicular cell distribution bimodal
+    # (two faces of one wall → distance between modes = thickness) or one
+    # contiguous blob (a single noisy face is 2–4 cell rows wide — plain
+    # spread can't tell that apart from a thin two-faced wall)?
+    measured: list[float] = []   # face distance; 0.0 = single face
+    offsets: list[float] = []    # midline offset to apply when two-faced
+    for ax in axes:
+        a = np.asarray(ax[0], float)
+        b = np.asarray(ax[1], float)
+        d = b - a
+        length = float(np.hypot(*d))
+        if length < 1e-6:
+            measured.append(0.0)
+            offsets.append(0.0)
+            continue
+        u = d / length
+        n_vec = np.array([-u[1], u[0]])
+        rel = cells_xy - a
+        along = rel @ u
+        perp = rel @ n_vec
+        # Stay clear of the segment ends: crossing walls' cell rows run
+        # right through the corner zone perpendicular to this axis and
+        # contaminate the perp distribution (an L-corner reads as 40 cm
+        # of "thickness" otherwise).
+        end_margin = min(0.35, 0.25 * length)
+        near = (np.abs(perp) <= cfg.max_thickness / 2 + 2 * PIXEL) \
+            & (along >= end_margin) & (along <= length - end_margin)
+        face_dist, mid_off = 0.0, 0.0
+        if int(near.sum()) >= 6:
+            order_p = np.argsort(perp[near])
+            p = perp[near][order_p]
+            al = along[near][order_p]
+            splits = np.where(np.diff(p) > 2 * PIXEL)[0] + 1
+            # A perp-group only counts as a wall FACE if it runs along
+            # most of the axis. A car/cabinet parked against the wall
+            # forms a perp-group too, but covers a fraction of the
+            # length — counting it as a face inflates the thickness and
+            # blocks the singleton shift.
+            groups = []
+            for g_p, g_a in zip(np.split(p, splits), np.split(al, splits)):
+                if len(g_p) < 3:
+                    continue
+                bins = np.unique((g_a / 0.5).astype(np.int64))
+                coverage = len(bins) / max(1.0, length / 0.5)
+                if coverage >= 0.5:
+                    groups.append((g_p, g_a))
+            if len(groups) >= 2:
+                lo = float(np.median(groups[0][0]))
+                hi = float(np.median(groups[-1][0]))
+                face_dist = hi - lo
+                mid_off = (hi + lo) / 2
+            elif len(groups) == 1:
+                # One contiguous blob: a thin wall's two faces have no
+                # cell-row gap between them at 3 cm resolution. A single
+                # noisy face is 1–2 rows; anything wider is a wall. The
+                # spread must be measured AFTER removing the linear trend
+                # — a slightly tilted axis makes one straight cell row
+                # smear several cm of apparent perp width over 30 m.
+                g_p, g_a = groups[0]
+                slope, icpt = np.polyfit(g_a, g_p, 1)
+                resid = g_p - (slope * g_a + icpt)
+                w = float(np.percentile(resid, 98) - np.percentile(resid, 2))
+                if w > 3 * PIXEL:
+                    face_dist = w
+                    mid_off = float(np.median(g_p))
+        measured.append(face_dist)
+        offsets.append(mid_off)
+
+    # pair single faces: nearest parallel partner at wall-like distance
+    n = len(axes)
+    paired = [-1] * n
+    candidates: list[tuple[float, int, int]] = []
+    for i in range(n):
+        if measured[i] > 0:
+            continue
+        for j in range(i + 1, n):
+            if measured[j] > 0:
+                continue
+            geom = _face_pair_geometry(axes[i], axes[j], cfg)
+            if geom is not None:
+                candidates.append((geom, i, j))
+    for dist, i, j in sorted(candidates):
+        if paired[i] < 0 and paired[j] < 0:
+            paired[i], paired[j] = j, i
+
+    out_axes, out_t = [], []
+    consumed: set[int] = set()
+    for i, ax in enumerate(axes):
+        if i in consumed:
+            continue
+        if measured[i] > 0:
+            # Two faces visible around this axis — recentre on their
+            # midline, thickness = face distance (+ one cell of bias).
+            a = np.asarray(ax[0], float)
+            b = np.asarray(ax[1], float)
+            d = b - a
+            length = float(np.hypot(*d))
+            u = d / length
+            n_vec = np.array([-u[1], u[0]])
+            a = a + offsets[i] * n_vec
+            b = b + offsets[i] * n_vec
+            out_axes.append([[float(a[0]), float(a[1])],
+                             [float(b[0]), float(b[1])]])
+            out_t.append(float(np.clip(
+                measured[i] + PIXEL, cfg.min_thickness, cfg.max_thickness)))
+            continue
+        j = paired[i]
+        if j >= 0:
+            consumed.add(j)
+            mid, dist = _face_midline(axes[i], axes[j])
+            out_axes.append(mid)
+            out_t.append(float(np.clip(
+                dist + PIXEL, cfg.min_thickness, cfg.max_thickness)))
+            continue
+        out_axes.append(_shift_outward(ax, interior,
+                                       cfg.singleton_thickness / 2))
+        out_t.append(cfg.singleton_thickness)
+    log.info("v4 walls: thickness refinement %d axes -> %d walls "
+             "(%d face pairs)", n, len(out_axes), len(consumed))
+    return out_axes, out_t
+
+
+def _face_pair_geometry(ax1, ax2, cfg: WallConfig) -> float | None:
+    """Perpendicular distance if two axes look like faces of one wall."""
+    a1 = np.asarray(ax1, float)
+    a2 = np.asarray(ax2, float)
+    d1 = a1[1] - a1[0]
+    d2 = a2[1] - a2[0]
+    l1, l2 = float(np.hypot(*d1)), float(np.hypot(*d2))
+    if l1 < 1e-6 or l2 < 1e-6:
+        return None
+    u = d1 / l1
+    if abs(float(u @ d2)) / l2 < np.cos(np.deg2rad(6)):
+        return None
+    n_vec = np.array([-u[1], u[0]])
+    dist = abs(float(((a2[0] - a1[0]) @ n_vec + (a2[1] - a1[0]) @ n_vec) / 2))
+    if not (cfg.min_thickness + PIXEL <= dist <= cfg.max_thickness):
+        return None
+    s = sorted([float((a2[0] - a1[0]) @ u), float((a2[1] - a1[0]) @ u)])
+    overlap = min(s[1], l1) - max(s[0], 0.0)
+    if overlap < 0.5 * min(l1, l2) or overlap < cfg.pair_min_overlap:
+        return None
+    return dist
+
+
+def _face_midline(ax1, ax2) -> tuple[list, float]:
+    """Midline spanning the union of two face projections + face distance."""
+    a1 = np.asarray(ax1, float)
+    a2 = np.asarray(ax2, float)
+    d1 = a1[1] - a1[0]
+    l1 = float(np.hypot(*d1))
+    u = d1 / l1
+    n_vec = np.array([-u[1], u[0]])
+    off2 = float(((a2[0] - a1[0]) @ n_vec + (a2[1] - a1[0]) @ n_vec) / 2)
+    ts = [0.0, l1, float((a2[0] - a1[0]) @ u), float((a2[1] - a1[0]) @ u)]
+    lo, hi = min(ts), max(ts)
+    base = a1[0] + (off2 / 2) * n_vec
+    p1 = base + lo * u
+    p2 = base + hi * u
+    return ([[float(p1[0]), float(p1[1])], [float(p2[0]), float(p2[1])]],
+            abs(off2))
+
+
 def _merge_across_openings(axes: list, thicknesses: list[float],
                            max_gap: float) -> tuple[list, list[float]]:
     """Merge collinear wall pairs across port-sized gaps that no other
-    wall crosses. Iterates to a fixpoint."""
+    wall crosses. Iterates to a fixpoint.
+
+    Hot path on large storeys (hundreds of segments → O(n²) pairs per
+    sweep) — _try_gap_merge therefore works in plain scalar floats; the
+    numpy version spent 50 s on a 205-wall hospital storey.
+    """
     changed = True
     while changed:
         changed = False
@@ -419,53 +618,65 @@ def _merge_across_openings(axes: list, thicknesses: list[float],
     return axes, thicknesses
 
 
+_COS6 = float(np.cos(np.deg2rad(6)))
+
+
 def _try_gap_merge(axes, thicknesses, i, j, max_gap):
-    a1 = np.asarray(axes[i], float)
-    a2 = np.asarray(axes[j], float)
-    d1, d2 = a1[1] - a1[0], a2[1] - a2[0]
-    l1, l2 = float(np.hypot(*d1)), float(np.hypot(*d2))
+    (x1a, y1a), (x1b, y1b) = axes[i]
+    (x2a, y2a), (x2b, y2b) = axes[j]
+    d1x, d1y = x1b - x1a, y1b - y1a
+    d2x, d2y = x2b - x2a, y2b - y2a
+    l1 = (d1x * d1x + d1y * d1y) ** 0.5
+    l2 = (d2x * d2x + d2y * d2y) ** 0.5
     if l1 < 1e-6 or l2 < 1e-6:
         return None
-    u1 = d1 / l1
-    ang = abs(float(u1 @ (d2 / l2)))
-    if ang < np.cos(np.deg2rad(6)):
+    ux, uy = d1x / l1, d1y / l1
+    if abs((ux * d2x + uy * d2y) / l2) < _COS6:
         return None
-    n_vec = np.array([-u1[1], u1[0]])
-    off = float(np.mean((a2 - a1[0]) @ n_vec))
+    nx_, ny_ = -uy, ux
+    off = ((x2a - x1a) * nx_ + (y2a - y1a) * ny_
+           + (x2b - x1a) * nx_ + (y2b - y1a) * ny_) / 2
     if abs(off) > 0.30:
         return None
-    t1 = sorted(((a1[0] - a1[0]) @ u1, (a1[1] - a1[0]) @ u1))
-    t2 = sorted(((a2[0] - a1[0]) @ u1, (a2[1] - a1[0]) @ u1))
-    gap_lo, gap_hi = min(t1[1], t2[1]), max(t1[0], t2[0])
+    s2a = (x2a - x1a) * ux + (y2a - y1a) * uy
+    s2b = (x2b - x1a) * ux + (y2b - y1a) * uy
+    t1_lo, t1_hi = (0.0, l1)
+    t2_lo, t2_hi = (s2a, s2b) if s2a <= s2b else (s2b, s2a)
+    gap_lo = min(t1_hi, t2_hi)
+    gap_hi = max(t1_lo, t2_lo)
     gap = gap_hi - gap_lo
     if gap <= 0 or gap > max_gap:
         return None
     # Does any other wall cross the gap segment?
-    g1 = a1[0] + gap_lo * u1
-    g2 = a1[0] + gap_hi * u1
+    g1 = (x1a + gap_lo * ux, y1a + gap_lo * uy)
+    g2 = (x1a + gap_hi * ux, y1a + gap_hi * uy)
     for k, ax in enumerate(axes):
-        if k in (i, j):
+        if k == i or k == j:
             continue
-        if _segments_cross([g1.tolist(), g2.tolist()], ax):
+        if _segments_cross([g1, g2], ax):
             return None
-    lo, hi = min(t1[0], t2[0]), max(t1[1], t2[1])
-    p1 = a1[0] + lo * u1
-    p2 = a1[0] + hi * u1
-    return ([[float(p1[0]), float(p1[1])], [float(p2[0]), float(p2[1])]],
+    lo = min(t1_lo, t2_lo)
+    hi = max(t1_hi, t2_hi)
+    p1 = (x1a + lo * ux, y1a + lo * uy)
+    p2 = (x1a + hi * ux, y1a + hi * uy)
+    return ([[p1[0], p1[1]], [p2[0], p2[1]]],
             max(thicknesses[i], thicknesses[j]))
 
 
 def _segments_cross(s1, s2) -> bool:
-    """Proper segment intersection test (endpoints inclusive-ish)."""
-    p = np.asarray(s1[0], float)
-    r = np.asarray(s1[1], float) - p
-    q = np.asarray(s2[0], float)
-    s = np.asarray(s2[1], float) - q
-    denom = float(r[0] * s[1] - r[1] * s[0])
+    """Proper segment intersection test (endpoints inclusive-ish).
+
+    Scalar floats on purpose — called O(n³) times in the worst case."""
+    px, py = s1[0]
+    rx, ry = s1[1][0] - px, s1[1][1] - py
+    qx, qy = s2[0]
+    sx, sy = s2[1][0] - qx, s2[1][1] - qy
+    denom = rx * sy - ry * sx
     if abs(denom) < 1e-12:
         return False
-    t = float(((q - p)[0] * s[1] - (q - p)[1] * s[0]) / denom)
-    u = float(((q - p)[0] * r[1] - (q - p)[1] * r[0]) / denom)
+    dqx, dqy = qx - px, qy - py
+    t = (dqx * sy - dqy * sx) / denom
+    u = (dqx * ry - dqy * rx) / denom
     return -0.05 <= t <= 1.05 and -0.05 <= u <= 1.05
 
 
@@ -503,10 +714,38 @@ def detect_openings_v4(
         log.warning("v4 openings: cv2 missing — skipping")
         return []
 
-    door_mask_pts = window_mask_pts = None
-    if semantic_labels is not None and seg_cfg is not None:
-        door_mask_pts = semantic_labels.mask_for(seg_cfg.door_classes)
-        window_mask_pts = semantic_labels.mask_for(seg_cfg.window_classes)
+    # Coarse spatial hash: each wall only needs points within ~0.5 m of
+    # its own line. Filtering all N storey points per wall cost 86 s for
+    # a 205-wall hospital storey (205 × six vector ops over 20M points);
+    # gathering candidate bins along the wall is ~100× less data.
+    BIN = 2.0
+    bx = np.floor(storey_points[:, 0] / BIN).astype(np.int64)
+    by = np.floor(storey_points[:, 1] / BIN).astype(np.int64)
+    bin_key = (bx + (1 << 30)) * (1 << 32) + (by + (1 << 30))
+    order = np.argsort(bin_key, kind="stable")
+    sorted_keys = bin_key[order]
+    uniq_keys, starts = np.unique(sorted_keys, return_index=True)
+    bounds = {int(k): (int(s), int(e)) for k, s, e in zip(
+        uniq_keys, starts, list(starts[1:]) + [len(sorted_keys)])}
+
+    def _points_near(a, b, margin):
+        cells = set()
+        n_steps = max(2, int(np.hypot(b[0] - a[0], b[1] - a[1]) / BIN * 2) + 2)
+        for s_frac in np.linspace(0.0, 1.0, n_steps):
+            px = a[0] + s_frac * (b[0] - a[0])
+            py = a[1] + s_frac * (b[1] - a[1])
+            cx0 = int(np.floor((px - margin) / BIN))
+            cy0 = int(np.floor((py - margin) / BIN))
+            cx1 = int(np.floor((px + margin) / BIN))
+            cy1 = int(np.floor((py + margin) / BIN))
+            for cx in range(cx0, cx1 + 1):
+                for cy in range(cy0, cy1 + 1):
+                    cells.add((cx + (1 << 30)) * (1 << 32) + (cy + (1 << 30)))
+        idx_parts = [order[s:e] for c in cells
+                     for (s, e) in [bounds.get(int(c), (0, 0))] if e > s]
+        if not idx_parts:
+            return np.empty(0, np.int64)
+        return np.concatenate(idx_parts)
 
     openings: List[Opening] = []
     for w_idx, wall in enumerate(walls):
@@ -518,12 +757,16 @@ def detect_openings_v4(
             continue
         u = d / length
         n_vec = np.array([-u[1], u[0]])
-        rel = storey_points[:, :2] - a
+        cand = _points_near(a, b, max(wall.thickness / 2 + 0.07, 0.15) + 0.1)
+        if len(cand) < 100:
+            continue
+        pts_w = storey_points[cand]
+        rel = pts_w[:, :2] - a
         perp = rel @ n_vec
         band = np.abs(perp) <= max(wall.thickness / 2 + 0.07, 0.15)
         along = rel @ u
         in_seg = (along >= 0) & (along <= length)
-        zz = storey_points[:, 2]
+        zz = pts_w[:, 2]
         in_z = (zz >= wall.z_placement) & (zz <= wall.z_placement + wall.height)
         sel = band & in_seg & in_z
         if int(sel.sum()) < 100:
